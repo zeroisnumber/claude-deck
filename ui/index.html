@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Deck</title>
+  <link rel="stylesheet" href="vendor/xterm.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 사이드바 -->
+    <aside id="sidebar">
+      <header id="side-head">
+        <div id="brand">
+          <span id="brand-mark">✻</span>
+          <span id="brand-name">Claude&nbsp;Deck</span>
+        </div>
+        <button id="btn-refresh" class="icon-btn" title="세션 목록 새로고침">⟳</button>
+      </header>
+
+      <button id="btn-new">＋ 새 세션</button>
+
+      <div id="launcher-row">
+        <div class="launcher-line" title="무엇을 실행할지 — 에이전트 명령 (재개 시 --resume <세션ID> 가 붙음)">
+          <span class="launcher-label">에이전트</span>
+          <select id="agent-select"></select>
+        </div>
+        <div class="launcher-line" title="어떻게 실행할지 — 에이전트 명령 앞에 붙는 프록시/래퍼 접두사">
+          <span class="launcher-label">래퍼</span>
+          <select id="wrapper-select"></select>
+          <button id="btn-launcher-edit" class="icon-btn" title="에이전트/래퍼 편집">⚙</button>
+        </div>
+      </div>
+
+      <div id="search-wrap">
+        <input id="search" type="text" placeholder="세션 검색…" spellcheck="false" />
+      </div>
+
+      <nav id="session-list"></nav>
+
+      <footer id="side-foot">
+        <span id="foot-count"></span>
+        <button id="btn-update" class="hidden" title="새 버전 다운로드 및 설치">업데이트</button>
+      </footer>
+    </aside>
+
+    <!-- 메인 -->
+    <main id="main">
+      <div id="tabs"></div>
+
+      <div id="term-area">
+        <div id="empty-state">
+          <div class="empty-mark">✻</div>
+          <div class="empty-title">Claude Deck</div>
+          <div class="empty-sub">왼쪽에서 세션을 선택하면 이 자리에서 CLI가 그대로 실행됩니다</div>
+          <div class="empty-hints">
+            <span><kbd>클릭</kbd> 세션 열기/전환</span>
+            <span><kbd>Ctrl</kbd>+<kbd>Tab</kbd> 탭 순환</span>
+            <span><kbd>Ctrl</kbd>+<kbd>V</kbd> 붙여넣기</span>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 새 세션 모달 -->
+  <div id="modal-backdrop" class="hidden">
+    <div id="modal">
+      <div class="modal-title">새 세션 시작</div>
+      <div class="modal-sub">claude 를 실행할 프로젝트 폴더 경로</div>
+      <input id="modal-path" type="text" value="C:\workspace\" spellcheck="false" />
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn-ghost">취소</button>
+        <button id="modal-ok" class="btn-accent">시작</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 실행기 관리 모달 -->
+  <div id="lmodal-backdrop" class="hidden">
+    <div id="modal" class="lmodal">
+      <div class="modal-title">에이전트 · 래퍼 관리</div>
+      <div class="modal-sub">실행 명령 = <code>래퍼 접두사 + 에이전트 명령 + --resume &lt;세션ID&gt;</code> (재개 시)</div>
+
+      <div class="lmodal-section">에이전트 <span class="lmodal-hint">무엇을 실행하나</span></div>
+      <div id="agent-list"></div>
+      <button id="agent-add" class="btn-ghost btn-add">＋ 에이전트 추가</button>
+
+      <div class="lmodal-section">래퍼 <span class="lmodal-hint">명령 앞에 붙는 프록시 접두사 (비우면 없음)</span></div>
+      <div id="wrapper-list"></div>
+      <button id="wrapper-add" class="btn-ghost btn-add">＋ 래퍼 추가</button>
+      <div class="modal-actions">
+        <button id="lmodal-cancel" class="btn-ghost">취소</button>
+        <button id="lmodal-save" class="btn-accent">저장</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
