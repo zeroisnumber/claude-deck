@@ -59,8 +59,12 @@
   <div id="modal-backdrop" class="hidden">
     <div id="modal">
       <div class="modal-title">새 세션 시작</div>
-      <div class="modal-sub">claude 를 실행할 프로젝트 폴더 경로</div>
-      <input id="modal-path" type="text" value="C:\workspace\" spellcheck="false" />
+      <div class="modal-sub">에이전트를 실행할 프로젝트 폴더</div>
+      <div class="modal-row">
+        <input id="modal-path" type="text" value="C:\workspace\" spellcheck="false" />
+        <button id="modal-browse" class="btn-ghost">찾아보기…</button>
+      </div>
+      <div id="recent-dirs"></div>
       <div class="modal-actions">
         <button id="modal-cancel" class="btn-ghost">취소</button>
         <button id="modal-ok" class="btn-accent">시작</button>
@@ -85,6 +89,10 @@
       </div>
     </div>
   </div>
+
+  <!-- 세션 우클릭 메뉴 / hover 미리보기 -->
+  <div id="ctx-menu" class="hidden"></div>
+  <div id="preview-card" class="hidden"></div>
 
   <script src="vendor/xterm.js"></script>
   <script src="vendor/addon-fit.js"></script>

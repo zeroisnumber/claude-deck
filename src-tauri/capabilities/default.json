@@ -1,5 +1,11 @@
 {
   "identifier": "default",
   "windows": ["main"],
-  "permissions": ["core:default", "updater:default", "process:default"]
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "process:default",
+    "dialog:default",
+    "notification:default"
+  ]
 }

@@ -51,14 +51,26 @@ function timeAgo(mtime) {
 async function refreshSessions() {
   sessions = await invoke("list_sessions");
   renderSidebar();
+  restoreTabs(); // 최초 1회만 동작 (이전에 열려 있던 탭 자동 재개)
 }
+
+// 별칭 / 핀 (localStorage)
+let aliases = {};
+try { aliases = JSON.parse(localStorage.getItem("aliases")) || {}; } catch { /* 무시 */ }
+let pins = [];
+try { pins = JSON.parse(localStorage.getItem("pins")) || []; } catch { /* 무시 */ }
 
 function renderSidebar() {
   const q = $("#search").value.trim().toLowerCase();
   listEl.innerHTML = "";
   let shown = 0;
-  for (const s of sessions) {
-    const title = s.summary || s.first_prompt || "(내용 없음)";
+  const sorted = [...sessions].sort((a, b) => {
+    const pa = pins.includes(a.session_id) ? 1 : 0;
+    const pb = pins.includes(b.session_id) ? 1 : 0;
+    return pb - pa || b.mtime - a.mtime;
+  });
+  for (const s of sorted) {
+    const title = aliases[s.session_id] || s.summary || s.first_prompt || "(내용 없음)";
     const proj = basename(s.cwd);
     if (q && !(title.toLowerCase().includes(q) || proj.toLowerCase().includes(q))) continue;
     shown++;
@@ -67,18 +79,21 @@ function renderSidebar() {
     el.className = "session-item" + (s.session_id === activeId ? " active" : "");
     const t = terms.get(s.session_id);
     const dot = t ? `<span class="si-dot ${statusClass(t)}" title="${statusLabel(t)}"></span>` : "";
+    const pin = pins.includes(s.session_id) ? `<span class="si-pin">📌</span>` : "";
     el.innerHTML = `
       ${dot}
-      <div class="si-title"></div>
+      <div class="si-title">${pin}<span class="si-title-text"></span></div>
       <div class="si-meta">
         <span class="si-proj"></span>
         <span>${timeAgo(s.mtime)}</span>
         <span>· ${s.message_count}</span>
       </div>`;
-    el.querySelector(".si-title").textContent = title;
+    el.querySelector(".si-title-text").textContent = title;
     el.querySelector(".si-proj").textContent = proj;
-    el.title = `${s.cwd}\n${s.session_id}`;
     el.onclick = () => openSession(s);
+    el.oncontextmenu = (e) => { e.preventDefault(); showCtxMenu(e, s, el); };
+    el.onmouseenter = (e) => schedulePreview(el, s);
+    el.onmouseleave = hidePreview;
     listEl.appendChild(el);
   }
   const busyN = [...terms.values()].filter((t) => !t.exited && t.busy).length;
@@ -88,6 +103,95 @@ function renderSidebar() {
   $("#foot-count").textContent = `세션 ${shown}개 · 실행 ${runN} · 답변중 ${busyN}${profTag}`;
 }
 
+// ---------- 세션 우클릭 메뉴 ----------
+const ctxMenu = $("#ctx-menu");
+
+function showCtxMenu(e, s, itemEl) {
+  hidePreview();
+  const pinned = pins.includes(s.session_id);
+  ctxMenu.innerHTML = "";
+  const items = [
+    [pinned ? "📌 핀 해제" : "📌 핀 고정", () => {
+      pins = pinned ? pins.filter((x) => x !== s.session_id) : [...pins, s.session_id];
+      localStorage.setItem("pins", JSON.stringify(pins));
+      renderSidebar();
+    }],
+    ["✏️ 이름 바꾸기", () => startRename(s, itemEl)],
+    ["🗑️ 세션 삭제", async () => {
+      try {
+        const ok = await window.__TAURI__.dialog.confirm(
+          `이 세션 기록을 영구 삭제할까요?\n\n${aliases[s.session_id] || s.summary || s.first_prompt || s.session_id}`,
+          { title: "세션 삭제", kind: "warning" });
+        if (!ok) return;
+        if (terms.has(s.session_id)) await closeTab(s.session_id);
+        await invoke("delete_session", { file: s.file });
+        refreshSessions();
+      } catch { /* 무시 */ }
+    }],
+  ];
+  for (const [label, fn] of items) {
+    const d = document.createElement("div");
+    d.className = "ctx-item";
+    d.textContent = label;
+    d.onclick = () => { hideCtxMenu(); fn(); };
+    ctxMenu.appendChild(d);
+  }
+  ctxMenu.classList.remove("hidden");
+  const mw = 160;
+  ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - mw - 8) + "px";
+  ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - 120) + "px";
+}
+function hideCtxMenu() { ctxMenu.classList.add("hidden"); }
+window.addEventListener("click", hideCtxMenu);
+window.addEventListener("blur", hideCtxMenu);
+
+function startRename(s, itemEl) {
+  const span = itemEl.querySelector(".si-title-text");
+  const input = document.createElement("input");
+  input.className = "si-rename";
+  input.value = aliases[s.session_id] || s.summary || s.first_prompt || "";
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+  const commit = () => {
+    const v = input.value.trim();
+    if (v) aliases[s.session_id] = v;
+    else delete aliases[s.session_id];
+    localStorage.setItem("aliases", JSON.stringify(aliases));
+    renderSidebar();
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") commit();
+    if (e.key === "Escape") renderSidebar();
+    e.stopPropagation();
+  };
+  input.onblur = commit;
+  input.onclick = (e) => e.stopPropagation();
+}
+
+// ---------- hover 미리보기 ----------
+const previewCard = $("#preview-card");
+let previewTimer = null;
+
+function schedulePreview(el, s) {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => {
+    if (!s.last_text && !s.first_prompt) return;
+    previewCard.innerHTML = `<div class="pv-title"></div><div class="pv-body"></div><div class="pv-meta"></div>`;
+    previewCard.querySelector(".pv-title").textContent = aliases[s.session_id] || s.summary || s.first_prompt || "";
+    previewCard.querySelector(".pv-body").textContent = s.last_text || "(응답 없음)";
+    previewCard.querySelector(".pv-meta").textContent = `${s.cwd} · ${s.message_count}개 메시지`;
+    previewCard.classList.remove("hidden");
+    const r = el.getBoundingClientRect();
+    previewCard.style.left = r.right + 8 + "px";
+    previewCard.style.top = Math.min(r.top, window.innerHeight - 180) + "px";
+  }, 350);
+}
+function hidePreview() {
+  clearTimeout(previewTimer);
+  previewCard.classList.add("hidden");
+}
+
 function statusClass(t) {
   return t.exited ? "exited" : t.busy ? "busy" : "idle";
 }
@@ -95,13 +199,34 @@ function statusLabel(t) {
   return t.exited ? "종료됨" : t.busy ? "답변/작업 중" : "대기 중";
 }
 
+// ---------- 완료 알림 ----------
+async function notifyDone(id, t) {
+  // 활성 탭이고 창이 포커스면 알림 불필요 — 탭 어텐션만으로 충분한 케이스 구분
+  const inactive = id !== activeId || !document.hasFocus();
+  if (!inactive) return;
+  t.attention = true;
+  try {
+    const n = window.__TAURI__ && window.__TAURI__.notification;
+    if (!n) return;
+    let ok = await n.isPermissionGranted();
+    if (!ok) ok = (await n.requestPermission()) === "granted";
+    if (ok) n.sendNotification({ title: "✻ Claude 응답 완료", body: t.title });
+  } catch { /* 무시 */ }
+}
+
 // 1초마다 답변중/idle 판정 (최근 2초 내 PTY 출력 = 답변중)
 setInterval(() => {
   const now = Date.now();
   let changed = false;
-  for (const t of terms.values()) {
+  for (const [id, t] of terms) {
     const busy = !t.exited && now - t.lastOutput < 2000;
     if (busy !== t.busy) {
+      if (busy) {
+        t.busySince = now;
+      } else if (now - (t.busySince || now) > 5000) {
+        // 5초 이상 작업하다 멈춤 = 응답 완료로 판정 (타이핑 에코 등 짧은 활동은 제외)
+        notifyDone(id, t);
+      }
       t.busy = busy;
       changed = true;
     }
@@ -120,7 +245,7 @@ function makeTerm(id, title, cwd) {
 
   const term = new Terminal({
     fontFamily: '"Cascadia Mono", Consolas, "D2Coding", monospace',
-    fontSize: 13.5,
+    fontSize: fontSize,
     lineHeight: 1.25,
     letterSpacing: 0,
     cursorBlink: true,
@@ -132,23 +257,13 @@ function makeTerm(id, title, cwd) {
   term.loadAddon(fit);
   term.open(container);
 
-  // 한글 IME 조합 확정이 간헐적으로 중복 전달되는 xterm.js 버그 완화:
-  // 동일한 한글 포함 청크가 25ms 내 연속 도착하면 중복으로 보고 무시
-  let lastData = "", lastDataTime = 0;
-  term.onData((d) => {
-    const now = performance.now();
-    if (d === lastData && now - lastDataTime < 25 && /[ㄱ-힝]/.test(d)) {
-      lastDataTime = now;
-      return;
-    }
-    lastData = d;
-    lastDataTime = now;
-    invoke("write_pty", { id, data: d });
-  });
+  term.onData((d) => invoke("write_pty", { id, data: d }));
 
   // 선택 상태에서 Ctrl+C = 복사 (Ctrl+V는 브라우저 네이티브 paste에 맡김 — 중복 방지)
+  // 앱 단축키(Ctrl+Tab/1~9/Shift+W/Shift+N)는 터미널이 먹지 않게 가로챔
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
+    if (handleShortcut(e)) return false;
     if (e.ctrlKey && e.key === "c" && term.hasSelection()) {
       navigator.clipboard.writeText(term.getSelection());
       term.clearSelection();
@@ -163,34 +278,70 @@ function makeTerm(id, title, cwd) {
   return entry;
 }
 
-async function openSession(meta) {
+async function openSession(meta, focus = true) {
   const id = meta.session_id;
-  if (terms.has(id)) return activate(id);
+  if (terms.has(id)) return focus && activate(id);
 
-  const title = basename(meta.cwd) + " · " + (meta.summary || meta.first_prompt || id.slice(0, 8)).slice(0, 24);
+  const title = basename(meta.cwd) + " · " + (aliases[id] || meta.summary || meta.first_prompt || id.slice(0, 8)).slice(0, 24);
   const entry = makeTerm(id, title, meta.cwd);
   entry.profile = currentProfile();
-  activate(id);
+  entry.spawnCommand = composeCommand(id);
+  if (focus) activate(id);
+  else renderTabs();
   await invoke("spawn_pty", {
-    id, cwd: meta.cwd, command: composeCommand(id),
+    id, cwd: meta.cwd, command: entry.spawnCommand,
     cols: entry.term.cols, rows: entry.term.rows,
   });
+  saveOpenTabs();
 }
 
 async function openNewSession(cwd) {
   const id = "new-" + Date.now();
   const entry = makeTerm(id, basename(cwd) + " · 새 세션", cwd);
   entry.profile = currentProfile();
+  entry.spawnCommand = composeCommand(null);
   activate(id);
   await invoke("spawn_pty", {
-    id, cwd, command: composeCommand(null),
+    id, cwd, command: entry.spawnCommand,
     cols: entry.term.cols, rows: entry.term.rows,
   });
+  addRecentDir(cwd);
   setTimeout(refreshSessions, 4000);
+}
+
+async function restartTab(id) {
+  const t = terms.get(id);
+  if (!t || !t.exited) return;
+  t.exited = false;
+  t.attention = false;
+  t.term.write("\r\n\x1b[38;5;244m── 재시작 ──\x1b[0m\r\n\r\n");
+  activate(id);
+  await invoke("spawn_pty", {
+    id, cwd: t.cwd, command: t.spawnCommand || "claude",
+    cols: t.term.cols, rows: t.term.rows,
+  });
+}
+
+// ---------- 탭 복원 ----------
+function saveOpenTabs() {
+  const tabs = tabOrder.filter((id) => !id.startsWith("new-"));
+  localStorage.setItem("openTabs", JSON.stringify(tabs));
+}
+
+let restored = false;
+function restoreTabs() {
+  if (restored) return;
+  restored = true;
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem("openTabs")) || []; } catch { /* 무시 */ }
+  const toOpen = saved.map((sid) => sessions.find((s) => s.session_id === sid)).filter(Boolean);
+  toOpen.forEach((meta, i) => openSession(meta, i === 0));
 }
 
 function activate(id) {
   activeId = id;
+  const cur = terms.get(id);
+  if (cur) cur.attention = false;
   for (const [tid, t] of terms) {
     t.container.classList.toggle("visible", tid === id);
   }
@@ -213,6 +364,7 @@ async function closeTab(id) {
   t.container.remove();
   terms.delete(id);
   tabOrder = tabOrder.filter((x) => x !== id);
+  saveOpenTabs();
   if (activeId === id) {
     activeId = null;
     const rest = tabOrder;
@@ -230,10 +382,10 @@ function renderTabs() {
     const t = terms.get(id);
     if (!t) continue;
     const el = document.createElement("div");
-    el.className = "tab" + (id === activeId ? " active" : "") + (t.exited ? " exited" : "");
+    el.className = "tab" + (id === activeId ? " active" : "") + (t.exited ? " exited" : "") + (t.attention ? " attention" : "");
     el.dataset.id = id;
     const showBadge = t.profile && t.profile.cmd !== "claude";
-    el.innerHTML = `<span class="tab-dot ${statusClass(t)}" title="${statusLabel(t)}"></span><span class="tab-label"></span>${showBadge ? '<span class="tab-badge"></span>' : ""}<button class="tab-close" title="닫기">✕</button>`;
+    el.innerHTML = `<span class="tab-dot ${statusClass(t)}" title="${statusLabel(t)}"></span><span class="tab-label"></span>${showBadge ? '<span class="tab-badge"></span>' : ""}${t.exited ? '<button class="tab-restart" title="다시 시작">↻</button>' : ""}<button class="tab-close" title="닫기">✕</button>`;
     el.querySelector(".tab-label").textContent = t.title;
     if (showBadge) {
       const b = el.querySelector(".tab-badge");
@@ -242,6 +394,8 @@ function renderTabs() {
     }
     el.onclick = () => { if (!suppressClick) activate(id); };
     el.querySelector(".tab-close").onclick = (e) => { e.stopPropagation(); closeTab(id); };
+    const rbtn = el.querySelector(".tab-restart");
+    if (rbtn) rbtn.onclick = (e) => { e.stopPropagation(); restartTab(id); };
     makeTabDraggable(el);
     tabsEl.appendChild(el);
   }
@@ -424,9 +578,35 @@ $("#lmodal-save").onclick = () => {
 $("#btn-refresh").onclick = refreshSessions;
 $("#search").oninput = renderSidebar;
 
-$("#btn-new").onclick = () => {
+// ---------- 새 세션 모달 (폴더 선택 + 최근 폴더) ----------
+function getRecentDirs() {
+  try { return JSON.parse(localStorage.getItem("recentDirs")) || []; } catch { return []; }
+}
+function addRecentDir(dir) {
+  const list = [dir, ...getRecentDirs().filter((d) => d !== dir)].slice(0, 8);
+  localStorage.setItem("recentDirs", JSON.stringify(list));
+}
+function openNewModal() {
+  const wrap = $("#recent-dirs");
+  wrap.innerHTML = "";
+  for (const d of getRecentDirs()) {
+    const chip = document.createElement("button");
+    chip.className = "dir-chip";
+    chip.textContent = basename(d);
+    chip.title = d;
+    chip.onclick = () => { $("#modal-path").value = d; };
+    chip.ondblclick = () => { $("#modal-backdrop").classList.add("hidden"); openNewSession(d); };
+    wrap.appendChild(chip);
+  }
   $("#modal-backdrop").classList.remove("hidden");
   $("#modal-path").focus();
+}
+$("#btn-new").onclick = openNewModal;
+$("#modal-browse").onclick = async () => {
+  try {
+    const d = await window.__TAURI__.dialog.open({ directory: true, defaultPath: $("#modal-path").value });
+    if (d) $("#modal-path").value = d;
+  } catch { /* 무시 */ }
 };
 $("#modal-cancel").onclick = () => $("#modal-backdrop").classList.add("hidden");
 $("#modal-ok").onclick = () => {
@@ -441,16 +621,51 @@ $("#modal-path").addEventListener("keydown", (e) => {
   if (e.key === "Escape") $("#modal-cancel").click();
 });
 
-// Ctrl+Tab 탭 순환
-window.addEventListener("keydown", (e) => {
-  if (e.ctrlKey && e.key === "Tab") {
-    e.preventDefault();
+// ---------- 단축키 ----------
+// Ctrl+Tab 탭 순환, Ctrl+1~9 탭 이동, Ctrl+Shift+W 탭 닫기, Ctrl+Shift+N 새 세션
+function handleShortcut(e) {
+  if (!e.ctrlKey) return false;
+  if (e.key === "Tab") {
     const ids = tabOrder;
-    if (ids.length < 2) return;
+    if (ids.length < 2) return true;
     const i = ids.indexOf(activeId);
     activate(ids[(i + (e.shiftKey ? -1 : 1) + ids.length) % ids.length]);
+    return true;
   }
+  if (!e.shiftKey && e.key >= "1" && e.key <= "9") {
+    const idx = parseInt(e.key, 10) - 1;
+    if (tabOrder[idx]) activate(tabOrder[idx]);
+    return true;
+  }
+  if (e.shiftKey && e.key.toLowerCase() === "w") {
+    if (activeId) closeTab(activeId);
+    return true;
+  }
+  if (e.shiftKey && e.key.toLowerCase() === "n") {
+    openNewModal();
+    return true;
+  }
+  return false;
+}
+window.addEventListener("keydown", (e) => {
+  if (handleShortcut(e)) e.preventDefault();
 });
+
+// Ctrl+휠 폰트 크기 조절
+let fontSize = parseFloat(localStorage.getItem("fontSize")) || 13.5;
+termArea.addEventListener("wheel", (e) => {
+  if (!e.ctrlKey) return;
+  e.preventDefault();
+  fontSize = Math.min(22, Math.max(9, fontSize + (e.deltaY < 0 ? 1 : -1)));
+  localStorage.setItem("fontSize", String(fontSize));
+  for (const [id, t] of terms) {
+    t.term.options.fontSize = fontSize;
+    if (id === activeId) {
+      t.fit.fit();
+      invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
+    }
+  }
+}, { passive: false });
 
 // ---------- 자동 업데이트 ----------
 async function checkUpdate() {
