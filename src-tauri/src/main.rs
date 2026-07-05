@@ -131,6 +131,7 @@ fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String> {
 #[derive(Serialize)]
 struct SessionMeta {
     session_id: String,
+    agent: String, // "claude" | "codex" | "gemini"
     cwd: String,
     summary: Option<String>,
     first_prompt: Option<String>,
@@ -138,6 +139,36 @@ struct SessionMeta {
     message_count: u32,
     mtime: f64,
     file: String,
+}
+
+fn file_mtime(path: &std::path::Path) -> f64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// 큰 파일은 head+tail만 읽는다 (codex rollout은 시스템 프롬프트 포함으로 수 MB 가능)
+fn read_head_tail(path: &std::path::Path, limit: u64) -> Option<String> {
+    use std::io::{Read as _, Seek, SeekFrom};
+    let size = fs::metadata(path).ok()?.len();
+    if size <= limit {
+        return fs::read_to_string(path).ok();
+    }
+    let mut f = fs::File::open(path).ok()?;
+    let half = limit / 2;
+    let mut head = vec![0u8; half as usize];
+    f.read_exact(&mut head).ok()?;
+    f.seek(SeekFrom::End(-(half as i64))).ok()?;
+    let mut tail = Vec::new();
+    f.read_to_end(&mut tail).ok()?;
+    Some(format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&head),
+        String::from_utf8_lossy(&tail)
+    ))
 }
 
 fn extract_text(content: &serde_json::Value) -> String {
@@ -160,6 +191,7 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
 
     let mut meta = SessionMeta {
         session_id: path.file_stem()?.to_string_lossy().to_string(),
+        agent: "claude".into(),
         cwd: String::new(),
         summary: None,
         first_prompt: None,
@@ -207,9 +239,147 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
     Some(meta)
 }
 
+// ---------- Codex 세션 (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl) ----------
+
+fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
+    let text = read_head_tail(path, 512 * 1024)?;
+    let mut meta = SessionMeta {
+        session_id: String::new(),
+        agent: "codex".into(),
+        cwd: String::new(),
+        summary: None,
+        first_prompt: None,
+        last_text: None,
+        message_count: 0,
+        mtime: file_mtime(path),
+        file: path.to_string_lossy().to_string(),
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        match obj["type"].as_str().unwrap_or("") {
+            "session_meta" => {
+                if let Some(id) = obj["payload"]["id"].as_str() {
+                    meta.session_id = id.to_string();
+                }
+                if let Some(c) = obj["payload"]["cwd"].as_str() {
+                    meta.cwd = c.to_string();
+                }
+            }
+            "event_msg" => match obj["payload"]["type"].as_str().unwrap_or("") {
+                "user_message" => {
+                    meta.message_count += 1;
+                    if meta.first_prompt.is_none() {
+                        if let Some(m) = obj["payload"]["message"].as_str() {
+                            let m = m.trim();
+                            if !m.is_empty() {
+                                meta.first_prompt = Some(m.chars().take(120).collect());
+                            }
+                        }
+                    }
+                }
+                "agent_message" => {
+                    meta.message_count += 1;
+                    if let Some(m) = obj["payload"]["message"].as_str() {
+                        let m = m.trim();
+                        if !m.is_empty() {
+                            meta.last_text = Some(m.chars().take(300).collect());
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    if meta.session_id.is_empty() {
+        return None;
+    }
+    Some(meta)
+}
+
+fn scan_codex(out: &mut Vec<SessionMeta>) {
+    let Some(home) = dirs::home_dir() else { return };
+    let root = home.join(".codex").join("sessions");
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+                if let Some(m) = read_codex_meta(&p) {
+                    out.push(m);
+                }
+            }
+        }
+    }
+}
+
+// ---------- Gemini 세션 (~/.gemini/tmp/<proj>/chats/session-*.json) ----------
+
+fn gemini_project_paths(home: &std::path::Path) -> std::collections::HashMap<String, String> {
+    // projects.json: { "projects": { "c:\\workspace\\foo": "foo", ... } } — 폴더명 → 실제 경로 역매핑
+    let mut map = std::collections::HashMap::new();
+    let Ok(text) = fs::read_to_string(home.join(".gemini").join("projects.json")) else { return map };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return map };
+    if let Some(obj) = v["projects"].as_object() {
+        for (path, name) in obj {
+            if let Some(n) = name.as_str() {
+                map.insert(n.to_string(), path.clone());
+            }
+        }
+    }
+    map
+}
+
+fn scan_gemini(out: &mut Vec<SessionMeta>) {
+    let Some(home) = dirs::home_dir() else { return };
+    let proj_map = gemini_project_paths(&home);
+    let root = home.join(".gemini").join("tmp");
+    let Ok(projects) = fs::read_dir(&root) else { return };
+    for proj in projects.flatten() {
+        let name = proj.file_name().to_string_lossy().to_string();
+        let chats = proj.path().join("chats");
+        let Ok(files) = fs::read_dir(&chats) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().map(|x| x == "json").unwrap_or(false) {
+                let Ok(text) = fs::read_to_string(&p) else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+                let Some(sid) = v["sessionId"].as_str() else { continue };
+                let msgs = v["messages"].as_array().cloned().unwrap_or_default();
+                let first = msgs.iter().find(|m| m["type"] == "user").and_then(|m| {
+                    m["content"].as_array().and_then(|c| c.iter().find_map(|p| p["text"].as_str()))
+                });
+                let last = msgs.iter().rev().find(|m| m["type"] != "user").and_then(|m| {
+                    m["content"].as_array().and_then(|c| c.iter().find_map(|p| p["text"].as_str()))
+                });
+                out.push(SessionMeta {
+                    session_id: sid.to_string(),
+                    agent: "gemini".into(),
+                    cwd: proj_map.get(&name).cloned().unwrap_or_else(|| name.clone()),
+                    summary: None,
+                    first_prompt: first.map(|s| s.trim().chars().take(120).collect()),
+                    last_text: last.map(|s| s.trim().chars().take(300).collect()),
+                    message_count: msgs.len() as u32,
+                    mtime: file_mtime(&p),
+                    file: p.to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
+}
+
 #[tauri::command]
 fn list_sessions() -> Vec<SessionMeta> {
     let mut out = Vec::new();
+    scan_codex(&mut out);
+    scan_gemini(&mut out);
     let Some(home) = dirs::home_dir() else { return out };
     let projects = home.join(".claude").join("projects");
     let Ok(dirs_iter) = fs::read_dir(&projects) else { return out };
@@ -241,9 +411,19 @@ fn list_sessions() -> Vec<SessionMeta> {
 #[tauri::command]
 fn delete_session(file: String) -> Result<(), String> {
     let p = PathBuf::from(&file);
-    let projects = dirs::home_dir().ok_or("no home dir")?.join(".claude").join("projects");
-    // 세션 저장소 밖의 파일 삭제 방지
-    if !p.starts_with(&projects) || p.extension().map(|e| e != "jsonl").unwrap_or(true) {
+    let home = dirs::home_dir().ok_or("no home dir")?;
+    // 알려진 세션 저장소 안의 세션 파일만 삭제 허용
+    let allowed = [
+        home.join(".claude").join("projects"),
+        home.join(".codex").join("sessions"),
+        home.join(".gemini").join("tmp"),
+    ];
+    let in_store = allowed.iter().any(|root| p.starts_with(root));
+    let is_session = p
+        .extension()
+        .map(|e| e == "jsonl" || e == "json")
+        .unwrap_or(false);
+    if !in_store || !is_session {
         return Err("invalid session file path".into());
     }
     fs::remove_file(&p).map_err(|e| e.to_string())

@@ -60,6 +60,9 @@ try { aliases = JSON.parse(localStorage.getItem("aliases")) || {}; } catch { /* 
 let pins = [];
 try { pins = JSON.parse(localStorage.getItem("pins")) || []; } catch { /* 무시 */ }
 
+const AGENT_GLYPH = { claude: "✻", codex: "❖", gemini: "✦" };
+let agentFilter = "all";
+
 function renderSidebar() {
   const q = $("#search").value.trim().toLowerCase();
   listEl.innerHTML = "";
@@ -70,6 +73,7 @@ function renderSidebar() {
     return pb - pa || b.mtime - a.mtime;
   });
   for (const s of sorted) {
+    if (agentFilter !== "all" && s.agent !== agentFilter) continue;
     const title = aliases[s.session_id] || s.summary || s.first_prompt || "(내용 없음)";
     const proj = basename(s.cwd);
     if (q && !(title.toLowerCase().includes(q) || proj.toLowerCase().includes(q))) continue;
@@ -80,9 +84,10 @@ function renderSidebar() {
     const t = terms.get(s.session_id);
     const dot = t ? `<span class="si-dot ${statusClass(t)}" title="${statusLabel(t)}"></span>` : "";
     const pin = pins.includes(s.session_id) ? `<span class="si-pin">📌</span>` : "";
+    const glyph = `<span class="si-agent ${s.agent}" title="${s.agent}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
     el.innerHTML = `
       ${dot}
-      <div class="si-title">${pin}<span class="si-title-text"></span></div>
+      <div class="si-title">${pin}${glyph}<span class="si-title-text"></span></div>
       <div class="si-meta">
         <span class="si-proj"></span>
         <span>${timeAgo(s.mtime)}</span>
@@ -199,19 +204,36 @@ function statusLabel(t) {
   return t.exited ? "종료됨" : t.busy ? "답변/작업 중" : "대기 중";
 }
 
-// ---------- 완료 알림 ----------
+// ---------- 완료 알림 (앱 내 토스트 + OS 알림) ----------
+function showToast(title, body, onClick) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.innerHTML = `<div class="toast-title"></div><div class="toast-body"></div>`;
+  el.querySelector(".toast-title").textContent = title;
+  el.querySelector(".toast-body").textContent = body;
+  el.onclick = () => { el.remove(); if (onClick) onClick(); };
+  $("#toasts").appendChild(el);
+  setTimeout(() => {
+    el.classList.add("fade");
+    setTimeout(() => el.remove(), 400);
+  }, 6000);
+}
+
 async function notifyDone(id, t) {
-  // 활성 탭이고 창이 포커스면 알림 불필요 — 탭 어텐션만으로 충분한 케이스 구분
-  const inactive = id !== activeId || !document.hasFocus();
-  if (!inactive) return;
+  // 활성 탭 + 창 포커스 상태면 사용자가 이미 보고 있음 — 알림 불필요
+  const watching = id === activeId && document.hasFocus();
+  if (watching) return;
   t.attention = true;
-  try {
-    const n = window.__TAURI__ && window.__TAURI__.notification;
-    if (!n) return;
-    let ok = await n.isPermissionGranted();
-    if (!ok) ok = (await n.requestPermission()) === "granted";
-    if (ok) n.sendNotification({ title: "✻ Claude 응답 완료", body: t.title });
-  } catch { /* 무시 */ }
+  showToast("✻ 응답 완료", t.title, () => activate(id));
+  if (!document.hasFocus()) {
+    try {
+      const n = window.__TAURI__ && window.__TAURI__.notification;
+      if (!n) return;
+      let ok = await n.isPermissionGranted();
+      if (!ok) ok = (await n.requestPermission()) === "granted";
+      if (ok) n.sendNotification({ title: "✻ Claude 응답 완료", body: t.title });
+    } catch { /* 무시 */ }
+  }
 }
 
 // 1초마다 답변중/idle 판정 (최근 2.5초 내 "자발적 출력" = 답변중 — 타이핑 에코 제외)
@@ -282,14 +304,34 @@ function makeTerm(id, title, cwd) {
   return entry;
 }
 
+// 에이전트별 실행 명령. claude는 프로필 시스템, codex/gemini는 각자 CLI의 재개 방식
+function commandFor(meta) {
+  if (meta.agent === "codex") {
+    return { cmd: `codex resume ${meta.session_id}`, profile: { name: "Codex", cmd: "codex" } };
+  }
+  if (meta.agent === "gemini") {
+    // gemini CLI는 세션 ID 재개가 없어 프로젝트별 최신 세션만 --resume latest 가능
+    const newest = sessions
+      .filter((x) => x.agent === "gemini" && x.cwd === meta.cwd)
+      .sort((a, b) => b.mtime - a.mtime)[0];
+    const isLatest = newest && newest.session_id === meta.session_id;
+    return {
+      cmd: isLatest ? "gemini --resume latest" : "gemini",
+      profile: { name: "Gemini", cmd: "gemini" },
+    };
+  }
+  return { cmd: composeCommand(meta.session_id), profile: currentProfile() };
+}
+
 async function openSession(meta, focus = true) {
   const id = meta.session_id;
   if (terms.has(id)) return focus && activate(id);
 
   const title = basename(meta.cwd) + " · " + (aliases[id] || meta.summary || meta.first_prompt || id.slice(0, 8)).slice(0, 24);
   const entry = makeTerm(id, title, meta.cwd);
-  entry.profile = currentProfile();
-  entry.spawnCommand = composeCommand(id);
+  const spec = commandFor(meta);
+  entry.profile = spec.profile;
+  entry.spawnCommand = spec.cmd;
   if (focus) activate(id);
   else renderTabs();
   await invoke("spawn_pty", {
@@ -584,6 +626,15 @@ $("#lmodal-save").onclick = () => {
 // ---------- UI 바인딩 ----------
 $("#btn-refresh").onclick = refreshSessions;
 $("#search").oninput = renderSidebar;
+
+// 에이전트 필터
+for (const btn of document.querySelectorAll("#agent-filter .af")) {
+  btn.onclick = () => {
+    agentFilter = btn.dataset.agent;
+    document.querySelectorAll("#agent-filter .af").forEach((b) => b.classList.toggle("on", b === btn));
+    renderSidebar();
+  };
+}
 
 // ---------- 새 세션 모달 (폴더 선택 + 최근 폴더) ----------
 function getRecentDirs() {

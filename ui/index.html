@@ -28,6 +28,13 @@
         <input id="search" type="text" placeholder="세션 검색…" spellcheck="false" />
       </div>
 
+      <div id="agent-filter">
+        <button data-agent="all" class="af on">전체</button>
+        <button data-agent="claude" class="af">Claude</button>
+        <button data-agent="codex" class="af">Codex</button>
+        <button data-agent="gemini" class="af">Gemini</button>
+      </div>
+
       <nav id="session-list"></nav>
 
       <footer id="side-foot">
@@ -90,9 +97,10 @@
     </div>
   </div>
 
-  <!-- 세션 우클릭 메뉴 / hover 미리보기 -->
+  <!-- 세션 우클릭 메뉴 / hover 미리보기 / 완료 토스트 -->
   <div id="ctx-menu" class="hidden"></div>
   <div id="preview-card" class="hidden"></div>
+  <div id="toasts"></div>
 
   <script src="vendor/xterm.js"></script>
   <script src="vendor/addon-fit.js"></script>
