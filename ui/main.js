@@ -132,7 +132,19 @@ function makeTerm(id, title, cwd) {
   term.loadAddon(fit);
   term.open(container);
 
-  term.onData((d) => invoke("write_pty", { id, data: d }));
+  // 한글 IME 조합 확정이 간헐적으로 중복 전달되는 xterm.js 버그 완화:
+  // 동일한 한글 포함 청크가 25ms 내 연속 도착하면 중복으로 보고 무시
+  let lastData = "", lastDataTime = 0;
+  term.onData((d) => {
+    const now = performance.now();
+    if (d === lastData && now - lastDataTime < 25 && /[ㄱ-힝]/.test(d)) {
+      lastDataTime = now;
+      return;
+    }
+    lastData = d;
+    lastDataTime = now;
+    invoke("write_pty", { id, data: d });
+  });
 
   // 선택 상태에서 Ctrl+C = 복사 (Ctrl+V는 브라우저 네이티브 paste에 맡김 — 중복 방지)
   term.attachCustomKeyEventHandler((e) => {
