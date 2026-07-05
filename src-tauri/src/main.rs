@@ -408,6 +408,133 @@ fn list_sessions() -> Vec<SessionMeta> {
     out
 }
 
+// ---------- 사용량 통계 (세션 jsonl의 usage 레코드 기반 — 프록시 불필요) ----------
+
+#[derive(Serialize)]
+struct SessionUsage {
+    context_tokens: u64,
+    output_tokens: u64,
+    model: String,
+}
+
+/// 열린 탭의 컨텍스트 게이지용: 세션 파일의 마지막 assistant usage
+#[tauri::command]
+fn session_usage(file: String) -> Option<SessionUsage> {
+    let p = PathBuf::from(&file);
+    let text = read_head_tail(&p, 512 * 1024)?;
+    let mut last: Option<SessionUsage> = None;
+    for line in text.lines() {
+        let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        if obj["type"] != "assistant" {
+            continue;
+        }
+        let u = &obj["message"]["usage"];
+        if u.is_null() {
+            continue;
+        }
+        let ctx = u["input_tokens"].as_u64().unwrap_or(0)
+            + u["cache_read_input_tokens"].as_u64().unwrap_or(0)
+            + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+        if ctx == 0 {
+            continue;
+        }
+        last = Some(SessionUsage {
+            context_tokens: ctx,
+            output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
+            model: obj["message"]["model"].as_str().unwrap_or("").to_string(),
+        });
+    }
+    last
+}
+
+#[derive(Serialize, Default, Clone)]
+struct UsageRow {
+    date: String,
+    model: String,
+    cwd: String,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_5m: u64,
+    cache_1h: u64,
+    requests: u64,
+}
+
+/// 대시보드용: 최근 N일간 (날짜, 모델, 프로젝트)별 토큰 집계
+#[tauri::command]
+fn usage_stats(days: u32) -> Vec<UsageRow> {
+    use std::collections::HashMap;
+    let mut map: HashMap<(String, String, String), UsageRow> = HashMap::new();
+    let Some(home) = dirs::home_dir() else { return vec![] };
+    let projects = home.join(".claude").join("projects");
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(days as u64 * 86400 + 86400);
+    let Ok(dirs_iter) = fs::read_dir(&projects) else { return vec![] };
+
+    for proj in dirs_iter.flatten() {
+        let Ok(files) = fs::read_dir(proj.path()) else { continue };
+        for f in files.flatten() {
+            let p = f.path();
+            if !p.extension().map(|e| e == "jsonl").unwrap_or(false) {
+                continue;
+            }
+            // 추가 기록은 mtime을 갱신하므로 오래된 파일은 통째로 건너뜀
+            if fs::metadata(&p)
+                .and_then(|m| m.modified())
+                .map(|t| t < cutoff)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&p) else { continue };
+            let mut cwd = String::new();
+            for line in text.lines() {
+                let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+                if cwd.is_empty() {
+                    if let Some(c) = obj["cwd"].as_str() {
+                        cwd = c.to_string();
+                    }
+                }
+                if obj["type"] != "assistant" {
+                    continue;
+                }
+                let u = &obj["message"]["usage"];
+                if u.is_null() {
+                    continue;
+                }
+                let ts = obj["timestamp"].as_str().unwrap_or("");
+                if ts.len() < 10 {
+                    continue;
+                }
+                let date = ts[..10].to_string();
+                let model = obj["message"]["model"].as_str().unwrap_or("?").to_string();
+                let key = (date.clone(), model.clone(), cwd.clone());
+                let row = map.entry(key).or_insert_with(|| UsageRow {
+                    date,
+                    model,
+                    cwd: cwd.clone(),
+                    ..Default::default()
+                });
+                row.input += u["input_tokens"].as_u64().unwrap_or(0);
+                row.output += u["output_tokens"].as_u64().unwrap_or(0);
+                row.cache_read += u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                row.cache_5m += u["cache_creation"]["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0);
+                row.cache_1h += u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0);
+                row.requests += 1;
+            }
+        }
+    }
+    map.into_values().collect()
+}
+
+/// headroom이 설치되어 있으면 절감 통계 반환 (없으면 None — 대시보드에서 섹션 생략)
+#[tauri::command]
+fn headroom_stats() -> Option<serde_json::Value> {
+    let p = dirs::home_dir()?.join(".headroom").join("proxy_savings.json");
+    let text = fs::read_to_string(p).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 #[tauri::command]
 fn delete_session(file: String) -> Result<(), String> {
     let p = PathBuf::from(&file);
@@ -446,7 +573,8 @@ fn main() {
         )
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
-            spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session
+            spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session,
+            session_usage, usage_stats, headroom_stats
         ])
         .setup(|app| {
             use tauri::menu::{Menu, MenuItem};

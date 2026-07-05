@@ -431,7 +431,10 @@ function renderTabs() {
     el.className = "tab" + (id === activeId ? " active" : "") + (t.exited ? " exited" : "") + (t.attention ? " attention" : "");
     el.dataset.id = id;
     const showBadge = t.profile && t.profile.cmd !== "claude";
-    el.innerHTML = `<span class="tab-dot ${statusClass(t)}" title="${statusLabel(t)}"></span><span class="tab-label"></span>${showBadge ? '<span class="tab-badge"></span>' : ""}${t.exited ? '<button class="tab-restart" title="다시 시작">↻</button>' : ""}<button class="tab-close" title="닫기">✕</button>`;
+    const ctxBar = t.ctxPct != null && !t.exited
+      ? `<span class="tab-ctx ${t.ctxPct >= 85 ? "hot" : t.ctxPct >= 60 ? "warm" : ""}" style="width:${t.ctxPct}%" title="컨텍스트 ${t.ctxPct}% (${fmtTok(t.ctxTokens || 0)})"></span>`
+      : "";
+    el.innerHTML = `<span class="tab-dot ${statusClass(t)}" title="${statusLabel(t)}"></span><span class="tab-label"></span>${showBadge ? '<span class="tab-badge"></span>' : ""}${t.exited ? '<button class="tab-restart" title="다시 시작">↻</button>' : ""}<button class="tab-close" title="닫기">✕</button>${ctxBar}`;
     el.querySelector(".tab-label").textContent = t.title;
     if (showBadge) {
       const b = el.querySelector(".tab-badge");
@@ -759,6 +762,154 @@ setInterval(checkUpdate, 6 * 3600 * 1000); // 6시간마다
     await w.setFocus();
   } catch { /* 무시 */ }
 })();
+
+// ---------- 사용량: 단가표 · 컨텍스트 게이지 · 대시보드 ----------
+// USD per MTok [입력, 출력] — 캐시 읽기 0.1×입력, 캐시 쓰기 5분 1.25×/1시간 2×입력
+const PRICING = {
+  "claude-fable-5": [10, 50],
+  "claude-mythos": [10, 50],
+  "claude-opus": [5, 25],
+  "claude-sonnet-5": [2, 10], // 인트로 단가 (2026-08-31까지)
+  "claude-sonnet": [3, 15],
+  "claude-haiku": [1, 5],
+};
+function priceFor(model) {
+  for (const k in PRICING) if (model.startsWith(k)) return PRICING[k];
+  return [5, 25];
+}
+function ctxWindowFor(model) {
+  return model.includes("haiku") ? 200_000 : 1_000_000;
+}
+function rowCost(r) {
+  const [i, o] = priceFor(r.model);
+  return (r.input * i + r.cache_read * i * 0.1 + r.cache_5m * i * 1.25 + r.cache_1h * i * 2 + r.output * o) / 1e6;
+}
+function fmtTok(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return String(n);
+}
+
+// --- 탭 컨텍스트 게이지: 세션 jsonl의 마지막 usage에서 컨텍스트 크기 조회 ---
+async function updateCtxGauges() {
+  let changed = false;
+  for (const [id, t] of terms) {
+    if (t.exited || id.startsWith("new-")) continue;
+    const meta = sessions.find((s) => s.session_id === id);
+    if (!meta || meta.agent !== "claude") continue;
+    try {
+      const u = await invoke("session_usage", { file: meta.file });
+      if (u) {
+        const pct = Math.min(100, Math.round((u.context_tokens / ctxWindowFor(u.model)) * 100));
+        if (pct !== t.ctxPct) {
+          t.ctxPct = pct;
+          t.ctxTokens = u.context_tokens;
+          changed = true;
+        }
+      }
+    } catch { /* 무시 */ }
+  }
+  if (changed) renderTabs();
+}
+setInterval(updateCtxGauges, 8000);
+setTimeout(updateCtxGauges, 3000);
+
+// --- 대시보드 ---
+let dashDays = 7;
+let dashRows = [];
+
+function renderDash() {
+  const cutoff = new Date(Date.now() - (dashDays - 1) * 86400_000).toISOString().slice(0, 10);
+  const rows = dashRows.filter(
+    (r) => r.date >= cutoff && r.model && r.input + r.output + r.cache_read + r.cache_5m + r.cache_1h > 0,
+  );
+
+  const tot = { input: 0, output: 0, cache_read: 0, cache_w: 0, requests: 0, cost: 0 };
+  const byModel = new Map();
+  const byProj = new Map();
+  for (const r of rows) {
+    const cost = rowCost(r);
+    tot.input += r.input;
+    tot.output += r.output;
+    tot.cache_read += r.cache_read;
+    tot.cache_w += r.cache_5m + r.cache_1h;
+    tot.requests += r.requests;
+    tot.cost += cost;
+    const m = byModel.get(r.model) || { tok: 0, out: 0, cost: 0, req: 0 };
+    m.tok += r.input + r.cache_read + r.cache_5m + r.cache_1h;
+    m.out += r.output;
+    m.cost += cost;
+    m.req += r.requests;
+    byModel.set(r.model, m);
+    const pName = basename(r.cwd) || r.cwd;
+    const p = byProj.get(pName) || { cost: 0, req: 0 };
+    p.cost += cost;
+    p.req += r.requests;
+    byProj.set(pName, p);
+  }
+
+  $("#dash-tiles").innerHTML = `
+    <div class="tile"><div class="tile-v">$${tot.cost.toFixed(2)}</div><div class="tile-l">추정 비용</div></div>
+    <div class="tile"><div class="tile-v">${tot.requests.toLocaleString()}</div><div class="tile-l">요청</div></div>
+    <div class="tile"><div class="tile-v">${fmtTok(tot.input + tot.cache_read + tot.cache_w)}</div><div class="tile-l">입력 토큰 (캐시 포함)</div></div>
+    <div class="tile"><div class="tile-v">${fmtTok(tot.output)}</div><div class="tile-l">출력 토큰</div></div>
+    <div class="tile"><div class="tile-v">${tot.cache_read + tot.input > 0 ? Math.round((tot.cache_read / (tot.cache_read + tot.cache_w + tot.input)) * 100) : 0}%</div><div class="tile-l">캐시 적중률</div></div>`;
+
+  const mkTable = (headers, rowsHtml) =>
+    `<table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table>`;
+
+  $("#dash-models").innerHTML = mkTable(
+    ["모델", "요청", "입력", "출력", "비용"],
+    [...byModel.entries()]
+      .sort((a, b) => b[1].cost - a[1].cost)
+      .map(([m, v]) => `<tr><td>${m}</td><td>${v.req.toLocaleString()}</td><td>${fmtTok(v.tok)}</td><td>${fmtTok(v.out)}</td><td>$${v.cost.toFixed(2)}</td></tr>`)
+      .join("") || `<tr><td colspan="5">데이터 없음</td></tr>`,
+  );
+
+  $("#dash-projects").innerHTML = mkTable(
+    ["프로젝트", "요청", "비용"],
+    [...byProj.entries()]
+      .sort((a, b) => b[1].cost - a[1].cost)
+      .slice(0, 12)
+      .map(([p, v]) => `<tr><td>${p}</td><td>${v.req.toLocaleString()}</td><td>$${v.cost.toFixed(2)}</td></tr>`)
+      .join("") || `<tr><td colspan="3">데이터 없음</td></tr>`,
+  );
+}
+
+async function openDash() {
+  $("#dash-backdrop").classList.remove("hidden");
+  $("#dash-tiles").innerHTML = `<div class="tile"><div class="tile-v">…</div><div class="tile-l">집계 중</div></div>`;
+  try {
+    dashRows = await invoke("usage_stats", { days: 30 });
+  } catch {
+    dashRows = [];
+  }
+  renderDash();
+  // headroom 설치 시 절감 통계 표시 (없으면 섹션 숨김)
+  try {
+    const hr = await invoke("headroom_stats");
+    if (hr && hr.lifetime) {
+      $("#dash-hr-wrap").classList.remove("hidden");
+      $("#dash-hr").innerHTML = `
+        <div id="dash-hr-tiles">
+          <div class="tile"><div class="tile-v">${fmtTok(hr.lifetime.tokens_saved || 0)}</div><div class="tile-l">절감 토큰 (누적)</div></div>
+          <div class="tile"><div class="tile-v">$${(hr.lifetime.compression_savings_usd || 0).toFixed(2)}</div><div class="tile-l">절감 비용 (누적)</div></div>
+          <div class="tile"><div class="tile-v">${(hr.lifetime.requests || 0).toLocaleString()}</div><div class="tile-l">프록시 경유 요청</div></div>
+        </div>`;
+    }
+  } catch { /* headroom 없음 */ }
+}
+
+$("#btn-dash").onclick = openDash;
+$("#dash-close").onclick = () => $("#dash-backdrop").classList.add("hidden");
+for (const b of document.querySelectorAll("#dash-period .dp")) {
+  b.onclick = () => {
+    dashDays = parseInt(b.dataset.days, 10);
+    document.querySelectorAll("#dash-period .dp").forEach((x) => x.classList.toggle("on", x === b));
+    renderDash();
+  };
+}
 
 // 주기적 목록 갱신 (20초)
 setInterval(refreshSessions, 20000);

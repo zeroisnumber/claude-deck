@@ -17,6 +17,7 @@
           <span id="brand-name">Claude&nbsp;Deck</span>
         </div>
         <div id="head-btns">
+          <button id="btn-dash" class="icon-btn" title="사용량 대시보드">📊</button>
           <button id="btn-refresh" class="icon-btn" title="세션 목록 새로고침">⟳</button>
           <button id="btn-settings" class="icon-btn" title="설정">⚙</button>
         </div>
@@ -94,6 +95,31 @@
         <button id="lmodal-cancel" class="btn-ghost">취소</button>
         <button id="lmodal-save" class="btn-accent">저장</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 사용량 대시보드 모달 -->
+  <div id="dash-backdrop" class="hidden">
+    <div id="modal" class="dash">
+      <div class="dash-head">
+        <div class="modal-title">사용량 대시보드</div>
+        <div id="dash-period">
+          <button data-days="1" class="dp">오늘</button>
+          <button data-days="7" class="dp on">7일</button>
+          <button data-days="30" class="dp">30일</button>
+        </div>
+      </div>
+      <div id="dash-tiles"></div>
+      <div class="lmodal-section">모델별</div>
+      <div id="dash-models" class="dash-table"></div>
+      <div class="lmodal-section">프로젝트별</div>
+      <div id="dash-projects" class="dash-table"></div>
+      <div id="dash-hr-wrap" class="hidden">
+        <div class="lmodal-section">Headroom 절감 <span class="lmodal-hint">프록시 압축으로 아낀 양</span></div>
+        <div id="dash-hr"></div>
+      </div>
+      <div class="dash-note">비용은 표준 API 단가 기준 추정치입니다 (캐시 읽기 0.1×, 캐시 쓰기 1.25×/2×). 구독 요금제 사용 시 실제 청구액과 다릅니다.</div>
+      <div class="modal-actions"><button id="dash-close" class="btn-ghost">닫기</button></div>
     </div>
   </div>
 
