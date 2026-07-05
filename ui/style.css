@@ -80,35 +80,9 @@ html, body {
 #btn-new:hover { filter: brightness(1.08); }
 #btn-new:active { transform: scale(0.985); }
 
-/* 에이전트/래퍼 선택 */
-#launcher-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0 14px 10px;
-  padding: 8px 8px 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-.launcher-line { display: flex; align-items: center; gap: 8px; }
-.launcher-label { font-size: 11.5px; color: var(--text-dim); flex-shrink: 0; width: 46px; }
-#agent-select, #wrapper-select {
-  flex: 1;
-  min-width: 0;
-  padding: 4px 6px;
-  background: var(--bg-hover);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  color: var(--text);
-  font-family: var(--font-ui);
-  font-size: 12px;
-  outline: none;
-  cursor: pointer;
-}
-#agent-select:focus, #wrapper-select:focus { border-color: var(--accent); }
+#head-btns { display: flex; gap: 2px; }
 
-/* 탭 배지 — 래퍼(주황) / 에이전트(파랑) */
+/* 탭 배지 — 기본(claude) 외 프로필 표시 */
 .tab-badge {
   font-size: 9px;
   font-weight: 700;
@@ -120,10 +94,25 @@ html, body {
   letter-spacing: 0.4px;
   flex-shrink: 0;
 }
-.tab-badge.agent {
-  color: #8cb4dd;
-  background: rgba(106, 155, 204, 0.14);
-  border-color: rgba(106, 155, 204, 0.35);
+.l-active {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.l-active input { accent-color: var(--accent); cursor: pointer; }
+.lmodal-note {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin-top: 4px;
+}
+.lmodal-note code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-hover);
+  padding: 1px 5px;
+  border-radius: 4px;
 }
 
 /* 실행기 관리 모달 */
@@ -418,7 +407,7 @@ kbd {
 }
 
 /* ─── 모달 ─────────────────────────────────────────────── */
-#modal-backdrop {
+#modal-backdrop, #lmodal-backdrop {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
@@ -428,7 +417,7 @@ kbd {
   z-index: 100;
   backdrop-filter: blur(2px);
 }
-#modal-backdrop.hidden { display: none; }
+#modal-backdrop.hidden, #lmodal-backdrop.hidden { display: none; }
 
 #modal {
   width: 440px;

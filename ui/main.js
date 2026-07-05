@@ -83,7 +83,9 @@ function renderSidebar() {
   }
   const busyN = [...terms.values()].filter((t) => !t.exited && t.busy).length;
   const runN = [...terms.values()].filter((t) => !t.exited).length;
-  $("#foot-count").textContent = `세션 ${shown}개 · 실행 ${runN} · 답변중 ${busyN}`;
+  const prof = currentProfile();
+  const profTag = prof.cmd !== "claude" ? ` · ${prof.name}` : "";
+  $("#foot-count").textContent = `세션 ${shown}개 · 실행 ${runN} · 답변중 ${busyN}${profTag}`;
 }
 
 function statusClass(t) {
@@ -132,13 +134,9 @@ function makeTerm(id, title, cwd) {
 
   term.onData((d) => invoke("write_pty", { id, data: d }));
 
-  // Ctrl+V 붙여넣기 / 선택시 Ctrl+C 복사
+  // 선택 상태에서 Ctrl+C = 복사 (Ctrl+V는 브라우저 네이티브 paste에 맡김 — 중복 방지)
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
-    if (e.ctrlKey && e.key === "v") {
-      navigator.clipboard.readText().then((t) => t && term.paste(t));
-      return false;
-    }
     if (e.ctrlKey && e.key === "c" && term.hasSelection()) {
       navigator.clipboard.writeText(term.getSelection());
       term.clearSelection();
@@ -147,7 +145,7 @@ function makeTerm(id, title, cwd) {
     return true;
   });
 
-  const entry = { term, fit, container, title, cwd, exited: false, busy: false, lastOutput: Date.now(), agent: null, wrapper: null };
+  const entry = { term, fit, container, title, cwd, exited: false, busy: false, lastOutput: Date.now(), profile: null };
   terms.set(id, entry);
   tabOrder.push(id);
   return entry;
@@ -159,8 +157,7 @@ async function openSession(meta) {
 
   const title = basename(meta.cwd) + " · " + (meta.summary || meta.first_prompt || id.slice(0, 8)).slice(0, 24);
   const entry = makeTerm(id, title, meta.cwd);
-  entry.agent = currentAgent();
-  entry.wrapper = currentWrapper();
+  entry.profile = currentProfile();
   activate(id);
   await invoke("spawn_pty", {
     id, cwd: meta.cwd, command: composeCommand(id),
@@ -171,8 +168,7 @@ async function openSession(meta) {
 async function openNewSession(cwd) {
   const id = "new-" + Date.now();
   const entry = makeTerm(id, basename(cwd) + " · 새 세션", cwd);
-  entry.agent = currentAgent();
-  entry.wrapper = currentWrapper();
+  entry.profile = currentProfile();
   activate(id);
   await invoke("spawn_pty", {
     id, cwd, command: composeCommand(null),
@@ -224,19 +220,13 @@ function renderTabs() {
     const el = document.createElement("div");
     el.className = "tab" + (id === activeId ? " active" : "") + (t.exited ? " exited" : "");
     el.dataset.id = id;
-    const agentBadge = t.agent && t.agent.cmd !== "claude";
-    const wrapBadge = t.wrapper && t.wrapper.prefix;
-    el.innerHTML = `<span class="tab-dot ${statusClass(t)}" title="${statusLabel(t)}"></span><span class="tab-label"></span>${agentBadge ? '<span class="tab-badge agent"></span>' : ""}${wrapBadge ? '<span class="tab-badge"></span>' : ""}<button class="tab-close" title="닫기">✕</button>`;
+    const showBadge = t.profile && t.profile.cmd !== "claude";
+    el.innerHTML = `<span class="tab-dot ${statusClass(t)}" title="${statusLabel(t)}"></span><span class="tab-label"></span>${showBadge ? '<span class="tab-badge"></span>' : ""}<button class="tab-close" title="닫기">✕</button>`;
     el.querySelector(".tab-label").textContent = t.title;
-    if (agentBadge) {
-      const b = el.querySelector(".tab-badge.agent");
-      b.textContent = t.agent.name.slice(0, 10);
-      b.title = t.agent.cmd;
-    }
-    if (wrapBadge) {
-      const b = el.querySelector(".tab-badge:not(.agent)");
-      b.textContent = t.wrapper.name.slice(0, 10);
-      b.title = t.wrapper.prefix;
+    if (showBadge) {
+      const b = el.querySelector(".tab-badge");
+      b.textContent = t.profile.name.slice(0, 10);
+      b.title = t.profile.cmd;
     }
     el.onclick = () => { if (!suppressClick) activate(id); };
     el.querySelector(".tab-close").onclick = (e) => { e.stopPropagation(); closeTab(id); };
@@ -344,121 +334,77 @@ const ro = new ResizeObserver(() => {
 });
 ro.observe(termArea);
 
-// ---------- 에이전트 / 래퍼 (직교하는 두 축) ----------
-// 에이전트 = 무엇을 실행하나 (claude, codex …).  래퍼 = 어떻게 실행하나 (headroom wrap …)
-const DEFAULT_AGENTS = [{ name: "Claude", cmd: "claude", resume: true }];
-const DEFAULT_WRAPPERS = [
-  { name: "없음", prefix: "" },
-  { name: "Headroom", prefix: "headroom wrap" },
+// ---------- 실행 프로필 (설정 창에서 관리) ----------
+const DEFAULT_PROFILES = [
+  { name: "Claude", cmd: "claude", resume: true },
+  { name: "Headroom", cmd: "headroom wrap claude", resume: true },
 ];
 
-function loadList(key, fallback) {
+function loadProfiles() {
   try {
-    const v = JSON.parse(localStorage.getItem(key));
+    const v = JSON.parse(localStorage.getItem("profiles"));
     if (Array.isArray(v) && v.length) return v;
   } catch { /* 무시 */ }
-  return fallback.map((x) => ({ ...x }));
+  return DEFAULT_PROFILES.map((x) => ({ ...x }));
 }
-let agents = loadList("agents", DEFAULT_AGENTS);
-let wrappers = loadList("wrappers", DEFAULT_WRAPPERS);
+let profiles = loadProfiles();
+let activeProfile = parseInt(localStorage.getItem("profileSel") || "0", 10);
+if (isNaN(activeProfile) || activeProfile >= profiles.length) activeProfile = 0;
 
-const agentSelect = $("#agent-select");
-const wrapperSelect = $("#wrapper-select");
-
-function fillSelect(sel, items, titleFn, savedKey) {
-  sel.innerHTML = "";
-  items.forEach((x, i) => {
-    const o = document.createElement("option");
-    o.value = i;
-    o.textContent = x.name;
-    o.title = titleFn(x);
-    sel.appendChild(o);
-  });
-  const saved = parseInt(localStorage.getItem(savedKey) || "0", 10);
-  sel.value = String(Math.min(isNaN(saved) ? 0 : saved, items.length - 1));
-}
-function renderSelectors() {
-  fillSelect(agentSelect, agents, (a) => a.cmd, "agentSel");
-  fillSelect(wrapperSelect, wrappers, (w) => w.prefix || "(래퍼 없음)", "wrapperSel");
-}
-renderSelectors();
-agentSelect.onchange = () => localStorage.setItem("agentSel", agentSelect.value);
-wrapperSelect.onchange = () => localStorage.setItem("wrapperSel", wrapperSelect.value);
-
-function currentAgent() {
-  return agents[parseInt(agentSelect.value, 10)] || DEFAULT_AGENTS[0];
-}
-function currentWrapper() {
-  return wrappers[parseInt(wrapperSelect.value, 10)] || DEFAULT_WRAPPERS[0];
+function currentProfile() {
+  return profiles[activeProfile] || DEFAULT_PROFILES[0];
 }
 
-// 최종 실행 명령 합성: [래퍼 접두사] + 에이전트 명령 + [--resume <세션ID>]
+// 최종 실행 명령: 프로필 명령 + (재개 시) --resume <세션ID>
 function composeCommand(resumeId) {
-  const a = currentAgent();
-  const w = currentWrapper();
-  let cmd = a.cmd;
-  if (resumeId && a.resume !== false) cmd += ` --resume ${resumeId}`;
-  if (w.prefix) cmd = `${w.prefix} ${cmd}`;
-  return cmd;
+  const p = currentProfile();
+  return resumeId && p.resume !== false ? `${p.cmd} --resume ${resumeId}` : p.cmd;
 }
 
-// 편집 모달
-function addAgentRow(name = "", cmd = "", resume = true) {
+// 설정 모달
+function addProfileRow(name = "", cmd = "", resume = true, checked = false) {
   const row = document.createElement("div");
   row.className = "lrow";
   row.innerHTML = `
+    <label class="l-active" title="이 프로필 사용"><input type="radio" name="active-profile" /></label>
     <input class="l-name" placeholder="이름" spellcheck="false" />
-    <input class="l-cmd" placeholder="명령 (예: claude, codex)" spellcheck="false" />
-    <label class="l-resume" title="세션 재개 시 --resume <세션ID> 인자를 붙일지"><input type="checkbox" />resume</label>
+    <input class="l-cmd" placeholder="실행 명령 (예: headroom wrap claude)" spellcheck="false" />
+    <label class="l-resume" title="세션 재개 시 --resume <세션ID> 인자를 붙일지"><input type="checkbox" />재개</label>
     <button class="l-del" title="삭제">✕</button>`;
+  row.querySelector(".l-active input").checked = checked;
   row.querySelector(".l-name").value = name;
   row.querySelector(".l-cmd").value = cmd;
   row.querySelector(".l-resume input").checked = resume;
   row.querySelector(".l-del").onclick = () => row.remove();
-  $("#agent-list").appendChild(row);
-}
-function addWrapperRow(name = "", prefix = "") {
-  const row = document.createElement("div");
-  row.className = "lrow";
-  row.innerHTML = `
-    <input class="l-name" placeholder="이름" spellcheck="false" />
-    <input class="l-cmd" placeholder="접두사 (예: headroom wrap)" spellcheck="false" />
-    <button class="l-del" title="삭제">✕</button>`;
-  row.querySelector(".l-name").value = name;
-  row.querySelector(".l-cmd").value = prefix;
-  row.querySelector(".l-del").onclick = () => row.remove();
-  $("#wrapper-list").appendChild(row);
+  $("#profile-list").appendChild(row);
 }
 
-$("#btn-launcher-edit").onclick = () => {
-  $("#agent-list").innerHTML = "";
-  $("#wrapper-list").innerHTML = "";
-  for (const a of agents) addAgentRow(a.name, a.cmd, a.resume !== false);
-  for (const w of wrappers) addWrapperRow(w.name, w.prefix);
+$("#btn-settings").onclick = () => {
+  $("#profile-list").innerHTML = "";
+  profiles.forEach((p, i) => addProfileRow(p.name, p.cmd, p.resume !== false, i === activeProfile));
   $("#lmodal-backdrop").classList.remove("hidden");
 };
-$("#agent-add").onclick = () => addAgentRow();
-$("#wrapper-add").onclick = () => addWrapperRow();
+$("#profile-add").onclick = () => addProfileRow();
 $("#lmodal-cancel").onclick = () => $("#lmodal-backdrop").classList.add("hidden");
 $("#lmodal-save").onclick = () => {
-  const nextAgents = [...document.querySelectorAll("#agent-list .lrow")]
-    .map((r) => ({
+  const rows = [...document.querySelectorAll("#profile-list .lrow")];
+  const next = [];
+  let nextActive = 0;
+  for (const r of rows) {
+    const p = {
       name: r.querySelector(".l-name").value.trim(),
       cmd: r.querySelector(".l-cmd").value.trim(),
       resume: r.querySelector(".l-resume input").checked,
-    }))
-    .filter((a) => a.name && a.cmd);
-  const nextWrappers = [...document.querySelectorAll("#wrapper-list .lrow")]
-    .map((r) => ({
-      name: r.querySelector(".l-name").value.trim(),
-      prefix: r.querySelector(".l-cmd").value.trim(),
-    }))
-    .filter((w) => w.name);
-  agents = nextAgents.length ? nextAgents : DEFAULT_AGENTS.map((x) => ({ ...x }));
-  wrappers = nextWrappers.length ? nextWrappers : DEFAULT_WRAPPERS.map((x) => ({ ...x }));
-  localStorage.setItem("agents", JSON.stringify(agents));
-  localStorage.setItem("wrappers", JSON.stringify(wrappers));
-  renderSelectors();
+    };
+    if (!p.name || !p.cmd) continue;
+    if (r.querySelector(".l-active input").checked) nextActive = next.length;
+    next.push(p);
+  }
+  profiles = next.length ? next : DEFAULT_PROFILES.map((x) => ({ ...x }));
+  activeProfile = Math.min(nextActive, profiles.length - 1);
+  localStorage.setItem("profiles", JSON.stringify(profiles));
+  localStorage.setItem("profileSel", String(activeProfile));
+  renderSidebar();
   $("#lmodal-backdrop").classList.add("hidden");
 };
 
