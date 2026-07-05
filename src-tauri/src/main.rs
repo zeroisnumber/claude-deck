@@ -255,7 +255,15 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            // VISIBLE 플래그 제외: 창 표시는 WebView 로드 후 프런트에서 수행 (IME 초기화 버그 회피)
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        - tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
             spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session
@@ -297,6 +305,25 @@ fn main() {
                     }
                 })
                 .build(app)?;
+
+            // WebView2 초기 IME 바인딩 버그 우회: 시작 직후 포커스를 프로그램적으로
+            // 재이동시켜 "다른 창 갔다 오기"와 동일한 재바인딩을 강제한다.
+            // 이게 없으면 첫 입력에서 한글 조합이 중복되고 조합창이 화면 구석에 뜬다.
+            if let Some(w) = app.get_webview_window("main") {
+                let w2 = w.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(700));
+                    let _ = w2.with_webview(|webview| unsafe {
+                        use webview2_com::Microsoft::Web::WebView2::Win32::{
+                            COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT,
+                            COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+                        };
+                        let controller = webview.controller();
+                        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT);
+                        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+                    });
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

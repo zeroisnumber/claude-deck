@@ -214,12 +214,12 @@ async function notifyDone(id, t) {
   } catch { /* 무시 */ }
 }
 
-// 1초마다 답변중/idle 판정 (최근 2초 내 PTY 출력 = 답변중)
+// 1초마다 답변중/idle 판정 (최근 2.5초 내 "자발적 출력" = 답변중 — 타이핑 에코 제외)
 setInterval(() => {
   const now = Date.now();
   let changed = false;
   for (const [id, t] of terms) {
-    const busy = !t.exited && now - t.lastOutput < 2000;
+    const busy = !t.exited && now - t.lastAuto < 2500;
     if (busy !== t.busy) {
       if (busy) {
         t.busySince = now;
@@ -257,7 +257,11 @@ function makeTerm(id, title, cwd) {
   term.loadAddon(fit);
   term.open(container);
 
-  term.onData((d) => invoke("write_pty", { id, data: d }));
+  term.onData((d) => {
+    const t = terms.get(id);
+    if (t) t.lastInput = Date.now();
+    invoke("write_pty", { id, data: d });
+  });
 
   // 선택 상태에서 Ctrl+C = 복사 (Ctrl+V는 브라우저 네이티브 paste에 맡김 — 중복 방지)
   // 앱 단축키(Ctrl+Tab/1~9/Shift+W/Shift+N)는 터미널이 먹지 않게 가로챔
@@ -272,7 +276,7 @@ function makeTerm(id, title, cwd) {
     return true;
   });
 
-  const entry = { term, fit, container, title, cwd, exited: false, busy: false, lastOutput: Date.now(), profile: null };
+  const entry = { term, fit, container, title, cwd, exited: false, busy: false, lastOutput: Date.now(), profile: null, lastInput: 0, lastAuto: 0 };
   terms.set(id, entry);
   tabOrder.push(id);
   return entry;
@@ -474,7 +478,10 @@ listen("pty-output", (ev) => {
   const t = terms.get(id);
   if (t) {
     t.term.write(b64ToBytes(data));
-    t.lastOutput = Date.now();
+    const now = Date.now();
+    t.lastOutput = now;
+    // 최근 입력의 에코가 아닌 "자발적 출력"만 활동으로 인정 (타이핑은 busy 아님)
+    if (now - t.lastInput > 800) t.lastAuto = now;
   }
 });
 
@@ -692,6 +699,15 @@ async function checkUpdate() {
 }
 setTimeout(checkUpdate, 5000);
 setInterval(checkUpdate, 6 * 3600 * 1000); // 6시간마다
+
+// 창 표시: WebView 로드 완료 후에 보여주고 포커스 (첫 실행 한글 IME 미연결 버그 회피)
+(async () => {
+  try {
+    const w = window.__TAURI__.window.getCurrentWindow();
+    await w.show();
+    await w.setFocus();
+  } catch { /* 무시 */ }
+})();
 
 // 주기적 목록 갱신 (20초)
 setInterval(refreshSessions, 20000);
