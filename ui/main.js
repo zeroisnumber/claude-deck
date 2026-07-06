@@ -285,13 +285,27 @@ function makeTerm(id, title, cwd) {
     invoke("write_pty", { id, data: d });
   });
 
-  // 선택 상태에서 Ctrl+C = 복사 (Ctrl+V는 브라우저 네이티브 paste에 맡김 — 중복 방지)
-  // 앱 단축키(Ctrl+Tab/1~9/Shift+W/Shift+N)는 터미널이 먹지 않게 가로챔
+  // Ctrl+V / Shift+Insert = Tauri 클립보드로 붙여넣기 (WebView2 네이티브 paste 미동작 대응.
+  // preventDefault로 keydown을 완전히 가로채므로 이중 붙여넣기도 발생하지 않음)
+  // 선택 상태에서 Ctrl+C = 복사. 앱 단축키(Ctrl+Tab/1~9/Shift+W/N)는 터미널이 먹지 않게 가로챔
+  const pasteFromClipboard = () => {
+    const cm = window.__TAURI__ && window.__TAURI__.clipboardManager;
+    const read = cm ? cm.readText() : navigator.clipboard.readText();
+    read.then((text) => { if (text) term.paste(text); }).catch(() => {});
+  };
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
     if (handleShortcut(e)) return false;
+    if ((e.ctrlKey && !e.shiftKey && e.key === "v") || (e.shiftKey && e.key === "Insert")) {
+      e.preventDefault();
+      pasteFromClipboard();
+      return false;
+    }
     if (e.ctrlKey && e.key === "c" && term.hasSelection()) {
-      navigator.clipboard.writeText(term.getSelection());
+      const cm = window.__TAURI__ && window.__TAURI__.clipboardManager;
+      const sel = term.getSelection();
+      if (cm) cm.writeText(sel).catch(() => {});
+      else navigator.clipboard.writeText(sel);
       term.clearSelection();
       return false;
     }
