@@ -911,6 +911,45 @@ for (const b of document.querySelectorAll("#dash-period .dp")) {
   };
 }
 
+// ---------- 요금제 한도 위젯 (사이드바 하단) ----------
+function fmtRemain(iso) {
+  const ms = new Date(iso) - Date.now();
+  if (isNaN(ms)) return "";
+  if (ms <= 0) return "리셋됨";
+  const h = Math.floor(ms / 3600000);
+  const m = Math.round((ms % 3600000) / 60000);
+  return h > 0 ? `${h}시간 ${m}분` : `${m}분`;
+}
+
+function limitRow(label, w) {
+  const pct = Math.round(w.utilization_pct ?? 0);
+  const cls = pct >= 90 ? "hot" : pct >= 70 ? "warm" : "";
+  const remain = w.resets_at ? fmtRemain(w.resets_at) : "";
+  return `
+    <div class="limit-row" title="${label} 한도 ${pct}% 사용 · 리셋: ${w.resets_at || "?"}">
+      <span class="limit-label">${label}</span>
+      <span class="limit-bar"><span class="limit-fill ${cls}" style="width:${Math.min(100, pct)}%"></span></span>
+      <span class="limit-txt">${pct}%${remain ? ` · ${remain}` : ""}</span>
+    </div>`;
+}
+
+async function updateLimits() {
+  const el = $("#foot-limits");
+  try {
+    const s = await invoke("subscription_state");
+    if (!s || !s.five_hour) {
+      el.classList.add("hidden");
+      return;
+    }
+    el.innerHTML = limitRow("5시간", s.five_hour) + limitRow("주간", s.seven_day || {});
+    el.classList.remove("hidden");
+  } catch {
+    el.classList.add("hidden");
+  }
+}
+setTimeout(updateLimits, 2500);
+setInterval(updateLimits, 120_000);
+
 // 주기적 목록 갱신 (20초)
 setInterval(refreshSessions, 20000);
 refreshSessions();

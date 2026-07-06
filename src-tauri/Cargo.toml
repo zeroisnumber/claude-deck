@@ -16,6 +16,7 @@ tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 base64 = "0.22"
 dirs = "5"
 # WebView2 초기 IME 바인딩 버그 우회용 (tauri가 쓰는 버전과 일치해야 함)

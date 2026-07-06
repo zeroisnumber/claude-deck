@@ -527,6 +527,105 @@ fn usage_stats(days: u32) -> Vec<UsageRow> {
     map.into_values().collect()
 }
 
+// ---------- 요금제 한도 (5시간/주간 사용률 + 리셋 시각) ----------
+// 기본: Claude Code OAuth 토큰으로 사용량 API 직접 조회 (headroom 불필요)
+// 폴백: headroom이 폴링해둔 subscription_state.json
+
+fn oauth_token() -> Option<String> {
+    if let Ok(t) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        if !t.trim().is_empty() {
+            return Some(t.trim().to_string());
+        }
+    }
+    let base = std::env::var("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"));
+    let creds: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(base.join(".credentials.json")).ok()?).ok()?;
+    let oauth = &creds["claudeAiOauth"];
+    let token = oauth["accessToken"].as_str()?.to_string();
+    // 만료 확인 (ms 단위)
+    if let Some(exp) = oauth["expiresAt"].as_f64() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_millis() as f64;
+        if now_ms >= exp - 60_000.0 {
+            return None;
+        }
+    }
+    Some(token)
+}
+
+fn fetch_usage_direct() -> Option<serde_json::Value> {
+    let token = oauth_token()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?;
+    let resp = client
+        .get("https://api.anthropic.com/api/oauth/usage")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = resp.json().ok()?;
+    let map_win = |w: &serde_json::Value| {
+        serde_json::json!({
+            "utilization_pct": w["utilization"],
+            "resets_at": w["resets_at"],
+        })
+    };
+    Some(serde_json::json!({
+        "source": "direct",
+        "five_hour": map_win(&v["five_hour"]),
+        "seven_day": map_win(&v["seven_day"]),
+        "limits": v["limits"],
+        "polled_at": chrono_now_iso(),
+    }))
+}
+
+fn chrono_now_iso() -> String {
+    // 의존성 없이 대략적인 ISO 시각 (frontend는 상대시간 계산에 resets_at만 사용)
+    let secs = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("@{}", secs)
+}
+
+fn usage_from_headroom() -> Option<serde_json::Value> {
+    let p = dirs::home_dir()?.join(".headroom").join("subscription_state.json");
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
+    if v["latest"].is_null() {
+        return None;
+    }
+    let mut latest = v["latest"].clone();
+    latest["source"] = serde_json::json!("headroom");
+    Some(latest)
+}
+
+/// 60초 캐시 — 프런트가 자주 불러도 API를 과도하게 치지 않음
+static USAGE_CACHE: Mutex<Option<(std::time::Instant, serde_json::Value)>> = Mutex::new(None);
+
+#[tauri::command]
+fn subscription_state() -> Option<serde_json::Value> {
+    {
+        let cache = USAGE_CACHE.lock().unwrap();
+        if let Some((t, v)) = cache.as_ref() {
+            if t.elapsed().as_secs() < 60 {
+                return Some(v.clone());
+            }
+        }
+    }
+    let result = fetch_usage_direct().or_else(usage_from_headroom)?;
+    *USAGE_CACHE.lock().unwrap() = Some((std::time::Instant::now(), result.clone()));
+    Some(result)
+}
+
 /// headroom이 설치되어 있으면 절감 통계 반환 (없으면 None — 대시보드에서 섹션 생략)
 #[tauri::command]
 fn headroom_stats() -> Option<serde_json::Value> {
@@ -574,7 +673,7 @@ fn main() {
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
             spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session,
-            session_usage, usage_stats, headroom_stats
+            session_usage, usage_stats, headroom_stats, subscription_state
         ])
         .setup(|app| {
             use tauri::menu::{Menu, MenuItem};
