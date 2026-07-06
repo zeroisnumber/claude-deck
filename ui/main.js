@@ -811,11 +811,12 @@ async function updateCtxGauges() {
   for (const [id, t] of terms) {
     if (t.exited || id.startsWith("new-")) continue;
     const meta = sessions.find((s) => s.session_id === id);
-    if (!meta || meta.agent !== "claude") continue;
+    if (!meta || meta.agent === "gemini") continue;
     try {
       const u = await invoke("session_usage", { file: meta.file });
       if (u) {
-        const pct = Math.min(100, Math.round((u.context_tokens / ctxWindowFor(u.model)) * 100));
+        const win = u.window || ctxWindowFor(u.model);
+        const pct = Math.min(100, Math.round((u.context_tokens / win) * 100));
         if (pct !== t.ctxPct) {
           t.ctxPct = pct;
           t.ctxTokens = u.context_tokens;
@@ -947,17 +948,42 @@ function limitRow(label, w) {
     </div>`;
 }
 
+function codexWinLabel(minutes) {
+  if (!minutes) return "한도";
+  if (minutes >= 1440 * 6) return "주간";
+  if (minutes % 60 === 0) return `${minutes / 60}시간`;
+  return `${minutes}분`;
+}
+
 async function updateLimits() {
   const el = $("#foot-limits");
+  let html = "";
+  // Claude (OAuth 사용량 API / headroom 폴백)
   try {
     const s = await invoke("subscription_state");
-    if (!s || !s.five_hour) {
-      el.classList.add("hidden");
-      return;
+    if (s && s.five_hour) {
+      html += limitRow("✻ 5시간", s.five_hour) + limitRow("✻ 주간", s.seven_day || {});
     }
-    el.innerHTML = limitRow("5시간", s.five_hour) + limitRow("주간", s.seven_day || {});
+  } catch { /* 무시 */ }
+  // Codex (최근 rollout의 token_count 이벤트 — 마지막 codex 사용 시점 기준)
+  try {
+    const c = await invoke("codex_state");
+    const rl = c && c.rate_limits;
+    for (const key of ["primary", "secondary"]) {
+      const w = rl && rl[key];
+      if (!w || w.used_percent == null) continue;
+      // 리셋 시각이 이미 지난(만료된) 윈도우는 의미 없는 옛 데이터 → 숨김
+      if (!w.resets_at || w.resets_at * 1000 < Date.now()) continue;
+      html += limitRow(`❖ ${codexWinLabel(w.window_minutes)}`, {
+        utilization_pct: w.used_percent,
+        resets_at: new Date(w.resets_at * 1000).toISOString(),
+      });
+    }
+  } catch { /* 무시 */ }
+  if (html) {
+    el.innerHTML = html;
     el.classList.remove("hidden");
-  } catch {
+  } else {
     el.classList.add("hidden");
   }
 }

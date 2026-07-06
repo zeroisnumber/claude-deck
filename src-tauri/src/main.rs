@@ -415,13 +415,37 @@ struct SessionUsage {
     context_tokens: u64,
     output_tokens: u64,
     model: String,
+    window: Option<u64>, // codex는 파일에 컨텍스트 윈도우가 직접 기록됨
 }
 
-/// 열린 탭의 컨텍스트 게이지용: 세션 파일의 마지막 assistant usage
+/// 열린 탭의 컨텍스트 게이지용: 세션 파일의 마지막 usage (claude=assistant usage, codex=token_count)
 #[tauri::command]
 fn session_usage(file: String) -> Option<SessionUsage> {
     let p = PathBuf::from(&file);
     let text = read_head_tail(&p, 512 * 1024)?;
+
+    // Codex rollout: token_count 이벤트의 total_token_usage + model_context_window
+    if file.contains(".codex") {
+        let mut last: Option<SessionUsage> = None;
+        for line in text.lines() {
+            let Ok(o) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+            if o["type"] == "event_msg" && o["payload"]["type"] == "token_count" {
+                let info = &o["payload"]["info"];
+                if info.is_null() {
+                    continue;
+                }
+                let tot = &info["total_token_usage"];
+                last = Some(SessionUsage {
+                    context_tokens: tot["total_tokens"].as_u64().unwrap_or(0),
+                    output_tokens: tot["output_tokens"].as_u64().unwrap_or(0),
+                    model: "codex".into(),
+                    window: info["model_context_window"].as_u64(),
+                });
+            }
+        }
+        return last;
+    }
+
     let mut last: Option<SessionUsage> = None;
     for line in text.lines() {
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
@@ -442,6 +466,7 @@ fn session_usage(file: String) -> Option<SessionUsage> {
             context_tokens: ctx,
             output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
             model: obj["message"]["model"].as_str().unwrap_or("").to_string(),
+            window: None,
         });
     }
     last
@@ -608,6 +633,53 @@ fn usage_from_headroom() -> Option<serde_json::Value> {
     Some(latest)
 }
 
+// ---------- Codex 상태 (rollout 파일의 token_count 이벤트에서 로컬로 추출) ----------
+
+fn codex_rollouts_by_mtime() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else { return vec![] };
+    let mut files: Vec<(f64, PathBuf)> = Vec::new();
+    let mut stack = vec![home.join(".codex").join("sessions")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+                files.push((file_mtime(&p), p));
+            }
+        }
+    }
+    files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    files.into_iter().map(|(_, p)| p).collect()
+}
+
+/// 가장 최근 codex 세션의 마지막 token_count 이벤트에서 rate limit 추출
+#[tauri::command]
+fn codex_state() -> Option<serde_json::Value> {
+    for p in codex_rollouts_by_mtime().into_iter().take(3) {
+        let Some(text) = read_head_tail(&p, 256 * 1024) else { continue };
+        let mut last: Option<(String, serde_json::Value)> = None;
+        for line in text.lines() {
+            let Ok(o) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+            if o["type"] == "event_msg" && o["payload"]["type"] == "token_count" {
+                let rl = &o["payload"]["rate_limits"];
+                // primary가 채워진 이벤트만 유효 (간헐적으로 null로 기록됨)
+                if !rl.is_null() && !rl["primary"].is_null() {
+                    last = Some((
+                        o["timestamp"].as_str().unwrap_or("").to_string(),
+                        rl.clone(),
+                    ));
+                }
+            }
+        }
+        if let Some((ts, rl)) = last {
+            return Some(serde_json::json!({ "rate_limits": rl, "polled_at": ts }));
+        }
+    }
+    None
+}
+
 /// 60초 캐시 — 프런트가 자주 불러도 API를 과도하게 치지 않음
 static USAGE_CACHE: Mutex<Option<(std::time::Instant, serde_json::Value)>> = Mutex::new(None);
 
@@ -674,7 +746,7 @@ fn main() {
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
             spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session,
-            session_usage, usage_stats, headroom_stats, subscription_state
+            session_usage, usage_stats, headroom_stats, subscription_state, codex_state
         ])
         .setup(|app| {
             use tauri::menu::{Menu, MenuItem};

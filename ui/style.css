@@ -323,7 +323,7 @@ html, body {
 #foot-limits { display: flex; flex-direction: column; gap: 4px; }
 #foot-limits.hidden { display: none; }
 .limit-row { display: flex; align-items: center; gap: 7px; }
-.limit-label { width: 34px; font-size: 10px; color: var(--text-faint); flex-shrink: 0; }
+.limit-label { width: 52px; font-size: 10px; color: var(--text-faint); flex-shrink: 0; white-space: nowrap; }
 .limit-bar {
   flex: 1;
   height: 5px;
