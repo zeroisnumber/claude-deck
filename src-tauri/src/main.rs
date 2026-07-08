@@ -1,4 +1,4 @@
-// Claude Deck — 세션 사이드바 + 임베디드 PTY 터미널로 claude CLI를 그대로 구동하는 데스크톱 앱.
+// CLI Deck — 멀티 에이전트(Claude/Codex/Gemini) 세션 사이드바 + 임베디드 PTY 터미널 데스크톱 앱.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::Engine;
@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::PathBuf,
-    sync::Mutex,
+    sync::{LazyLock, Mutex},
     time::UNIX_EPOCH,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -128,7 +128,7 @@ fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String> {
 
 // ---------- 세션 스캔 ----------
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SessionMeta {
     session_id: String,
     agent: String, // "claude" | "codex" | "gemini"
@@ -169,6 +169,24 @@ fn read_head_tail(path: &std::path::Path, limit: u64) -> Option<String> {
         String::from_utf8_lossy(&head),
         String::from_utf8_lossy(&tail)
     ))
+}
+
+/// 세션 메타 캐시 — 20초 폴링마다 전체 jsonl을 재파싱하지 않도록 mtime이 같으면 재사용.
+/// 파싱 실패(None)도 캐시해 손상 파일을 매번 다시 읽지 않는다.
+static META_CACHE: LazyLock<Mutex<HashMap<String, (f64, Option<SessionMeta>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn cached_meta(path: &PathBuf, parse: fn(&PathBuf) -> Option<SessionMeta>) -> Option<SessionMeta> {
+    let mtime = file_mtime(path);
+    let key = path.to_string_lossy().to_string();
+    if let Some((t, m)) = META_CACHE.lock().unwrap().get(&key) {
+        if *t == mtime {
+            return m.clone();
+        }
+    }
+    let meta = parse(path);
+    META_CACHE.lock().unwrap().insert(key, (mtime, meta.clone()));
+    meta
 }
 
 fn extract_text(content: &serde_json::Value) -> String {
@@ -312,7 +330,7 @@ fn scan_codex(out: &mut Vec<SessionMeta>) {
             if p.is_dir() {
                 stack.push(p);
             } else if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
-                if let Some(m) = read_codex_meta(&p) {
+                if let Some(m) = cached_meta(&p, read_codex_meta) {
                     out.push(m);
                 }
             }
@@ -389,15 +407,16 @@ fn list_sessions() -> Vec<SessionMeta> {
         for f in files.flatten() {
             let path = f.path();
             if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                if let Some(mut meta) = read_meta(&path) {
+                if let Some(mut meta) = cached_meta(&path, read_meta) {
                     if meta.cwd.is_empty() {
-                        // 폴더명(C--workspace-foo)에서 경로 근사 복원
+                        // 폴더명(C--workspace-foo)에서 경로 근사 복원 (비ASCII 폴더명 바이트 경계 패닉 방지)
                         let name = proj.file_name().to_string_lossy().to_string();
-                        if name.len() > 3 && &name[1..3] == "--" {
-                            meta.cwd = format!("{}:\\{}", &name[0..1], name[3..].replace('-', "\\"));
-                        } else {
-                            meta.cwd = name;
-                        }
+                        meta.cwd = match (name.get(0..1), name.get(1..3), name.get(3..)) {
+                            (Some(d), Some("--"), Some(rest)) if !rest.is_empty() => {
+                                format!("{}:\\{}", d, rest.replace('-', "\\"))
+                            }
+                            _ => name,
+                        };
                     }
                     out.push(meta);
                 }
@@ -706,6 +725,20 @@ fn headroom_stats() -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// 세션 프로젝트 폴더를 탐색기로 연다
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.is_dir() {
+        return Err(format!("폴더가 존재하지 않습니다: {}", path));
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(&p)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn delete_session(file: String) -> Result<(), String> {
     let p = PathBuf::from(&file);
@@ -746,7 +779,8 @@ fn main() {
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
             spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session,
-            session_usage, usage_stats, headroom_stats, subscription_state, codex_state
+            session_usage, usage_stats, headroom_stats, subscription_state, codex_state,
+            open_path
         ])
         .setup(|app| {
             use tauri::menu::{Menu, MenuItem};
@@ -758,7 +792,7 @@ fn main() {
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("Claude Deck")
+                .tooltip("CLI Deck")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, e| match e.id.as_ref() {
@@ -814,5 +848,5 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running claude-deck");
+        .expect("error while running cli-deck");
 }

@@ -1,4 +1,4 @@
-/* ─── Claude Deck — 다크 테마 ─────────────────────────────── */
+/* ─── CLI Deck — 다크 테마 ─────────────────────────────── */
 :root {
   --bg:        #262624;
   --bg-deep:   #1e1d1b;
@@ -99,6 +99,7 @@ html, body {
   align-items: center;
   flex-shrink: 0;
   cursor: pointer;
+  padding: 4px;
 }
 .l-active input { accent-color: var(--accent); cursor: pointer; }
 .lmodal-note {
@@ -114,17 +115,40 @@ html, body {
   padding: 1px 5px;
   border-radius: 4px;
 }
+/* 설정 모달에서 구분선이 필요한 섹션에만 .sep 부여 (대시보드 섹션은 구분선 없음) */
+.lmodal-section.sep {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+#global-env {
+  width: 100%;
+  margin-top: 2px;
+  padding: 7px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+}
+#global-env:focus { border-color: var(--accent); }
 
 /* 실행기 관리 모달 */
-.lmodal { width: 560px; }
+.lmodal { width: 600px; }
 .lmodal-section {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   font-size: 12.5px;
   font-weight: 600;
   margin: 14px 0 8px;
   color: var(--text);
 }
-.lmodal-hint { font-size: 11px; font-weight: 400; color: var(--text-faint); margin-left: 6px; }
-#agent-list, #wrapper-list { display: flex; flex-direction: column; gap: 7px; margin-bottom: 8px; }
+.lmodal-hint { font-size: 11px; font-weight: 400; color: var(--text-dim); }
+#profile-list { display: flex; flex-direction: column; gap: 7px; margin-bottom: 8px; }
 .l-resume {
   display: flex;
   align-items: center;

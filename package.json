@@ -1,7 +1,7 @@
 {
-  "name": "claude-deck",
-  "version": "0.2.0",
-  "description": "Claude Code session manager with embedded PTY terminals",
+  "name": "cli-deck",
+  "version": "0.3.0",
+  "description": "Multi-agent CLI session manager (Claude/Codex/Gemini) with embedded PTY terminals",
   "scripts": {
     "tauri": "tauri"
   },

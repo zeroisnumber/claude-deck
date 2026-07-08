@@ -1,4 +1,4 @@
-// Claude Deck — 프런트엔드: 세션 사이드바 + PTY 터미널 관리
+// CLI Deck — 프런트엔드: 세션 사이드바 + PTY 터미널 관리
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -122,6 +122,9 @@ function showCtxMenu(e, s, itemEl) {
       renderSidebar();
     }],
     ["✏️ 이름 바꾸기", () => startRename(s, itemEl)],
+    ["📂 폴더 열기", () => {
+      invoke("open_path", { path: s.cwd }).catch((e) => showToast("⚠ 폴더 열기 실패", String(e)));
+    }],
     ["🗑️ 세션 삭제", async () => {
       try {
         const ok = await window.__TAURI__.dialog.confirm(
@@ -144,7 +147,7 @@ function showCtxMenu(e, s, itemEl) {
   ctxMenu.classList.remove("hidden");
   const mw = 160;
   ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - mw - 8) + "px";
-  ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - 120) + "px";
+  ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - 160) + "px";
 }
 function hideCtxMenu() { ctxMenu.classList.add("hidden"); }
 window.addEventListener("click", hideCtxMenu);
@@ -231,7 +234,7 @@ async function notifyDone(id, t) {
       if (!n) return;
       let ok = await n.isPermissionGranted();
       if (!ok) ok = (await n.requestPermission()) === "granted";
-      if (ok) n.sendNotification({ title: "✻ Claude 응답 완료", body: t.title });
+      if (ok) n.sendNotification({ title: "✻ 응답 완료", body: t.title });
     } catch { /* 무시 */ }
   }
 }
@@ -288,28 +291,49 @@ function makeTerm(id, title, cwd) {
   // Ctrl+V / Shift+Insert = Tauri 클립보드로 붙여넣기 (WebView2 네이티브 paste 미동작 대응.
   // preventDefault로 keydown을 완전히 가로채므로 이중 붙여넣기도 발생하지 않음)
   // 선택 상태에서 Ctrl+C = 복사. 앱 단축키(Ctrl+Tab/1~9/Shift+W/N)는 터미널이 먹지 않게 가로챔
-  const pasteFromClipboard = () => {
+  // ⚠ 한글 IME가 켜져 있으면 e.key가 "ㅍ"/"ㅊ"로 들어와 매칭이 실패하므로 물리 키(e.code) 기준으로 판정
+  const pasteFromClipboard = async () => {
+    let text = "";
+    try {
+      const cm = window.__TAURI__ && window.__TAURI__.clipboardManager;
+      text = cm ? await cm.readText() : await navigator.clipboard.readText();
+    } catch {
+      try { text = await navigator.clipboard.readText(); } catch { /* 클립보드 접근 실패 */ }
+    }
+    if (text) term.paste(text);
+  };
+  const copySelection = () => {
+    const sel = term.getSelection();
+    if (!sel) return;
     const cm = window.__TAURI__ && window.__TAURI__.clipboardManager;
-    const read = cm ? cm.readText() : navigator.clipboard.readText();
-    read.then((text) => { if (text) term.paste(text); }).catch(() => {});
+    if (cm) cm.writeText(sel).catch(() => {});
+    else navigator.clipboard.writeText(sel);
   };
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
     if (handleShortcut(e)) return false;
-    if ((e.ctrlKey && !e.shiftKey && e.key === "v") || (e.shiftKey && e.key === "Insert")) {
+    if ((e.ctrlKey && !e.shiftKey && e.code === "KeyV") || (e.shiftKey && e.code === "Insert")) {
       e.preventDefault();
       pasteFromClipboard();
       return false;
     }
-    if (e.ctrlKey && e.key === "c" && term.hasSelection()) {
-      const cm = window.__TAURI__ && window.__TAURI__.clipboardManager;
-      const sel = term.getSelection();
-      if (cm) cm.writeText(sel).catch(() => {});
-      else navigator.clipboard.writeText(sel);
+    if (e.ctrlKey && e.code === "KeyC" && term.hasSelection()) {
+      copySelection();
       term.clearSelection();
       return false;
     }
     return true;
+  });
+
+  // 우클릭: 선택 영역이 있으면 복사, 없으면 붙여넣기 (Windows Terminal 방식)
+  container.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (term.hasSelection()) {
+      copySelection();
+      term.clearSelection();
+    } else {
+      pasteFromClipboard();
+    }
   });
 
   const entry = { term, fit, container, title, cwd, exited: false, busy: false, lastOutput: Date.now(), profile: null, lastInput: 0, lastAuto: 0 };
@@ -348,10 +372,17 @@ async function openSession(meta, focus = true) {
   entry.spawnCommand = spec.cmd;
   if (focus) activate(id);
   else renderTabs();
-  await invoke("spawn_pty", {
-    id, cwd: meta.cwd, command: entry.spawnCommand,
-    cols: entry.term.cols, rows: entry.term.rows,
-  });
+  try {
+    await invoke("spawn_pty", {
+      id, cwd: meta.cwd, command: entry.spawnCommand,
+      cols: entry.term.cols, rows: entry.term.rows,
+    });
+  } catch (err) {
+    entry.exited = true;
+    entry.term.write(`\r\n\x1b[31m실행 실패: ${err}\x1b[0m\r\n`);
+    showToast("⚠ 세션 실행 실패", String(err));
+    renderTabs();
+  }
   saveOpenTabs();
 }
 
@@ -361,10 +392,17 @@ async function openNewSession(cwd) {
   entry.profile = currentProfile();
   entry.spawnCommand = composeCommand(null);
   activate(id);
-  await invoke("spawn_pty", {
-    id, cwd, command: entry.spawnCommand,
-    cols: entry.term.cols, rows: entry.term.rows,
-  });
+  try {
+    await invoke("spawn_pty", {
+      id, cwd, command: entry.spawnCommand,
+      cols: entry.term.cols, rows: entry.term.rows,
+    });
+  } catch (err) {
+    entry.exited = true;
+    entry.term.write(`\r\n\x1b[31m실행 실패: ${err}\x1b[0m\r\n`);
+    showToast("⚠ 세션 실행 실패", String(err));
+    renderTabs();
+  }
   addRecentDir(cwd);
   setTimeout(refreshSessions, 4000);
 }
@@ -376,10 +414,17 @@ async function restartTab(id) {
   t.attention = false;
   t.term.write("\r\n\x1b[38;5;244m── 재시작 ──\x1b[0m\r\n\r\n");
   activate(id);
-  await invoke("spawn_pty", {
-    id, cwd: t.cwd, command: t.spawnCommand || "claude",
-    cols: t.term.cols, rows: t.term.rows,
-  });
+  try {
+    await invoke("spawn_pty", {
+      id, cwd: t.cwd, command: t.spawnCommand || "claude",
+      cols: t.term.cols, rows: t.term.rows,
+    });
+  } catch (err) {
+    t.exited = true;
+    t.term.write(`\r\n\x1b[31m재시작 실패: ${err}\x1b[0m\r\n`);
+    showToast("⚠ 재시작 실패", String(err));
+    renderTabs();
+  }
 }
 
 // ---------- 탭 복원 ----------
@@ -587,10 +632,28 @@ function currentProfile() {
   return profiles[activeProfile] || DEFAULT_PROFILES[0];
 }
 
-// 최종 실행 명령: 프로필 명령 + (재개 시) --resume <세션ID>
+// "KEY=VAL;KEY2=VAL2" 형식 문자열을 cmd.exe용 "set KEY=VAL&&set KEY2=VAL2&&" 접두어로 변환
+function envPrefix(envStr) {
+  if (!envStr) return "";
+  let prefix = "";
+  for (const pair of envStr.split(";")) {
+    const i = pair.indexOf("=");
+    if (i <= 0) continue;
+    const key = pair.slice(0, i).trim();
+    const val = pair.slice(i + 1).trim();
+    if (!key) continue;
+    prefix += `set ${key}=${val}&&`;
+  }
+  return prefix;
+}
+
+let globalEnv = localStorage.getItem("globalEnv") || "";
+
+// 최종 실행 명령: 전역 env + 프로필 명령 + (재개 시) --resume <세션ID>
 function composeCommand(resumeId) {
   const p = currentProfile();
-  return resumeId && p.resume !== false ? `${p.cmd} --resume ${resumeId}` : p.cmd;
+  let cmd = resumeId && p.resume !== false ? `${p.cmd} --resume ${resumeId}` : p.cmd;
+  return envPrefix(globalEnv) + cmd;
 }
 
 // 설정 모달
@@ -614,6 +677,7 @@ function addProfileRow(name = "", cmd = "", resume = true, checked = false) {
 $("#btn-settings").onclick = () => {
   $("#profile-list").innerHTML = "";
   profiles.forEach((p, i) => addProfileRow(p.name, p.cmd, p.resume !== false, i === activeProfile));
+  $("#global-env").value = globalEnv;
   $("#lmodal-backdrop").classList.remove("hidden");
 };
 $("#profile-add").onclick = () => addProfileRow();
@@ -634,15 +698,37 @@ $("#lmodal-save").onclick = () => {
   }
   profiles = next.length ? next : DEFAULT_PROFILES.map((x) => ({ ...x }));
   activeProfile = Math.min(nextActive, profiles.length - 1);
+  globalEnv = $("#global-env").value.trim();
   localStorage.setItem("profiles", JSON.stringify(profiles));
   localStorage.setItem("profileSel", String(activeProfile));
+  localStorage.setItem("globalEnv", globalEnv);
   renderSidebar();
   $("#lmodal-backdrop").classList.add("hidden");
 };
+// 설정 모달: 텍스트 입력창에서 Enter = 저장 (한글 조합 중 Enter 제외)
+$("#lmodal-backdrop").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.isComposing && e.target.matches("input:not([type=checkbox]):not([type=radio])")) {
+    $("#lmodal-save").click();
+  }
+});
 
 // ---------- UI 바인딩 ----------
 $("#btn-refresh").onclick = refreshSessions;
 $("#search").oninput = renderSidebar;
+
+// 모달 공통: 배경 클릭 또는 Escape로 닫기
+const MODAL_BACKDROPS = ["#lmodal-backdrop", "#dash-backdrop", "#modal-backdrop"];
+for (const sel of MODAL_BACKDROPS) {
+  const el = $(sel);
+  el.addEventListener("mousedown", (e) => { if (e.target === el) el.classList.add("hidden"); });
+}
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  for (const sel of MODAL_BACKDROPS) {
+    const el = $(sel);
+    if (!el.classList.contains("hidden")) { el.classList.add("hidden"); return; }
+  }
+});
 
 // 에이전트 필터
 for (const btn of document.querySelectorAll("#agent-filter .af")) {
@@ -712,11 +798,12 @@ function handleShortcut(e) {
     if (tabOrder[idx]) activate(tabOrder[idx]);
     return true;
   }
-  if (e.shiftKey && e.key.toLowerCase() === "w") {
+  // 한글 IME에서 e.key가 "ㅈ"/"ㅜ"로 들어오므로 물리 키(e.code) 기준
+  if (e.shiftKey && e.code === "KeyW") {
     if (activeId) closeTab(activeId);
     return true;
   }
-  if (e.shiftKey && e.key.toLowerCase() === "n") {
+  if (e.shiftKey && e.code === "KeyN") {
     openNewModal();
     return true;
   }

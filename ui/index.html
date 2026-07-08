@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Claude Deck</title>
+  <title>CLI Deck</title>
   <link rel="stylesheet" href="vendor/xterm.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -14,7 +14,7 @@
       <header id="side-head">
         <div id="brand">
           <span id="brand-mark">✻</span>
-          <span id="brand-name">Claude&nbsp;Deck</span>
+          <span id="brand-name">CLI&nbsp;Deck</span>
         </div>
         <div id="head-btns">
           <button id="btn-dash" class="icon-btn" title="사용량 대시보드">📊</button>
@@ -54,7 +54,7 @@
       <div id="term-area">
         <div id="empty-state">
           <div class="empty-mark">✻</div>
-          <div class="empty-title">Claude Deck</div>
+          <div class="empty-title">CLI Deck</div>
           <div class="empty-sub">왼쪽에서 세션을 선택하면 이 자리에서 CLI가 그대로 실행됩니다</div>
           <div class="empty-hints">
             <span><kbd>클릭</kbd> 세션 열기/전환</span>
@@ -94,6 +94,12 @@
       <div id="profile-list"></div>
       <button id="profile-add" class="btn-ghost btn-add">＋ 프로필 추가</button>
       <div class="lmodal-note">예: <code>claude</code>, <code>headroom wrap claude</code>, <code>my-proxy run claude</code>. "재개"가 켜진 프로필은 세션 재개 시 명령 뒤에 <code>--resume &lt;세션ID&gt;</code>가 붙습니다.</div>
+
+      <div class="lmodal-section sep">전역 환경변수
+        <span class="lmodal-hint">프로필과 무관하게 모든 세션 실행에 적용</span>
+      </div>
+      <input id="global-env" placeholder="KEY=VAL;KEY2=VAL2 (예: HEADROOM_OUTPUT_SHAPER=1;PYTHONUTF8=1)" spellcheck="false" />
+
       <div class="modal-actions">
         <button id="lmodal-cancel" class="btn-ghost">취소</button>
         <button id="lmodal-save" class="btn-accent">저장</button>
