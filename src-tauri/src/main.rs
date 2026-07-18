@@ -25,7 +25,7 @@ fn install_panic_hook() {
         // WebView2도 같은 폴더(%LOCALAPPDATA%\<identifier>)에 프로필을 두므로
         // 별도 폴더를 새로 만들지 않고 거기에 합쳐서 — 삭제/관리 지점을 하나로 유지한다.
         if let Some(dir) = dirs::data_local_dir() {
-            let log_dir = dir.join("com.user.claude-deck");
+            let log_dir = dir.join("com.user.cli-deck");
             if fs::create_dir_all(&log_dir).is_ok() {
                 use std::io::Write as _;
                 if let Ok(mut f) = fs::OpenOptions::new()
@@ -40,7 +40,7 @@ fn install_panic_hook() {
         rfd::MessageDialog::new()
             .set_title("CLI Deck 오류")
             .set_description(format!(
-                "예기치 않은 오류가 발생했습니다:\n\n{}\n\n로그: %LOCALAPPDATA%\\com.user.claude-deck\\crash.log",
+                "예기치 않은 오류가 발생했습니다:\n\n{}\n\n로그: %LOCALAPPDATA%\\com.user.cli-deck\\crash.log",
                 msg
             ))
             .set_level(rfd::MessageLevel::Error)
