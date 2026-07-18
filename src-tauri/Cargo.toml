@@ -1,6 +1,6 @@
 [package]
 name = "claude-deck"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 
 [build-dependencies]
@@ -22,6 +22,10 @@ base64 = "0.22"
 dirs = "5"
 # WebView2 초기 IME 바인딩 버그 우회용 (tauri가 쓰는 버전과 일치해야 함)
 webview2-com = "0.38"
+# 패닉 발생 시 네이티브 오류 팝업 표시용. tauri-plugin-dialog가 이미 물고 오는
+# 버전을 그대로 재사용 — msgbox는 gtk-sys 버전이 충돌해서 못 씀. Windows 네이티브
+# 백엔드만 쓰므로 기본 피처(xdg-portal 등)는 불필요.
+rfd = { version = "0.15", default-features = false }
 
 [profile.dev]
 opt-level = 1

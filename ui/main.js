@@ -85,13 +85,20 @@ function renderSidebar() {
     const dot = t ? `<span class="si-dot ${statusClass(t)}" title="${statusLabel(t)}"></span>` : "";
     const pin = pins.includes(s.session_id) ? `<span class="si-pin">📌</span>` : "";
     const glyph = `<span class="si-agent ${s.agent}" title="${s.agent}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
+    const expEpoch = s.cache_last_ts && s.cache_ttl_secs ? s.cache_last_ts + s.cache_ttl_secs : null;
+    const ttl = expEpoch ? `<span class="si-ttl" data-exp="${expEpoch}" title="프롬프트 캐시 남은 TTL"></span>` : "";
+    // 최대 윈도우를 추측하지 않고 모든 에이전트에 동일하게 토큰 수만 텍스트로 표시
+    const ctxText = s.ctx_tokens
+      ? `<span class="si-ctx" title="마지막 응답 시점 컨텍스트 토큰 수">· ${fmtTok(s.ctx_tokens)} ctx</span>`
+      : "";
     el.innerHTML = `
       ${dot}
       <div class="si-title">${pin}${glyph}<span class="si-title-text"></span></div>
       <div class="si-meta">
         <span class="si-proj"></span>
         <span>${timeAgo(s.mtime)}</span>
-        <span>· ${s.message_count}</span>
+        ${ctxText}
+        ${ttl}
       </div>`;
     el.querySelector(".si-title-text").textContent = title;
     el.querySelector(".si-proj").textContent = proj;
@@ -106,7 +113,26 @@ function renderSidebar() {
   const prof = currentProfile();
   const profTag = prof.cmd !== "claude" ? ` · ${prof.name}` : "";
   $("#foot-count").textContent = `세션 ${shown}개 · 실행 ${runN} · 답변중 ${busyN}${profTag}`;
+  updateTtlBadges();
 }
+
+// 캐시 TTL 배지: 매초 남은 시간만 갱신 (전체 리렌더 없이 텍스트만 갱신해 저비용)
+function updateTtlBadges() {
+  const now = Date.now() / 1000;
+  for (const el of listEl.querySelectorAll(".si-ttl[data-exp]")) {
+    const remain = Math.round(Number(el.dataset.exp) - now);
+    if (remain <= 0) {
+      el.textContent = "";
+      el.classList.remove("warn");
+    } else {
+      const m = Math.floor(remain / 60);
+      const sec = remain % 60;
+      el.textContent = `⏱ ${m}:${String(sec).padStart(2, "0")}`;
+      el.classList.toggle("warn", remain < 60);
+    }
+  }
+}
+setInterval(updateTtlBadges, 1000);
 
 // ---------- 세션 우클릭 메뉴 ----------
 const ctxMenu = $("#ctx-menu");
@@ -177,6 +203,41 @@ function startRename(s, itemEl) {
   input.onclick = (e) => e.stopPropagation();
 }
 
+// ---------- 경량 마크다운 렌더러 (외부 의존성 없음, HTML 이스케이프 후 변환) ----------
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function mdToHtml(src) {
+  const lines = escapeHtml(src).split("\n");
+  const out = [];
+  let inCode = false, codeBuf = [], listOpen = false;
+  const closeList = () => { if (listOpen) { out.push("</ul>"); listOpen = false; } };
+  const inline = (t) => t
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+  for (const raw of lines) {
+    const line = raw;
+    if (line.trim().startsWith("```")) {
+      if (inCode) { out.push(`<pre><code>${codeBuf.join("\n")}</code></pre>`); codeBuf = []; inCode = false; }
+      else { closeList(); inCode = true; }
+      continue;
+    }
+    if (inCode) { codeBuf.push(line); continue; }
+    const h = line.match(/^(#{1,6})\s+(.*)/);
+    if (h) { closeList(); out.push(`<h6>${inline(h[2])}</h6>`); continue; }
+    const li = line.match(/^\s*[-*]\s+(.*)/);
+    if (li) { if (!listOpen) { out.push("<ul>"); listOpen = true; } out.push(`<li>${inline(li[1])}</li>`); continue; }
+    closeList();
+    if (line.trim() === "") { out.push(""); continue; }
+    out.push(`<p>${inline(line)}</p>`);
+  }
+  if (inCode) out.push(`<pre><code>${codeBuf.join("\n")}</code></pre>`);
+  closeList();
+  return out.join("\n");
+}
+
 // ---------- hover 미리보기 ----------
 const previewCard = $("#preview-card");
 let previewTimer = null;
@@ -187,12 +248,19 @@ function schedulePreview(el, s) {
     if (!s.last_text && !s.first_prompt) return;
     previewCard.innerHTML = `<div class="pv-title"></div><div class="pv-body"></div><div class="pv-meta"></div>`;
     previewCard.querySelector(".pv-title").textContent = aliases[s.session_id] || s.summary || s.first_prompt || "";
-    previewCard.querySelector(".pv-body").textContent = s.last_text || "(응답 없음)";
+    const body = previewCard.querySelector(".pv-body");
+    if (s.recent && s.recent.length) {
+      body.innerHTML = s.recent
+        .map((m) => `<div class="pv-turn ${m.role}"><span class="pv-role">${m.role === "user" ? "나" : "AI"}</span>${mdToHtml(m.text)}</div>`)
+        .join("");
+    } else {
+      body.innerHTML = mdToHtml(s.last_text || "(응답 없음)");
+    }
     previewCard.querySelector(".pv-meta").textContent = `${s.cwd} · ${s.message_count}개 메시지`;
     previewCard.classList.remove("hidden");
     const r = el.getBoundingClientRect();
     previewCard.style.left = r.right + 8 + "px";
-    previewCard.style.top = Math.min(r.top, window.innerHeight - 180) + "px";
+    previewCard.style.top = Math.max(8, Math.min(r.top, window.innerHeight - 400)) + "px";
   }, 350);
 }
 function hidePreview() {
@@ -938,11 +1006,14 @@ function renderDash() {
     tot.cache_w += r.cache_5m + r.cache_1h;
     tot.requests += r.requests;
     tot.cost += cost;
-    const m = byModel.get(r.model) || { tok: 0, out: 0, cost: 0, req: 0 };
+    const m = byModel.get(r.model) || { tok: 0, out: 0, cost: 0, req: 0, cacheRead: 0, cacheW: 0, input: 0 };
     m.tok += r.input + r.cache_read + r.cache_5m + r.cache_1h;
     m.out += r.output;
     m.cost += cost;
     m.req += r.requests;
+    m.cacheRead += r.cache_read;
+    m.cacheW += r.cache_5m + r.cache_1h;
+    m.input += r.input;
     byModel.set(r.model, m);
     const pName = basename(r.cwd) || r.cwd;
     const p = byProj.get(pName) || { cost: 0, req: 0 };
@@ -962,11 +1033,15 @@ function renderDash() {
     `<table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table>`;
 
   $("#dash-models").innerHTML = mkTable(
-    ["모델", "요청", "입력", "출력", "비용"],
+    ["모델", "요청", "입력", "출력", "캐시 적중률", "비용"],
     [...byModel.entries()]
       .sort((a, b) => b[1].cost - a[1].cost)
-      .map(([m, v]) => `<tr><td>${m}</td><td>${v.req.toLocaleString()}</td><td>${fmtTok(v.tok)}</td><td>${fmtTok(v.out)}</td><td>$${v.cost.toFixed(2)}</td></tr>`)
-      .join("") || `<tr><td colspan="5">데이터 없음</td></tr>`,
+      .map(([m, v]) => {
+        const denom = v.cacheRead + v.cacheW + v.input;
+        const hit = denom > 0 ? Math.round((v.cacheRead / denom) * 100) : 0;
+        return `<tr><td>${m}</td><td>${v.req.toLocaleString()}</td><td>${fmtTok(v.tok)}</td><td>${fmtTok(v.out)}</td><td>${hit}%</td><td>$${v.cost.toFixed(2)}</td></tr>`;
+      })
+      .join("") || `<tr><td colspan="6">데이터 없음</td></tr>`,
   );
 
   $("#dash-projects").innerHTML = mkTable(
@@ -1024,7 +1099,11 @@ function fmtRemain(iso) {
 }
 
 function limitRow(label, w) {
-  const pct = Math.round(w.utilization_pct ?? 0);
+  // 리셋 시각을 지나면 API가 다음 폴링까지 리셋 전 utilization을 그대로 캐시해
+  // 내려주는 경우가 있음(headroom도 동일 현상을 관측해 표시 시점에 0으로 보정함) —
+  // "85% · 리셋됨" 같은 모순 표시를 막기 위해 리셋 경과 시 0%로 취급한다.
+  const resetPassed = w.resets_at && new Date(w.resets_at) - Date.now() <= 0;
+  const pct = resetPassed ? 0 : Math.round(w.utilization_pct ?? 0);
   const cls = pct >= 90 ? "hot" : pct >= 70 ? "warm" : "";
   const remain = w.resets_at ? fmtRemain(w.resets_at) : "";
   return `
@@ -1042,12 +1121,13 @@ function codexWinLabel(minutes) {
   return `${minutes}분`;
 }
 
-async function updateLimits() {
-  const el = $("#foot-limits");
+async function updateLimits(force = false) {
+  const wrap = $("#foot-limits");
+  const rowsEl = $("#foot-limits-rows");
   let html = "";
   // Claude (OAuth 사용량 API / headroom 폴백)
   try {
-    const s = await invoke("subscription_state");
+    const s = await invoke("subscription_state", { force });
     if (s && s.five_hour) {
       html += limitRow("✻ 5시간", s.five_hour) + limitRow("✻ 주간", s.seven_day || {});
     }
@@ -1068,14 +1148,30 @@ async function updateLimits() {
     }
   } catch { /* 무시 */ }
   if (html) {
-    el.innerHTML = html;
-    el.classList.remove("hidden");
+    rowsEl.innerHTML = html;
+    wrap.classList.remove("hidden");
   } else {
-    el.classList.add("hidden");
+    wrap.classList.add("hidden");
   }
 }
 setTimeout(updateLimits, 2500);
 setInterval(updateLimits, 120_000);
+
+// 수동 즉시 갱신 — 캐시를 건너뛰고 강제로 다시 조회. 연타로 429를 유발하지 않도록
+// 클릭 직후 짧게 비활성화한다.
+const btnRefreshLimits = $("#btn-refresh-limits");
+btnRefreshLimits.onclick = async () => {
+  btnRefreshLimits.disabled = true;
+  btnRefreshLimits.classList.add("spinning");
+  try {
+    await updateLimits(true);
+  } finally {
+    setTimeout(() => {
+      btnRefreshLimits.disabled = false;
+      btnRefreshLimits.classList.remove("spinning");
+    }, 10_000);
+  }
+};
 
 // 주기적 목록 갱신 (20초)
 setInterval(refreshSessions, 20000);

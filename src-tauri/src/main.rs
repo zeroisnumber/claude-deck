@@ -14,6 +14,39 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
+// ---------- 크래시 진단 ----------
+// windows_subsystem="windows"(릴리스 빌드)는 콘솔이 없어 패닉 메시지(stderr)가
+// 그냥 사라진다 — "가끔 팅긴다"는 게 이거였을 가능성이 높음. 패닉 시 로그 파일에
+// 기록하고 네이티브 팝업을 띄워 최소한 원인을 알 수 있게 한다.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info.to_string();
+        if let Some(dir) = dirs::data_local_dir() {
+            let log_dir = dir.join("cli-deck");
+            if fs::create_dir_all(&log_dir).is_ok() {
+                use std::io::Write as _;
+                if let Ok(mut f) = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_dir.join("crash.log"))
+                {
+                    let _ = writeln!(f, "[{}] {}", chrono_now_iso(), msg);
+                }
+            }
+        }
+        rfd::MessageDialog::new()
+            .set_title("CLI Deck 오류")
+            .set_description(format!(
+                "예기치 않은 오류가 발생했습니다:\n\n{}\n\n로그: %LOCALAPPDATA%\\cli-deck\\crash.log",
+                msg
+            ))
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+        default_hook(info);
+    }));
+}
+
 // ---------- PTY 관리 ----------
 
 struct PtyInstance {
@@ -46,7 +79,7 @@ fn spawn_pty(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let mut map = state.0.lock().unwrap();
+    let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
     if map.contains_key(&id) {
         return Ok(()); // 이미 실행 중
     }
@@ -89,7 +122,7 @@ fn spawn_pty(
         }
         // 자연 종료 시 맵에서 제거해 같은 id로 재시작 가능하게 함
         let state = app2.state::<PtyState>();
-        state.0.lock().unwrap().remove(&id2);
+        state.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&id2);
         let _ = app2.emit("pty-exit", PtyExit { id: id2.clone() });
     });
 
@@ -99,7 +132,7 @@ fn spawn_pty(
 
 #[tauri::command]
 fn write_pty(state: State<PtyState>, id: String, data: String) -> Result<(), String> {
-    let mut map = state.0.lock().unwrap();
+    let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(p) = map.get_mut(&id) {
         p.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
     }
@@ -108,7 +141,7 @@ fn write_pty(state: State<PtyState>, id: String, data: String) -> Result<(), Str
 
 #[tauri::command]
 fn resize_pty(state: State<PtyState>, id: String, cols: u16, rows: u16) -> Result<(), String> {
-    let map = state.0.lock().unwrap();
+    let map = state.0.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(p) = map.get(&id) {
         p.master
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -119,7 +152,7 @@ fn resize_pty(state: State<PtyState>, id: String, cols: u16, rows: u16) -> Resul
 
 #[tauri::command]
 fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String> {
-    let mut map = state.0.lock().unwrap();
+    let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(mut p) = map.remove(&id) {
         let _ = p.child.kill();
     }
@@ -139,6 +172,40 @@ struct SessionMeta {
     message_count: u32,
     mtime: f64,
     file: String,
+    /// 마지막으로 프롬프트 캐시가 읽히거나 새로 쓰인 시각 (epoch seconds)
+    cache_last_ts: Option<f64>,
+    /// 해당 캐시 항목의 TTL (초) — 5분(300) 또는 1시간(3600)
+    cache_ttl_secs: Option<u32>,
+    /// 마지막 assistant 응답 시점의 컨텍스트 토큰 수 (사이드바 게이지용)
+    ctx_tokens: Option<u64>,
+    /// codex는 파일에 컨텍스트 윈도우가 직접 기록됨 (claude는 프런트에서 모델명으로 추정)
+    ctx_window: Option<u64>,
+    /// 마지막으로 관측된 모델명
+    model: Option<String>,
+    /// 호버 미리보기용 최근 대화 (최대 3턴 = 6개). 오래된 것부터 순서대로.
+    recent: Vec<RecentMsg>,
+}
+
+#[derive(Serialize, Clone)]
+struct RecentMsg {
+    role: String, // "user" | "assistant"
+    text: String,
+}
+
+const RECENT_MAX: usize = 6;
+
+fn push_recent(recent: &mut Vec<RecentMsg>, role: &str, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    recent.push(RecentMsg {
+        role: role.to_string(),
+        text: text.chars().take(400).collect(),
+    });
+    if recent.len() > RECENT_MAX {
+        recent.remove(0);
+    }
 }
 
 fn file_mtime(path: &std::path::Path) -> f64 {
@@ -179,14 +246,40 @@ static META_CACHE: LazyLock<Mutex<HashMap<String, (f64, Option<SessionMeta>)>>> 
 fn cached_meta(path: &PathBuf, parse: fn(&PathBuf) -> Option<SessionMeta>) -> Option<SessionMeta> {
     let mtime = file_mtime(path);
     let key = path.to_string_lossy().to_string();
-    if let Some((t, m)) = META_CACHE.lock().unwrap().get(&key) {
+    if let Some((t, m)) = META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         if *t == mtime {
             return m.clone();
         }
     }
     let meta = parse(path);
-    META_CACHE.lock().unwrap().insert(key, (mtime, meta.clone()));
+    META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(key, (mtime, meta.clone()));
     meta
+}
+
+/// "YYYY-MM-DDTHH:MM:SS.sssZ" (Claude jsonl의 고정 포맷) → epoch seconds.
+/// 외부 크레이트 없이 Howard Hinnant의 civil_from_days 역산 공식을 사용.
+fn parse_iso_ts(s: &str) -> Option<f64> {
+    let b = s.as_bytes();
+    if b.len() < 20 {
+        return None;
+    }
+    let y: i64 = s.get(0..4)?.parse().ok()?;
+    let mo: i64 = s.get(5..7)?.parse().ok()?;
+    let d: i64 = s.get(8..10)?.parse().ok()?;
+    let h: i64 = s.get(11..13)?.parse().ok()?;
+    let mi: i64 = s.get(14..16)?.parse().ok()?;
+    let se: i64 = s.get(17..19)?.parse().ok()?;
+    let ms: f64 = s.get(20..23).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
+
+    let yy = if mo <= 2 { y - 1 } else { y };
+    let era = if yy >= 0 { yy } else { yy - 399 } / 400;
+    let yoe = yy - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+
+    Some((days * 86400 + h * 3600 + mi * 60 + se) as f64 + ms / 1000.0)
 }
 
 fn extract_text(content: &serde_json::Value) -> String {
@@ -203,9 +296,11 @@ fn extract_text(content: &serde_json::Value) -> String {
 }
 
 fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
-    let stat = fs::metadata(path).ok()?;
-    let mtime = stat.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs_f64();
-    let text = fs::read_to_string(path).ok()?;
+    let mtime = file_mtime(path);
+    // 큰 세션 파일(장기 세션)은 codex와 동일하게 head+tail만 읽어 폴링 부하를 낮춘다.
+    // first_prompt는 head, last_text/캐시 TTL/summary는 tail에서 나오므로 손실 없음
+    // (중간 구간의 message_count만 근사치가 됨).
+    let text = read_head_tail(path, 512 * 1024)?;
 
     let mut meta = SessionMeta {
         session_id: path.file_stem()?.to_string_lossy().to_string(),
@@ -217,6 +312,12 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
         message_count: 0,
         mtime,
         file: path.to_string_lossy().to_string(),
+        cache_last_ts: None,
+        cache_ttl_secs: None,
+        ctx_tokens: None,
+        ctx_window: None,
+        model: None,
+        recent: Vec::new(),
     };
 
     for line in text.lines() {
@@ -238,18 +339,50 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
         let t = obj["type"].as_str().unwrap_or("");
         if t == "user" || t == "assistant" {
             meta.message_count += 1;
-            if meta.first_prompt.is_none() && t == "user" && obj["isMeta"] != true {
+            if t == "user" && obj["isMeta"] != true {
                 let txt = extract_text(&obj["message"]["content"]);
                 let txt = txt.trim();
                 if !txt.is_empty() && !txt.starts_with('<') && !txt.starts_with("Caveat:") {
-                    meta.first_prompt = Some(txt.chars().take(120).collect());
+                    if meta.first_prompt.is_none() {
+                        meta.first_prompt = Some(txt.chars().take(120).collect());
+                    }
+                    push_recent(&mut meta.recent, "user", txt);
                 }
             }
             if t == "assistant" {
                 let txt = extract_text(&obj["message"]["content"]);
                 let txt = txt.trim();
                 if !txt.is_empty() {
-                    meta.last_text = Some(txt.chars().take(300).collect());
+                    meta.last_text = Some(txt.chars().take(1200).collect());
+                    push_recent(&mut meta.recent, "assistant", txt);
+                }
+
+                // 프롬프트 캐시 TTL 추적: 이 레코드가 캐시를 읽었거나 새로 썼으면
+                // 해당 시각부터 TTL이 (재)시작된 것으로 본다. 5분/1시간 중 실제
+                // 쓰기가 발생한 티어를 우선하고, 읽기만 있었다면 이전에 관찰된
+                // 티어를 유지한다(Anthropic 캐시는 5분 기본, 세션 내 1시간 명시 가능).
+                let u = &obj["message"]["usage"];
+                let read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                let w1h = u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0);
+                let w5m = u["cache_creation"]["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0);
+                if read > 0 || w1h > 0 || w5m > 0 {
+                    if let Some(ts) = obj["timestamp"].as_str().and_then(parse_iso_ts) {
+                        meta.cache_last_ts = Some(ts);
+                        if w1h > 0 {
+                            meta.cache_ttl_secs = Some(3600);
+                        } else if meta.cache_ttl_secs.is_none() {
+                            meta.cache_ttl_secs = Some(300); // 5분 쓰기 또는 티어 미관찰(읽기만) 시 기본값
+                        }
+                    }
+                }
+
+                // 사이드바 컨텍스트 게이지용: 마지막 assistant 응답의 컨텍스트 크기
+                // (session_usage와 동일한 계산이지만 이미 읽어둔 tail을 재사용해 추가 I/O 없음)
+                let ctx = u["input_tokens"].as_u64().unwrap_or(0) + read
+                    + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                if ctx > 0 {
+                    meta.ctx_tokens = Some(ctx);
+                    meta.model = obj["message"]["model"].as_str().map(|s| s.to_string());
                 }
             }
         }
@@ -271,6 +404,12 @@ fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
         message_count: 0,
         mtime: file_mtime(path),
         file: path.to_string_lossy().to_string(),
+        cache_last_ts: None,
+        cache_ttl_secs: None,
+        ctx_tokens: None,
+        ctx_window: None,
+        model: None,
+        recent: Vec::new(),
     };
     for line in text.lines() {
         let line = line.trim();
@@ -290,12 +429,13 @@ fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
             "event_msg" => match obj["payload"]["type"].as_str().unwrap_or("") {
                 "user_message" => {
                     meta.message_count += 1;
-                    if meta.first_prompt.is_none() {
-                        if let Some(m) = obj["payload"]["message"].as_str() {
-                            let m = m.trim();
-                            if !m.is_empty() {
+                    if let Some(m) = obj["payload"]["message"].as_str() {
+                        let m = m.trim();
+                        if !m.is_empty() {
+                            if meta.first_prompt.is_none() {
                                 meta.first_prompt = Some(m.chars().take(120).collect());
                             }
+                            push_recent(&mut meta.recent, "user", m);
                         }
                     }
                 }
@@ -304,8 +444,18 @@ fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
                     if let Some(m) = obj["payload"]["message"].as_str() {
                         let m = m.trim();
                         if !m.is_empty() {
-                            meta.last_text = Some(m.chars().take(300).collect());
+                            meta.last_text = Some(m.chars().take(1200).collect());
+                            push_recent(&mut meta.recent, "assistant", m);
                         }
+                    }
+                }
+                "token_count" => {
+                    let info = &obj["payload"]["info"];
+                    if let Some(tot) = info["total_token_usage"]["total_tokens"].as_u64() {
+                        meta.ctx_tokens = Some(tot);
+                    }
+                    if let Some(w) = info["model_context_window"].as_u64() {
+                        meta.ctx_window = Some(w);
                     }
                 }
                 _ => {}
@@ -355,39 +505,66 @@ fn gemini_project_paths(home: &std::path::Path) -> std::collections::HashMap<Str
     map
 }
 
+/// gemini json 파싱 — cwd에는 프로젝트 폴더명(원시)을 임시로 넣어 두고,
+/// 호출부에서 projects.json 매핑을 거쳐 실제 경로로 치환한다
+/// (cached_meta가 요구하는 fn(&PathBuf) -> Option<SessionMeta> 시그니처는 캡처를 허용하지 않음).
+fn read_gemini_meta(path: &PathBuf) -> Option<SessionMeta> {
+    let text = fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let sid = v["sessionId"].as_str()?;
+    let msgs = v["messages"].as_array().cloned().unwrap_or_default();
+    let first = msgs.iter().find(|m| m["type"] == "user").and_then(|m| {
+        m["content"].as_array().and_then(|c| c.iter().find_map(|p| p["text"].as_str()))
+    });
+    let last = msgs.iter().rev().find(|m| m["type"] != "user").and_then(|m| {
+        m["content"].as_array().and_then(|c| c.iter().find_map(|p| p["text"].as_str()))
+    });
+    let name = path.parent()?.parent()?.file_name()?.to_string_lossy().to_string();
+
+    let mut recent = Vec::new();
+    for m in msgs.iter().rev().take(RECENT_MAX) {
+        let role = if m["type"] == "user" { "user" } else { "assistant" };
+        let txt = m["content"].as_array().and_then(|c| c.iter().find_map(|p| p["text"].as_str())).unwrap_or("");
+        push_recent(&mut recent, role, txt);
+    }
+    recent.reverse();
+
+    Some(SessionMeta {
+        session_id: sid.to_string(),
+        agent: "gemini".into(),
+        cwd: name,
+        summary: None,
+        first_prompt: first.map(|s| s.trim().chars().take(120).collect()),
+        last_text: last.map(|s| s.trim().chars().take(1200).collect()),
+        message_count: msgs.len() as u32,
+        mtime: file_mtime(path),
+        file: path.to_string_lossy().to_string(),
+        cache_last_ts: None,
+        cache_ttl_secs: None,
+        ctx_tokens: None,
+        ctx_window: None,
+        model: None,
+        recent,
+    })
+}
+
 fn scan_gemini(out: &mut Vec<SessionMeta>) {
     let Some(home) = dirs::home_dir() else { return };
     let proj_map = gemini_project_paths(&home);
     let root = home.join(".gemini").join("tmp");
     let Ok(projects) = fs::read_dir(&root) else { return };
     for proj in projects.flatten() {
-        let name = proj.file_name().to_string_lossy().to_string();
         let chats = proj.path().join("chats");
         let Ok(files) = fs::read_dir(&chats) else { continue };
         for f in files.flatten() {
             let p = f.path();
             if p.extension().map(|x| x == "json").unwrap_or(false) {
-                let Ok(text) = fs::read_to_string(&p) else { continue };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-                let Some(sid) = v["sessionId"].as_str() else { continue };
-                let msgs = v["messages"].as_array().cloned().unwrap_or_default();
-                let first = msgs.iter().find(|m| m["type"] == "user").and_then(|m| {
-                    m["content"].as_array().and_then(|c| c.iter().find_map(|p| p["text"].as_str()))
-                });
-                let last = msgs.iter().rev().find(|m| m["type"] != "user").and_then(|m| {
-                    m["content"].as_array().and_then(|c| c.iter().find_map(|p| p["text"].as_str()))
-                });
-                out.push(SessionMeta {
-                    session_id: sid.to_string(),
-                    agent: "gemini".into(),
-                    cwd: proj_map.get(&name).cloned().unwrap_or_else(|| name.clone()),
-                    summary: None,
-                    first_prompt: first.map(|s| s.trim().chars().take(120).collect()),
-                    last_text: last.map(|s| s.trim().chars().take(300).collect()),
-                    message_count: msgs.len() as u32,
-                    mtime: file_mtime(&p),
-                    file: p.to_string_lossy().to_string(),
-                });
+                if let Some(mut meta) = cached_meta(&p, read_gemini_meta) {
+                    if let Some(real) = proj_map.get(&meta.cwd) {
+                        meta.cwd = real.clone();
+                    }
+                    out.push(meta);
+                }
             }
         }
     }
@@ -699,22 +876,34 @@ fn codex_state() -> Option<serde_json::Value> {
     None
 }
 
-/// 60초 캐시 — 프런트가 자주 불러도 API를 과도하게 치지 않음
+/// 3분 캐시 — 프런트가 자주 불러도 API를 과도하게 치지 않음 (이 엔드포인트는
+/// 짧은 간격으로 두드리면 429가 나기 쉬움).
 static USAGE_CACHE: Mutex<Option<(std::time::Instant, serde_json::Value)>> = Mutex::new(None);
 
 #[tauri::command]
-fn subscription_state() -> Option<serde_json::Value> {
-    {
-        let cache = USAGE_CACHE.lock().unwrap();
+fn subscription_state(force: bool) -> Option<serde_json::Value> {
+    if !force {
+        let cache = USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((t, v)) = cache.as_ref() {
-            if t.elapsed().as_secs() < 60 {
+            if t.elapsed().as_secs() < 180 {
                 return Some(v.clone());
             }
         }
     }
-    let result = fetch_usage_direct().or_else(usage_from_headroom)?;
-    *USAGE_CACHE.lock().unwrap() = Some((std::time::Instant::now(), result.clone()));
-    Some(result)
+    if let Some(direct) = fetch_usage_direct() {
+        *USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), direct.clone()));
+        return Some(direct);
+    }
+    // direct 호출 실패(429 등) 시, headroom의 오래됐을 수 있는 파일보다는
+    // 직전에 성공했던 direct 응답(캐시 TTL을 넘겼더라도)을 우선한다 —
+    // headroom 프로세스가 꺼져 있으면 그 파일이 며칠씩 묵어 있을 수 있음.
+    {
+        let cache = USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, v)) = cache.as_ref() {
+            return Some(v.clone());
+        }
+    }
+    usage_from_headroom()
 }
 
 /// headroom이 설치되어 있으면 절감 통계 반환 (없으면 None — 대시보드에서 섹션 생략)
@@ -757,10 +946,13 @@ fn delete_session(file: String) -> Result<(), String> {
     if !in_store || !is_session {
         return Err("invalid session file path".into());
     }
-    fs::remove_file(&p).map_err(|e| e.to_string())
+    fs::remove_file(&p).map_err(|e| e.to_string())?;
+    META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).remove(&p.to_string_lossy().to_string());
+    Ok(())
 }
 
 fn main() {
+    install_panic_hook();
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -841,12 +1033,27 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // X 버튼 = 트레이로 (세션 유지). 완전 종료는 트레이 메뉴의 "종료"
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+            // X 버튼 = 완전 종료. 창을 닫기 전에 열려 있는 PTY 자식 프로세스를
+            // 먼저 정리해 고아 프로세스로 남지 않게 한다.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let state = window.app_handle().state::<PtyState>();
+                let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
+                for (_, mut p) in map.drain() {
+                    let _ = p.child.kill();
+                }
             }
         })
         .run(tauri::generate_context!())
         .expect("error while running cli-deck");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso_ts_matches_known_epoch() {
+        let got = parse_iso_ts("2026-07-04T17:22:51.651Z").unwrap();
+        assert!((got - 1783185771.651).abs() < 0.001);
+    }
 }

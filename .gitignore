@@ -4,3 +4,4 @@ dist/
 *.log
 src-tauri/gen/
 *.stackdump
+/claude-deck.exe

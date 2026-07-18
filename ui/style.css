@@ -302,6 +302,15 @@ html, body {
 }
 .session-item.active .si-proj { background: rgba(217, 119, 87, 0.18); color: var(--accent); }
 
+.si-ttl {
+  margin-left: auto;
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
+}
+.si-ttl.warn { color: var(--accent); }
+
+.si-ctx { color: var(--text-faint); }
+
 .si-dot {
   position: absolute;
   top: 12px; right: 10px;
@@ -344,8 +353,24 @@ html, body {
 }
 
 /* 요금제 한도 위젯 */
-#foot-limits { display: flex; flex-direction: column; gap: 4px; }
+#foot-limits { display: flex; align-items: flex-start; gap: 6px; }
 #foot-limits.hidden { display: none; }
+#foot-limits-rows { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#btn-refresh-limits {
+  flex-shrink: 0;
+  width: 18px; height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 4px;
+}
+#btn-refresh-limits:hover:not(:disabled) { color: var(--text); background: var(--bg-hover); }
+#btn-refresh-limits:disabled { cursor: default; opacity: 0.5; }
+#btn-refresh-limits.spinning { animation: spin 0.8s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .limit-row { display: flex; align-items: center; gap: 7px; }
 .limit-label { width: 52px; font-size: 10px; color: var(--text-faint); flex-shrink: 0; white-space: nowrap; }
 .limit-bar {
@@ -632,11 +657,11 @@ kbd {
 #preview-card {
   position: fixed;
   z-index: 150;
-  width: 340px;
+  width: 480px;
   background: var(--bg-deep);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 13px 15px;
+  padding: 14px 16px;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
   pointer-events: none;
 }
@@ -651,10 +676,46 @@ kbd {
   font-size: 12px;
   line-height: 1.55;
   color: var(--text);
-  max-height: 110px;
+  max-height: 360px;
   overflow: hidden;
-  white-space: pre-wrap;
+  mask-image: linear-gradient(to bottom, black calc(100% - 20px), transparent 100%);
 }
+.pv-body p { margin: 0 0 8px; white-space: pre-wrap; }
+.pv-body p:last-child { margin-bottom: 0; }
+.pv-body h6 { margin: 10px 0 6px; font-size: 12.5px; color: var(--accent); }
+.pv-body ul { margin: 0 0 8px; padding-left: 18px; }
+.pv-body li { margin: 2px 0; }
+.pv-body code {
+  background: var(--bg-hover);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+}
+.pv-body pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+  overflow-x: auto;
+}
+.pv-body pre code { background: none; padding: 0; }
+.pv-body a { color: var(--accent); }
+.pv-turn {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+.pv-turn:first-child { padding-top: 0; border-top: none; }
+.pv-role {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+.pv-turn.user .pv-role { color: var(--accent); }
 .pv-meta {
   margin-top: 8px;
   font-size: 10.5px;
