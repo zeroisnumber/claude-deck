@@ -52,12 +52,315 @@ fn install_panic_hook() {
     }));
 }
 
+// ---------- PTY 트레이스 (상태 감지 판별자 실측용, 기본 꺼짐) ----------
+// 배경: "출력이 있으면 작업 중"으로는 안 된다는 게 확인됐다(대기 중에도 프롬프트
+// 박스 재그리기 같은 단발 출력이 있음). 그래서 판별자를 밀도 기반으로 가야 하는데,
+// 임계값을 추측으로 정하지 않으려고 청크 도착 패턴을 실제로 찍어본다.
+//
+// 릴리스 빌드에서는 항상 꺼져 있다 (배포본에 진단 로그를 남기지 않으려고).
+// 디버그 빌드에서 켜기: 환경변수 CLI_DECK_PTY_TRACE=1, 또는 데이터 폴더에 빈 파일 TRACE 생성.
+//   환경변수는 그걸 설정한 셸에서 띄웠을 때만 붙어서(탐색기 더블클릭이면 안 붙는다)
+//   놓치기 쉬우므로 파일 방식도 함께 지원한다 — 어떻게 실행하든 켜진다.
+// 출력: %LOCALAPPDATA%\com.user.cli-deck\pty-trace.log
+// 형식: <경과ms>	<pty id>	<에이전트>	<종류>	<값>
+//   out    = "<바이트수>,<스피너글리프 포함 1|0>"
+//   in     = 사용자 입력 바이트수 (타이핑 에코를 출력과 구분하기 위해 필요)
+//   spawn  = 실행 명령, exit = 없음
+//   #start = <epoch ms>	<기준 경과ms> — 벽시계 환산용 (세션 jsonl과 대조)
+static PTY_TRACE: LazyLock<bool> = LazyLock::new(|| {
+    // 배포되는 빌드에는 진단 계측을 남기지 않는다 — 이 분기는 컴파일 시점에
+    // 상수로 접히므로 릴리스에서는 기록 경로 자체가 사라진다.
+    // 다시 수집하려면 디버그 빌드(debug.bat)로 실행하면 된다.
+    if !cfg!(debug_assertions) {
+        return false;
+    }
+    let by_env = std::env::var("CLI_DECK_PTY_TRACE")
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0"
+        })
+        .unwrap_or(false);
+    let by_file = dirs::data_local_dir()
+        .map(|d| d.join("com.user.cli-deck").join("TRACE").exists())
+        .unwrap_or(false);
+    by_env || by_file
+});
+
+static TRACE_START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+static TRACE_FILE: LazyLock<Mutex<Option<(fs::File, u64)>>> = LazyLock::new(|| Mutex::new(None));
+
+/// 며칠 켜둬도 디스크를 잡아먹지 않도록. 샘플링 대신 상한으로 끊는다 —
+/// 청크 간격 분포가 신호 자체라 솎아내면 데이터가 망가진다.
+const TRACE_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// ccmanager가 Claude 감지에 쓰는 스피너 문자 집합
+const SPINNER_GLYPHS: &str = "✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❇❈❉❊❋✢✣✤✥✦✧✨⊛⊕⊙◉◎◍⁂⁕※⍟☼★☆·•⏺▸▹∙⋅○●";
+
+fn trace(id: &str, agent: &str, kind: &str, value: &str) {
+    if !*PTY_TRACE {
+        return;
+    }
+    let mut guard = TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        let Some(dir) = dirs::data_local_dir() else { return };
+        let dir = dir.join("com.user.cli-deck");
+        if fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let Ok(f) = fs::OpenOptions::new().create(true).append(true).open(dir.join("pty-trace.log"))
+        else {
+            return;
+        };
+        let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+        *guard = Some((f, size));
+        // 경과 ms만으로는 세션 jsonl의 타임스탬프와 대조할 수 없다 —
+        // "이 구간이 권한 대기였나 작업중이었나"의 정답이 거기 있으므로
+        // 실행마다 기준점을 남겨 벽시계 시각으로 환산할 수 있게 한다.
+        // wall_ms = epoch_ms + (경과ms - 기준경과ms)
+        let epoch_ms = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let header = format!("#start\t{}\t{}\n", epoch_ms, TRACE_START.elapsed().as_millis());
+        if let Some((f, written)) = guard.as_mut() {
+            use std::io::Write as _;
+            if f.write_all(header.as_bytes()).is_ok() {
+                *written += header.len() as u64;
+            }
+        }
+    }
+    let Some((f, written)) = guard.as_mut() else { return };
+    if *written >= TRACE_MAX_BYTES {
+        return;
+    }
+    let line = format!(
+        "{}\t{}\t{}\t{}\t{}\n",
+        TRACE_START.elapsed().as_millis(),
+        id,
+        agent,
+        kind,
+        value
+    );
+    use std::io::Write as _;
+    if f.write_all(line.as_bytes()).is_ok() {
+        *written += line.len() as u64;
+    }
+}
+
+/// 세 에이전트의 출력 분포가 섞이면 아무것도 못 배우므로 실행 명령에서 라벨을 뽑는다
+fn trace_agent_label(command: &str) -> String {
+    let c = command.to_lowercase();
+    for name in ["codex", "gemini", "claude"] {
+        if c.contains(name) {
+            return name.to_string();
+        }
+    }
+    "other".to_string()
+}
+
+/// 멀티바이트 글리프가 청크 경계에서 잘릴 수 있어 직전 청크의 꼬리 몇 바이트를 이어 붙여
+/// 검사한다. 경계에 걸친 글리프가 다음 청크로 밀려 잡힐 수는 있으나, 기록하는 건
+/// 청크당 불리언 하나라 분석에는 영향이 없다.
+fn has_spinner_glyph(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).chars().any(|c| SPINNER_GLYPHS.contains(c))
+}
+
+// ---------- 작업 상태 판정 ----------
+// 전부 pty-trace.log 실측으로 정한 값이다. 근거는 각 상수에 적어둔다.
+// 핵심 구조: "지금 작업 중인가"는 PTY 출력 밀도가 답하고(Rust에서 판정하므로
+// WebView 백그라운드 스로틀링과 무관), "턴이 끝났는가"는 세션 파일이 답한다.
+// 침묵 길이로 완료를 판정할 수 없다는 게 실측으로 확인됐다 — 턴 내부 침묵이
+// 78.7초까지 관측된 반면 턴 종료 침묵이 28.7초인 사례가 있어 분포가 역전된다.
+
+/// 입력 후 이 시간 안에 온 출력은 타이핑 에코로 보고 활동에서 제외.
+/// 실측: 300~1200ms 중 어느 값을 써도 결과가 같았다(민감하지 않음).
+const ECHO_MS: u64 = 800;
+/// 이보다 벌어지면 다른 버스트. 실측: 작업 중 청크 간격 p90 = 145ms.
+const BURST_GAP_MS: u64 = 500;
+/// 버스트가 이보다 길면 작업 중. 실측: 대기 중 단발 출력은 최대 250ms,
+/// 가장 짧은 에이전트 버스트는 1.15초로 사이가 비어 있다.
+const BURST_MIN_MS: u64 = 1000;
+/// 파일이 "아직 작업 중"이라고 말해도 이만큼 조용하면 강제로 완료 처리.
+/// 세션 파일이 없는 탭(새 세션·Gemini)의 유일한 완료 판정이기도 하다.
+/// 실측된 턴 내부 최장 침묵 78.7초에 여유를 둔 값.
+const MAX_WORKING_SILENCE_MS: u64 = 120_000;
+/// 버스트가 끝난 뒤 파일을 다시 확인하는 간격 (250ms마다 읽지 않도록)
+const FILE_RECHECK_MS: u64 = 2_000;
+
+struct Activity {
+    last_input: Option<std::time::Instant>,
+    last_out: Option<std::time::Instant>,
+    burst_start: Option<std::time::Instant>,
+    working: bool,
+    last_check: Option<std::time::Instant>,
+    agent: String,
+    /// 세션 파일 — 턴 종료 판정용. 없으면(새 세션) 침묵 타임아웃만 쓴다.
+    file: Option<PathBuf>,
+}
+
+static ACTIVITY: LazyLock<Mutex<HashMap<String, Activity>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone, Serialize)]
+struct PtyStateEvent {
+    id: String,
+    working: bool,
+}
+
+/// 파일 끝부분만 읽는다 (턴 상태는 마지막 레코드에만 있음)
+fn read_tail(path: &std::path::Path, limit: u64) -> Option<String> {
+    use std::io::{Read as _, Seek, SeekFrom};
+    let size = fs::metadata(path).ok()?.len();
+    let mut f = fs::File::open(path).ok()?;
+    if size > limit {
+        f.seek(SeekFrom::End(-(limit as i64))).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// 턴이 아직 진행 중인가. "작업 중"을 화이트리스트로 정의한다 —
+/// 오류·한도 초과·중단은 종류를 열거할 수 없고(실측에서 stop_sequence로 끝난
+/// 한도 초과 턴이 나왔다), 열거를 놓치면 탭이 영영 작업중으로 남는다.
+fn turn_in_progress(file: &std::path::Path) -> bool {
+    // Gemini는 턴마다 append하지 않고 통짜 JSON을 다시 쓰므로 신호가 없다.
+    // 이런 탭은 침묵 타임아웃에만 의존한다.
+    if file.extension().map(|e| e != "jsonl").unwrap_or(true) {
+        return false;
+    }
+    let Some(text) = read_tail(file, 32 * 1024) else { return false };
+    for line in text.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(o) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if o["isSidechain"] == true {
+            continue; // 서브에이전트 레코드는 메인 턴 상태가 아니다
+        }
+        match o["type"].as_str().unwrap_or("") {
+            "assistant" => {
+                // 툴 호출로 끝났으면 결과를 기다리는 중 = 진행 중.
+                // end_turn·stop_sequence·그 밖의 무엇이든 턴은 끝난 것으로 본다.
+                return o["message"]["stop_reason"] == "tool_use";
+            }
+            "user" => {
+                let txt = extract_text(&o["message"]["content"]);
+                if txt.trim().starts_with("[Request interrupted") {
+                    return false; // 사용자가 중단함
+                }
+                // 프롬프트 제출 또는 tool_result → 에이전트 차례
+                return true;
+            }
+            // codex: 마지막 이벤트가 에이전트 응답이면 끝난 것으로 본다
+            "event_msg" => match o["payload"]["type"].as_str().unwrap_or("") {
+                "agent_message" => return false,
+                "user_message" => return true,
+                _ => continue,
+            },
+            _ => continue,
+        }
+    }
+    false
+}
+
+/// 출력 청크 도착 — 타이핑 에코가 아니면 버스트를 잇는다
+fn note_output(id: &str) {
+    let now = std::time::Instant::now();
+    let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(a) = act.get_mut(id) else { return };
+    let echo = a
+        .last_input
+        .map(|t| now.duration_since(t).as_millis() as u64 <= ECHO_MS)
+        .unwrap_or(false);
+    if echo {
+        return;
+    }
+    let gap = a
+        .last_out
+        .map(|t| now.duration_since(t).as_millis() as u64)
+        .unwrap_or(u64::MAX);
+    if gap >= BURST_GAP_MS {
+        a.burst_start = Some(now);
+    }
+    a.last_out = Some(now);
+}
+
+/// 버스트 상태를 주기적으로 평가해 working 전이를 이벤트로 올린다.
+/// JS 타이머가 아니라 여기서 판정하는 게 요점 — 창이 백그라운드로 가도 멈추지 않는다.
+fn spawn_state_monitor(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let now = std::time::Instant::now();
+        let ms = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_millis() as u64;
+
+        // 1단계: 잠금 안에서 판정에 필요한 것만 모은다 (파일 I/O는 잠금 밖에서)
+        let mut turn_on: Vec<String> = Vec::new();
+        let mut candidates: Vec<(String, Option<PathBuf>, u64)> = Vec::new();
+        {
+            let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+            for (id, a) in act.iter_mut() {
+                let (Some(bs), Some(lo)) = (a.burst_start, a.last_out) else { continue };
+                let silence = ms(lo, now);
+                if silence < BURST_GAP_MS {
+                    if !a.working && ms(bs, lo) >= BURST_MIN_MS {
+                        a.working = true;
+                        trace(id, &a.agent, "state", "working");
+                        turn_on.push(id.clone());
+                    }
+                } else if a.working {
+                    let due = a.last_check.map(|t| ms(t, now) >= FILE_RECHECK_MS).unwrap_or(true);
+                    if due {
+                        a.last_check = Some(now);
+                        candidates.push((id.clone(), a.file.clone(), silence));
+                    }
+                }
+            }
+        }
+
+        // 2단계: 잠금 밖에서 세션 파일 확인
+        let mut turn_off: Vec<String> = Vec::new();
+        for (id, file, silence) in candidates {
+            let done = silence >= MAX_WORKING_SILENCE_MS
+                || match &file {
+                    Some(p) => !turn_in_progress(p),
+                    None => false, // 파일이 없으면 타임아웃까지 기다린다
+                };
+            if done {
+                turn_off.push(id);
+            }
+        }
+
+        // 3단계: 확정된 것만 반영
+        if !turn_off.is_empty() {
+            let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+            turn_off.retain(|id| match act.get_mut(id) {
+                Some(a) if a.working => {
+                    a.working = false;
+                    trace(id, &a.agent, "state", "idle");
+                    true
+                }
+                _ => false,
+            });
+        }
+        for id in turn_on {
+            let _ = app.emit("pty-state", PtyStateEvent { id, working: true });
+        }
+        for id in turn_off {
+            let _ = app.emit("pty-state", PtyStateEvent { id, working: false });
+        }
+    });
+}
+
 // ---------- PTY 관리 ----------
 
 struct PtyInstance {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// 트레이스 라벨 (claude/codex/gemini) — write_pty에서 입력 이벤트를 찍을 때 씀
+    agent: String,
     /// 같은 id로 재시작(kill 직후 spawn)했을 때, 죽은 이전 프로세스의 대기 스레드가
     /// 새 인스턴스를 지워버리지 않도록 구분하는 세대 번호
     generation: u64,
@@ -76,6 +379,7 @@ fn finish_pty(app: &AppHandle, id: &str, generation: u64) {
     }
     map.remove(id);
     drop(map);
+    ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
     let _ = app.emit("pty-exit", PtyExit { id: id.to_string() });
 }
 
@@ -100,6 +404,8 @@ fn spawn_pty(
     id: String,
     cwd: String,
     command: String,
+    // 세션 파일 경로 — 턴 종료 판정용. 새 세션은 아직 파일이 없어 None.
+    file: Option<String>,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
@@ -132,20 +438,47 @@ fn spawn_pty(
     let killer = child.clone_killer();
     let generation = PTY_GENERATION.fetch_add(1, Ordering::Relaxed);
 
+    let agent = trace_agent_label(&claude_cmd);
+    trace(&id, &agent, "spawn", &claude_cmd);
+
+    ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        id.clone(),
+        Activity {
+            last_input: None,
+            last_out: None,
+            burst_start: None,
+            working: false,
+            last_check: None,
+            agent: agent.clone(),
+            file: file.filter(|f| !f.trim().is_empty()).map(PathBuf::from),
+        },
+    );
+
     // 출력 스트리밍 스레드
     let app2 = app.clone();
     let id2 = id.clone();
+    let agent2 = agent.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
+        let mut carry: Vec<u8> = Vec::new();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    if *PTY_TRACE {
+                        let mut scan = std::mem::take(&mut carry);
+                        scan.extend_from_slice(&buf[..n]);
+                        let spin = u8::from(has_spinner_glyph(&scan));
+                        carry = buf[n.saturating_sub(3)..n].to_vec();
+                        trace(&id2, &agent2, "out", &format!("{},{}", n, spin));
+                    }
+                    note_output(&id2);
                     let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
                     let _ = app2.emit("pty-output", PtyOutput { id: id2.clone(), data });
                 }
             }
         }
+        trace(&id2, &agent2, "exit", "");
         finish_pty(&app2, &id2, generation);
     });
 
@@ -163,7 +496,7 @@ fn spawn_pty(
         finish_pty(&app3, &id3, generation);
     });
 
-    map.insert(id, PtyInstance { master: pair.master, writer, killer, generation });
+    map.insert(id, PtyInstance { master: pair.master, writer, killer, agent, generation });
     Ok(())
 }
 
@@ -171,6 +504,10 @@ fn spawn_pty(
 fn write_pty(state: State<PtyState>, id: String, data: String) -> Result<(), String> {
     let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(p) = map.get_mut(&id) {
+        trace(&id, &p.agent, "in", &data.len().to_string());
+        if let Some(a) = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
+            a.last_input = Some(std::time::Instant::now());
+        }
         p.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -193,6 +530,7 @@ fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String> {
     if let Some(mut p) = map.remove(&id) {
         let _ = p.killer.kill();
     }
+    ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     Ok(())
 }
 
@@ -1126,6 +1464,8 @@ fn main() {
                 })
                 .build(app)?;
 
+            spawn_state_monitor(app.handle().clone());
+
             // WebView2 초기 IME 바인딩 버그 우회: 시작 직후 포커스를 프로그램적으로
             // 재이동시켜 "다른 창 갔다 오기"와 동일한 재바인딩을 강제한다.
             // 이게 없으면 첫 입력에서 한글 조합이 중복되고 조합창이 화면 구석에 뜬다.
@@ -1197,6 +1537,61 @@ mod tests {
             rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
             "자식이 종료됐는데 wait()가 돌아오지 않음 — 탭이 '종료됨'으로 바뀌지 않는다"
         );
+    }
+
+    /// 완료 판정 게이트. 여기서 "진행 중"을 잘못 넓게 잡으면 탭이 영영
+    /// 작업중으로 남으므로(방금 고친 종료 감지 버그의 거울상) 화이트리스트가
+    /// 의도대로 좁은지 확인한다.
+    #[test]
+    fn turn_in_progress_whitelists_only_live_turns() {
+        let dir = std::env::temp_dir().join("cli-deck-turn-test");
+        let _ = fs::create_dir_all(&dir);
+        let check = |name: &str, body: &str| {
+            let p = dir.join(name);
+            fs::write(&p, body).unwrap();
+            turn_in_progress(&p)
+        };
+
+        // 툴 결과를 기다리는 중 = 진행 중
+        assert!(check(
+            "a.jsonl",
+            r#"{"type":"assistant","message":{"stop_reason":"tool_use"}}"#
+        ));
+        // 프롬프트를 넣었고 아직 응답 없음 = 진행 중
+        assert!(check(
+            "b.jsonl",
+            r#"{"type":"user","message":{"content":"안녕"}}"#
+        ));
+        // 정상 종료
+        assert!(!check(
+            "c.jsonl",
+            r#"{"type":"assistant","message":{"stop_reason":"end_turn"}}"#
+        ));
+        // 한도 초과 등으로 끝난 턴 — 열거하지 않아도 종료로 잡혀야 한다
+        assert!(!check(
+            "d.jsonl",
+            r#"{"type":"assistant","message":{"stop_reason":"stop_sequence"}}"#
+        ));
+        // 사용자 중단 마커는 프롬프트가 아니다
+        assert!(!check(
+            "e.jsonl",
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#
+        ));
+        // 서브에이전트 레코드가 메인 턴 상태를 덮어쓰면 안 된다
+        assert!(!check(
+            "f.jsonl",
+            "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n\
+             {\"type\":\"assistant\",\"isSidechain\":true,\"message\":{\"stop_reason\":\"tool_use\"}}"
+        ));
+        // 상태 레코드가 아닌 줄은 건너뛴다
+        assert!(!check(
+            "g.jsonl",
+            "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n\
+             {\"type\":\"file-history-snapshot\"}"
+        ));
+        // Gemini는 턴 단위 기록이 없어 파일로 판정할 수 없다 → 타임아웃에 맡긴다
+        assert!(!check("h.json", r#"{"sessionId":"x","messages":[]}"#));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

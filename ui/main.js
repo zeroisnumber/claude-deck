@@ -325,28 +325,19 @@ async function notifyDone(id, t) {
   }
 }
 
-// 1초마다 답변중/idle 판정 (최근 2.5초 내 "자발적 출력" = 답변중 — 타이핑 에코 제외)
-setInterval(() => {
-  const now = Date.now();
-  let changed = false;
-  for (const [id, t] of terms) {
-    const busy = !t.exited && now - t.lastAuto < 2500;
-    if (busy !== t.busy) {
-      if (busy) {
-        t.busySince = now;
-      } else if (now - (t.busySince || now) > 5000) {
-        // 5초 이상 작업하다 멈춤 = 응답 완료로 판정 (타이핑 에코 등 짧은 활동은 제외)
-        notifyDone(id, t);
-      }
-      t.busy = busy;
-      changed = true;
-    }
-  }
-  if (changed) {
-    renderTabs();
-    renderSidebar();
-  }
-}, 1000);
+// 작업중/완료 판정은 Rust가 한다 (PTY 출력 밀도 + 세션 파일의 턴 종료).
+// 예전에는 여기서 1초마다 "최근 2.5초 내 출력이 있었나"로 추정했는데,
+// 실측 결과 턴 내부 침묵이 78.7초까지 나와서 그 방식으로는 완료를 알 수 없었다.
+// 창이 백그라운드로 가면 이 타이머 자체가 스로틀링되는 문제도 있었다.
+listen("pty-state", (ev) => {
+  const { id, working } = ev.payload;
+  const t = terms.get(id);
+  if (!t || t.busy === working) return;
+  t.busy = working;
+  if (!working && !t.exited) notifyDone(id, t);
+  renderTabs();
+  renderSidebar();
+});
 
 // ---------- 터미널 ----------
 function makeTerm(id, title, cwd) {
@@ -368,11 +359,7 @@ function makeTerm(id, title, cwd) {
   term.loadAddon(fit);
   term.open(container);
 
-  term.onData((d) => {
-    const t = terms.get(id);
-    if (t) t.lastInput = Date.now();
-    invoke("write_pty", { id, data: d });
-  });
+  term.onData((d) => invoke("write_pty", { id, data: d }));
 
   // Ctrl+V / Shift+Insert = Tauri 클립보드로 붙여넣기 (WebView2 네이티브 paste 미동작 대응.
   // preventDefault로 keydown을 완전히 가로채므로 이중 붙여넣기도 발생하지 않음)
@@ -422,7 +409,7 @@ function makeTerm(id, title, cwd) {
     }
   });
 
-  const entry = { term, fit, container, title, cwd, exited: false, busy: false, lastOutput: Date.now(), profile: null, lastInput: 0, lastAuto: 0 };
+  const entry = { term, fit, container, title, cwd, exited: false, busy: false, profile: null };
   terms.set(id, entry);
   tabOrder.push(id);
   return entry;
@@ -456,11 +443,12 @@ async function openSession(meta, focus = true) {
   const spec = commandFor(meta);
   entry.profile = spec.profile;
   entry.spawnCommand = spec.cmd;
+  entry.file = meta.file;
   if (focus) activate(id);
   else renderTabs();
   try {
     await invoke("spawn_pty", {
-      id, cwd: meta.cwd, command: entry.spawnCommand,
+      id, cwd: meta.cwd, command: entry.spawnCommand, file: meta.file,
       cols: entry.term.cols, rows: entry.term.rows,
     });
   } catch (err) {
@@ -480,7 +468,7 @@ async function openNewSession(cwd) {
   activate(id);
   try {
     await invoke("spawn_pty", {
-      id, cwd, command: entry.spawnCommand,
+      id, cwd, command: entry.spawnCommand, file: null,
       cols: entry.term.cols, rows: entry.term.rows,
     });
   } catch (err) {
@@ -502,7 +490,7 @@ async function restartTab(id) {
   activate(id);
   try {
     await invoke("spawn_pty", {
-      id, cwd: t.cwd, command: t.spawnCommand || "claude",
+      id, cwd: t.cwd, command: t.spawnCommand || "claude", file: t.file || null,
       cols: t.term.cols, rows: t.term.rows,
     });
   } catch (err) {
@@ -666,13 +654,7 @@ function makeTabDraggable(el) {
 listen("pty-output", (ev) => {
   const { id, data } = ev.payload;
   const t = terms.get(id);
-  if (t) {
-    t.term.write(b64ToBytes(data));
-    const now = Date.now();
-    t.lastOutput = now;
-    // 최근 입력의 에코가 아닌 "자발적 출력"만 활동으로 인정 (타이핑은 busy 아님)
-    if (now - t.lastInput > 800) t.lastAuto = now;
-  }
+  if (t) t.term.write(b64ToBytes(data));
 });
 
 listen("pty-exit", (ev) => {
