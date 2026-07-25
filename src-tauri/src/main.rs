@@ -454,7 +454,13 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
             if t == "user" && obj["isMeta"] != true {
                 let txt = extract_text(&obj["message"]["content"]);
                 let txt = txt.trim();
-                if !txt.is_empty() && !txt.starts_with('<') && !txt.starts_with("Caveat:") {
+                // "[Request interrupted by user]"는 사용자가 친 프롬프트가 아니라
+                // 중단 마커라서 제목/미리보기에 뜨면 안 된다
+                if !txt.is_empty()
+                    && !txt.starts_with('<')
+                    && !txt.starts_with("Caveat:")
+                    && !txt.starts_with("[Request interrupted")
+                {
                     if meta.first_prompt.is_none() {
                         meta.first_prompt = Some(txt.chars().take(120).collect());
                     }
