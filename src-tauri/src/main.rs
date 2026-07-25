@@ -2,14 +2,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::Engine;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
     io::{Read, Write},
     path::PathBuf,
-    sync::{LazyLock, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        LazyLock, Mutex,
+    },
     time::UNIX_EPOCH,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -54,7 +57,26 @@ fn install_panic_hook() {
 struct PtyInstance {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
+    /// 같은 id로 재시작(kill 직후 spawn)했을 때, 죽은 이전 프로세스의 대기 스레드가
+    /// 새 인스턴스를 지워버리지 않도록 구분하는 세대 번호
+    generation: u64,
+}
+
+static PTY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 프로세스 종료 처리 — 이 세대가 아직 유효할 때만 맵에서 지우고 이벤트를 보낸다.
+/// (kill_pty로 이미 정리됐거나 재시작된 경우에는 아무것도 하지 않음)
+fn finish_pty(app: &AppHandle, id: &str, generation: u64) {
+    let state = app.state::<PtyState>();
+    let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    match map.get(id) {
+        Some(p) if p.generation == generation => {}
+        _ => return,
+    }
+    map.remove(id);
+    drop(map);
+    let _ = app.emit("pty-exit", PtyExit { id: id.to_string() });
 }
 
 #[derive(Default)]
@@ -102,11 +124,13 @@ fn spawn_pty(
     };
     cmd.cwd(&workdir);
 
-    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let killer = child.clone_killer();
+    let generation = PTY_GENERATION.fetch_add(1, Ordering::Relaxed);
 
     // 출력 스트리밍 스레드
     let app2 = app.clone();
@@ -122,13 +146,24 @@ fn spawn_pty(
                 }
             }
         }
-        // 자연 종료 시 맵에서 제거해 같은 id로 재시작 가능하게 함
-        let state = app2.state::<PtyState>();
-        state.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&id2);
-        let _ = app2.emit("pty-exit", PtyExit { id: id2.clone() });
+        finish_pty(&app2, &id2, generation);
     });
 
-    map.insert(id, PtyInstance { master: pair.master, writer, child });
+    // 종료 감지 스레드 — ConPTY는 자식이 죽어도 마스터 쪽 read가 EOF를 돌려주지
+    // 않는다(테스트 child_wait_returns_when_process_exits 참고). 리더 EOF만 믿으면
+    // 탭이 영원히 "실행 중"으로 남으므로 자식을 직접 기다린다.
+    // 단, 자식이 죽는 순간에도 리더 스레드에는 아직 흘려보내지 못한 출력이 남아 있을 수
+    // 있다. 곧바로 pty-exit을 쏘면 "── 프로세스가 종료되었습니다 ──"가 마지막 출력보다
+    // 먼저 찍히므로 잠깐 배출 시간을 준다.
+    let app3 = app.clone();
+    let id3 = id.clone();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        finish_pty(&app3, &id3, generation);
+    });
+
+    map.insert(id, PtyInstance { master: pair.master, writer, killer, generation });
     Ok(())
 }
 
@@ -156,7 +191,7 @@ fn resize_pty(state: State<PtyState>, id: String, cols: u16, rows: u16) -> Resul
 fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String> {
     let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(mut p) = map.remove(&id) {
-        let _ = p.child.kill();
+        let _ = p.killer.kill();
     }
     Ok(())
 }
@@ -170,6 +205,8 @@ struct SessionMeta {
     cwd: String,
     summary: Option<String>,
     first_prompt: Option<String>,
+    /// recent와 마찬가지로 미리보기 전용 — 목록 응답에서는 제외한다
+    #[serde(skip_serializing)]
     last_text: Option<String>,
     message_count: u32,
     mtime: f64,
@@ -185,7 +222,58 @@ struct SessionMeta {
     /// 마지막으로 관측된 모델명
     model: Option<String>,
     /// 호버 미리보기용 최근 대화 (최대 3턴 = 6개). 오래된 것부터 순서대로.
+    /// 목록에는 싣지 않는다 — 세션 수 × 3KB가 20초마다 IPC로 넘어가는데
+    /// 프런트는 호버할 때만 쓰므로 session_preview로 그때 가져간다.
+    #[serde(skip_serializing)]
     recent: Vec<RecentMsg>,
+}
+
+/// 호버 미리보기 전용 페이로드 (목록에서 제외한 무거운 필드만)
+#[derive(Serialize)]
+struct SessionPreview {
+    last_text: Option<String>,
+    recent: Vec<RecentMsg>,
+}
+
+/// 사이드바 목록용 경량 사본 — 무거운 필드는 복사조차 하지 않는다.
+fn light_meta(m: &SessionMeta) -> SessionMeta {
+    SessionMeta {
+        session_id: m.session_id.clone(),
+        agent: m.agent.clone(),
+        cwd: m.cwd.clone(),
+        summary: m.summary.clone(),
+        first_prompt: m.first_prompt.clone(),
+        last_text: None,
+        message_count: m.message_count,
+        mtime: m.mtime,
+        file: m.file.clone(),
+        cache_last_ts: m.cache_last_ts,
+        cache_ttl_secs: m.cache_ttl_secs,
+        ctx_tokens: m.ctx_tokens,
+        ctx_window: m.ctx_window,
+        model: m.model.clone(),
+        recent: Vec::new(),
+    }
+}
+
+/// 파일 경로로 파서를 고른다 (claude/codex/gemini 저장소 구조가 서로 다름)
+fn parser_for(path: &std::path::Path) -> fn(&PathBuf) -> Option<SessionMeta> {
+    let s = path.to_string_lossy();
+    if s.contains(".codex") {
+        read_codex_meta
+    } else if s.contains(".gemini") {
+        read_gemini_meta
+    } else {
+        read_meta
+    }
+}
+
+/// 호버 시점에만 호출 — 대개 목록 스캔이 이미 채워둔 캐시에서 바로 나온다.
+#[tauri::command]
+fn session_preview(file: String) -> Option<SessionPreview> {
+    let p = PathBuf::from(&file);
+    let m = cached_meta(&p, parser_for(&p))?;
+    Some(SessionPreview { last_text: m.last_text, recent: m.recent })
 }
 
 #[derive(Serialize, Clone)]
@@ -245,17 +333,39 @@ fn read_head_tail(path: &std::path::Path, limit: u64) -> Option<String> {
 static META_CACHE: LazyLock<Mutex<HashMap<String, (f64, Option<SessionMeta>)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn cached_meta(path: &PathBuf, parse: fn(&PathBuf) -> Option<SessionMeta>) -> Option<SessionMeta> {
+fn cached_meta_with(
+    path: &PathBuf,
+    parse: fn(&PathBuf) -> Option<SessionMeta>,
+    pick: fn(&SessionMeta) -> SessionMeta,
+) -> Option<SessionMeta> {
     let mtime = file_mtime(path);
     let key = path.to_string_lossy().to_string();
     if let Some((t, m)) = META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         if *t == mtime {
-            return m.clone();
+            return m.as_ref().map(pick);
         }
     }
     let meta = parse(path);
-    META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(key, (mtime, meta.clone()));
-    meta
+    let picked = meta.as_ref().map(pick);
+    META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(key, (mtime, meta));
+    picked
+}
+
+fn cached_meta(path: &PathBuf, parse: fn(&PathBuf) -> Option<SessionMeta>) -> Option<SessionMeta> {
+    cached_meta_with(path, parse, |m| m.clone())
+}
+
+/// 목록 스캔용 — 캐시에서 경량 필드만 복사한다
+fn cached_meta_light(path: &PathBuf, parse: fn(&PathBuf) -> Option<SessionMeta>) -> Option<SessionMeta> {
+    cached_meta_with(path, parse, light_meta)
+}
+
+/// 사라진 세션 파일의 캐시 항목 정리 (없으면 무한히 쌓임)
+fn evict_stale_cache() {
+    META_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|k, _| std::path::Path::new(k).exists());
 }
 
 /// "YYYY-MM-DDTHH:MM:SS.sssZ" (Claude jsonl의 고정 포맷) → epoch seconds.
@@ -379,7 +489,7 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
                 }
 
                 // 사이드바 컨텍스트 게이지용: 마지막 assistant 응답의 컨텍스트 크기
-                // (session_usage와 동일한 계산이지만 이미 읽어둔 tail을 재사용해 추가 I/O 없음)
+                // (이미 읽어둔 tail을 재사용하므로 추가 I/O 없음)
                 let ctx = u["input_tokens"].as_u64().unwrap_or(0) + read
                     + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
                 if ctx > 0 {
@@ -482,7 +592,7 @@ fn scan_codex(out: &mut Vec<SessionMeta>) {
             if p.is_dir() {
                 stack.push(p);
             } else if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
-                if let Some(m) = cached_meta(&p, read_codex_meta) {
+                if let Some(m) = cached_meta_light(&p, read_codex_meta) {
                     out.push(m);
                 }
             }
@@ -561,7 +671,7 @@ fn scan_gemini(out: &mut Vec<SessionMeta>) {
         for f in files.flatten() {
             let p = f.path();
             if p.extension().map(|x| x == "json").unwrap_or(false) {
-                if let Some(mut meta) = cached_meta(&p, read_gemini_meta) {
+                if let Some(mut meta) = cached_meta_light(&p, read_gemini_meta) {
                     if let Some(real) = proj_map.get(&meta.cwd) {
                         meta.cwd = real.clone();
                     }
@@ -574,6 +684,7 @@ fn scan_gemini(out: &mut Vec<SessionMeta>) {
 
 #[tauri::command]
 fn list_sessions() -> Vec<SessionMeta> {
+    evict_stale_cache();
     let mut out = Vec::new();
     scan_codex(&mut out);
     scan_gemini(&mut out);
@@ -586,7 +697,7 @@ fn list_sessions() -> Vec<SessionMeta> {
         for f in files.flatten() {
             let path = f.path();
             if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                if let Some(mut meta) = cached_meta(&path, read_meta) {
+                if let Some(mut meta) = cached_meta_light(&path, read_meta) {
                     if meta.cwd.is_empty() {
                         // 폴더명(C--workspace-foo)에서 경로 근사 복원 (비ASCII 폴더명 바이트 경계 패닉 방지)
                         let name = proj.file_name().to_string_lossy().to_string();
@@ -608,67 +719,9 @@ fn list_sessions() -> Vec<SessionMeta> {
 
 // ---------- 사용량 통계 (세션 jsonl의 usage 레코드 기반 — 프록시 불필요) ----------
 
-#[derive(Serialize)]
-struct SessionUsage {
-    context_tokens: u64,
-    output_tokens: u64,
-    model: String,
-    window: Option<u64>, // codex는 파일에 컨텍스트 윈도우가 직접 기록됨
-}
-
-/// 열린 탭의 컨텍스트 게이지용: 세션 파일의 마지막 usage (claude=assistant usage, codex=token_count)
-#[tauri::command]
-fn session_usage(file: String) -> Option<SessionUsage> {
-    let p = PathBuf::from(&file);
-    let text = read_head_tail(&p, 512 * 1024)?;
-
-    // Codex rollout: token_count 이벤트의 total_token_usage + model_context_window
-    if file.contains(".codex") {
-        let mut last: Option<SessionUsage> = None;
-        for line in text.lines() {
-            let Ok(o) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
-            if o["type"] == "event_msg" && o["payload"]["type"] == "token_count" {
-                let info = &o["payload"]["info"];
-                if info.is_null() {
-                    continue;
-                }
-                let tot = &info["total_token_usage"];
-                last = Some(SessionUsage {
-                    context_tokens: tot["total_tokens"].as_u64().unwrap_or(0),
-                    output_tokens: tot["output_tokens"].as_u64().unwrap_or(0),
-                    model: "codex".into(),
-                    window: info["model_context_window"].as_u64(),
-                });
-            }
-        }
-        return last;
-    }
-
-    let mut last: Option<SessionUsage> = None;
-    for line in text.lines() {
-        let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
-        if obj["type"] != "assistant" {
-            continue;
-        }
-        let u = &obj["message"]["usage"];
-        if u.is_null() {
-            continue;
-        }
-        let ctx = u["input_tokens"].as_u64().unwrap_or(0)
-            + u["cache_read_input_tokens"].as_u64().unwrap_or(0)
-            + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-        if ctx == 0 {
-            continue;
-        }
-        last = Some(SessionUsage {
-            context_tokens: ctx,
-            output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
-            model: obj["message"]["model"].as_str().unwrap_or("").to_string(),
-            window: None,
-        });
-    }
-    last
-}
+// 열린 탭의 컨텍스트 게이지는 list_sessions가 이미 내려주는 ctx_tokens/ctx_window로
+// 프런트에서 계산한다 (예전 session_usage 커맨드는 같은 계산을 위해 탭마다 8초 주기로
+// 세션 파일을 다시 읽고 있었다).
 
 #[derive(Serialize, Default, Clone)]
 struct UsageRow {
@@ -683,16 +736,61 @@ struct UsageRow {
     requests: u64,
 }
 
+type UsageKey = (String, String, String); // (날짜, 모델, 프로젝트)
+
+/// 세션 파일 하나를 (날짜, 모델, 프로젝트)별로 집계
+fn usage_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
+    let Ok(text) = fs::read_to_string(path) else { return vec![] };
+    let mut map: HashMap<UsageKey, UsageRow> = HashMap::new();
+    let mut cwd = String::new();
+    for line in text.lines() {
+        let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        if cwd.is_empty() {
+            if let Some(c) = obj["cwd"].as_str() {
+                cwd = c.to_string();
+            }
+        }
+        if obj["type"] != "assistant" {
+            continue;
+        }
+        let u = &obj["message"]["usage"];
+        if u.is_null() {
+            continue;
+        }
+        let ts = obj["timestamp"].as_str().unwrap_or("");
+        if ts.len() < 10 {
+            continue;
+        }
+        let date = ts[..10].to_string();
+        let model = obj["message"]["model"].as_str().unwrap_or("?").to_string();
+        let row = map
+            .entry((date.clone(), model.clone(), cwd.clone()))
+            .or_insert_with(|| UsageRow { date, model, cwd: cwd.clone(), ..Default::default() });
+        row.input += u["input_tokens"].as_u64().unwrap_or(0);
+        row.output += u["output_tokens"].as_u64().unwrap_or(0);
+        row.cache_read += u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+        row.cache_5m += u["cache_creation"]["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0);
+        row.cache_1h += u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0);
+        row.requests += 1;
+    }
+    map.into_values().collect()
+}
+
+/// 파일별 집계 캐시 — 대시보드를 열 때마다 최근 N일치 jsonl을 전량 다시 읽지 않도록
+/// mtime이 그대로면 재사용한다 (세션 목록의 META_CACHE와 같은 전략).
+static USAGE_FILE_CACHE: LazyLock<Mutex<HashMap<String, (f64, Vec<UsageRow>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// 대시보드용: 최근 N일간 (날짜, 모델, 프로젝트)별 토큰 집계
 #[tauri::command]
 fn usage_stats(days: u32) -> Vec<UsageRow> {
-    use std::collections::HashMap;
-    let mut map: HashMap<(String, String, String), UsageRow> = HashMap::new();
+    let mut map: HashMap<UsageKey, UsageRow> = HashMap::new();
     let Some(home) = dirs::home_dir() else { return vec![] };
     let projects = home.join(".claude").join("projects");
     let cutoff = std::time::SystemTime::now()
         - std::time::Duration::from_secs(days as u64 * 86400 + 86400);
     let Ok(dirs_iter) = fs::read_dir(&projects) else { return vec![] };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for proj in dirs_iter.flatten() {
         let Ok(files) = fs::read_dir(proj.path()) else { continue };
@@ -709,44 +807,47 @@ fn usage_stats(days: u32) -> Vec<UsageRow> {
             {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(&p) else { continue };
-            let mut cwd = String::new();
-            for line in text.lines() {
-                let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
-                if cwd.is_empty() {
-                    if let Some(c) = obj["cwd"].as_str() {
-                        cwd = c.to_string();
-                    }
+            let key = p.to_string_lossy().to_string();
+            let mtime = file_mtime(&p);
+            seen.insert(key.clone());
+            let cached = {
+                let cache = USAGE_FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                match cache.get(&key) {
+                    Some((t, rows)) if *t == mtime => Some(rows.clone()),
+                    _ => None,
                 }
-                if obj["type"] != "assistant" {
-                    continue;
-                }
-                let u = &obj["message"]["usage"];
-                if u.is_null() {
-                    continue;
-                }
-                let ts = obj["timestamp"].as_str().unwrap_or("");
-                if ts.len() < 10 {
-                    continue;
-                }
-                let date = ts[..10].to_string();
-                let model = obj["message"]["model"].as_str().unwrap_or("?").to_string();
-                let key = (date.clone(), model.clone(), cwd.clone());
-                let row = map.entry(key).or_insert_with(|| UsageRow {
-                    date,
-                    model,
-                    cwd: cwd.clone(),
-                    ..Default::default()
-                });
-                row.input += u["input_tokens"].as_u64().unwrap_or(0);
-                row.output += u["output_tokens"].as_u64().unwrap_or(0);
-                row.cache_read += u["cache_read_input_tokens"].as_u64().unwrap_or(0);
-                row.cache_5m += u["cache_creation"]["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0);
-                row.cache_1h += u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0);
-                row.requests += 1;
+            };
+            let rows = cached.unwrap_or_else(|| {
+                let rows = usage_rows_of_file(&p);
+                USAGE_FILE_CACHE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(key, (mtime, rows.clone()));
+                rows
+            });
+            for r in rows {
+                let entry = map
+                    .entry((r.date.clone(), r.model.clone(), r.cwd.clone()))
+                    .or_insert_with(|| UsageRow {
+                        date: r.date.clone(),
+                        model: r.model.clone(),
+                        cwd: r.cwd.clone(),
+                        ..Default::default()
+                    });
+                entry.input += r.input;
+                entry.output += r.output;
+                entry.cache_read += r.cache_read;
+                entry.cache_5m += r.cache_5m;
+                entry.cache_1h += r.cache_1h;
+                entry.requests += r.requests;
             }
         }
     }
+    // 기간 밖으로 밀려났거나 삭제된 파일의 캐시는 버린다
+    USAGE_FILE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|k, _| seen.contains(k));
     map.into_values().collect()
 }
 
@@ -932,7 +1033,8 @@ fn open_path(path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn delete_session(file: String) -> Result<(), String> {
-    let p = PathBuf::from(&file);
+    // ".." 같은 성분이 섞이면 starts_with 검사를 그냥 통과하므로 반드시 정규화 후 비교
+    let p = fs::canonicalize(&file).map_err(|e| e.to_string())?;
     let home = dirs::home_dir().ok_or("no home dir")?;
     // 알려진 세션 저장소 안의 세션 파일만 삭제 허용
     let allowed = [
@@ -940,7 +1042,10 @@ fn delete_session(file: String) -> Result<(), String> {
         home.join(".codex").join("sessions"),
         home.join(".gemini").join("tmp"),
     ];
-    let in_store = allowed.iter().any(|root| p.starts_with(root));
+    let in_store = allowed
+        .iter()
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .any(|root| p.starts_with(&root));
     let is_session = p
         .extension()
         .map(|e| e == "jsonl" || e == "json")
@@ -949,7 +1054,8 @@ fn delete_session(file: String) -> Result<(), String> {
         return Err("invalid session file path".into());
     }
     fs::remove_file(&p).map_err(|e| e.to_string())?;
-    META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).remove(&p.to_string_lossy().to_string());
+    // 캐시 키는 스캔 당시의 원본 경로 문자열 (canonicalize한 \\?\ 형태가 아님)
+    META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).remove(&file);
     Ok(())
 }
 
@@ -973,7 +1079,7 @@ fn main() {
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
             spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session,
-            session_usage, usage_stats, headroom_stats, subscription_state, codex_state,
+            session_preview, usage_stats, headroom_stats, subscription_state, codex_state,
             open_path
         ])
         .setup(|app| {
@@ -1041,7 +1147,7 @@ fn main() {
                 let state = window.app_handle().state::<PtyState>();
                 let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
                 for (_, mut p) in map.drain() {
-                    let _ = p.child.kill();
+                    let _ = p.killer.kill();
                 }
             }
         })
@@ -1052,6 +1158,40 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 종료 감지의 근거 확인.
+    /// ConPTY에서는 자식이 죽어도 마스터 쪽 read가 EOF를 돌려주지 않는다(측정 결과 10초 초과).
+    /// 그래서 spawn_pty는 리더 EOF가 아니라 child.wait()로 종료를 판정한다 — 그 wait가
+    /// 실제로 곧바로 돌아오는지 검증한다.
+    #[test]
+    fn child_wait_returns_when_process_exits() {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "exit 1"]);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        // 리더가 없으면 파이프가 막힐 수 있으므로 실사용과 동일하게 계속 비워준다
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+            }
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+            "자식이 종료됐는데 wait()가 돌아오지 않음 — 탭이 '종료됨'으로 바뀌지 않는다"
+        );
+    }
 
     #[test]
     fn iso_ts_matches_known_epoch() {

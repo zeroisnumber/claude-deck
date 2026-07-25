@@ -50,6 +50,7 @@ function timeAgo(mtime) {
 // ---------- 사이드바 ----------
 async function refreshSessions() {
   sessions = await invoke("list_sessions");
+  if (syncCtxGauges()) renderTabs();
   renderSidebar();
   restoreTabs(); // 최초 1회만 동작 (이전에 열려 있던 탭 자동 재개)
 }
@@ -212,11 +213,17 @@ function mdToHtml(src) {
   const out = [];
   let inCode = false, codeBuf = [], listOpen = false;
   const closeList = () => { if (listOpen) { out.push("</ul>"); listOpen = false; } };
+  // href는 http(s)만 허용 — escapeHtml은 javascript: 스킴을 걸러주지 않는데
+  // 여기서 렌더하는 건 세션 파일에서 온 외부 입력이고, 이 웹뷰에는 invoke가 노출돼 있다.
+  const safeHref = (u) => (/^https?:\/\//i.test(u.trim()) ? u.trim() : null);
   const inline = (t) => t
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, url) => {
+      const href = safeHref(url);
+      return href ? `<a href="${href}">${label}</a>` : m;
+    });
   for (const raw of lines) {
     const line = raw;
     if (line.trim().startsWith("```")) {
@@ -242,19 +249,29 @@ function mdToHtml(src) {
 const previewCard = $("#preview-card");
 let previewTimer = null;
 
+// 대화 본문(recent/last_text)은 목록 응답에 없다 — 호버한 세션만 따로 가져온다.
+let previewToken = 0;
+
 function schedulePreview(el, s) {
   clearTimeout(previewTimer);
-  previewTimer = setTimeout(() => {
-    if (!s.last_text && !s.first_prompt) return;
+  if (!s.first_prompt && !s.summary) return;   // 보여줄 게 없는 세션은 조회 자체를 생략
+  const token = ++previewToken;
+  previewTimer = setTimeout(async () => {
+    let pv = null;
+    try {
+      pv = await invoke("session_preview", { file: s.file });
+    } catch { /* 무시 */ }
+    if (token !== previewToken) return; // 응답을 기다리는 사이 다른 항목으로 이동함
+    if (!pv || (!pv.last_text && !pv.recent.length && !s.first_prompt)) return;
     previewCard.innerHTML = `<div class="pv-title"></div><div class="pv-body"></div><div class="pv-meta"></div>`;
     previewCard.querySelector(".pv-title").textContent = aliases[s.session_id] || s.summary || s.first_prompt || "";
     const body = previewCard.querySelector(".pv-body");
-    if (s.recent && s.recent.length) {
-      body.innerHTML = s.recent
+    if (pv.recent && pv.recent.length) {
+      body.innerHTML = pv.recent
         .map((m) => `<div class="pv-turn ${m.role}"><span class="pv-role">${m.role === "user" ? "나" : "AI"}</span>${mdToHtml(m.text)}</div>`)
         .join("");
     } else {
-      body.innerHTML = mdToHtml(s.last_text || "(응답 없음)");
+      body.innerHTML = mdToHtml(pv.last_text || "(응답 없음)");
     }
     previewCard.querySelector(".pv-meta").textContent = `${s.cwd} · ${s.message_count}개 메시지`;
     previewCard.classList.remove("hidden");
@@ -265,6 +282,7 @@ function schedulePreview(el, s) {
 }
 function hidePreview() {
   clearTimeout(previewTimer);
+  previewToken++;                       // 이미 날아간 요청의 응답이 뒤늦게 뜨지 않게
   previewCard.classList.add("hidden");
 }
 
@@ -960,30 +978,25 @@ function fmtTok(n) {
   return String(n);
 }
 
-// --- 탭 컨텍스트 게이지: 세션 jsonl의 마지막 usage에서 컨텍스트 크기 조회 ---
-async function updateCtxGauges() {
+// --- 탭 컨텍스트 게이지 ---
+// 목록 응답(list_sessions)에 이미 들어 있는 ctx_tokens/ctx_window로 계산한다.
+// 예전에는 탭마다 8초 주기로 세션 파일을 다시 읽어 같은 값을 구하고 있었다.
+function syncCtxGauges() {
   let changed = false;
   for (const [id, t] of terms) {
-    if (t.exited || id.startsWith("new-")) continue;
+    if (id.startsWith("new-")) continue;
     const meta = sessions.find((s) => s.session_id === id);
-    if (!meta || meta.agent === "gemini") continue;
-    try {
-      const u = await invoke("session_usage", { file: meta.file });
-      if (u) {
-        const win = u.window || ctxWindowFor(u.model);
-        const pct = Math.min(100, Math.round((u.context_tokens / win) * 100));
-        if (pct !== t.ctxPct) {
-          t.ctxPct = pct;
-          t.ctxTokens = u.context_tokens;
-          changed = true;
-        }
-      }
-    } catch { /* 무시 */ }
+    if (!meta || !meta.ctx_tokens) continue;
+    const win = meta.ctx_window || ctxWindowFor(meta.model || "");
+    const pct = Math.min(100, Math.round((meta.ctx_tokens / win) * 100));
+    if (pct !== t.ctxPct) {
+      t.ctxPct = pct;
+      t.ctxTokens = meta.ctx_tokens;
+      changed = true;
+    }
   }
-  if (changed) renderTabs();
+  return changed;
 }
-setInterval(updateCtxGauges, 8000);
-setTimeout(updateCtxGauges, 3000);
 
 // --- 대시보드 ---
 let dashDays = 7;
@@ -1095,6 +1108,12 @@ function fmtRemain(iso) {
   if (ms <= 0) return "리셋됨";
   const h = Math.floor(ms / 3600000);
   const m = Math.round((ms % 3600000) / 60000);
+  // 주간 창은 최대 168시간이라 시간 단위로만 쓰면 "90시간"처럼 읽기 나쁜 값이 나온다
+  if (h >= 24) {
+    const d = Math.floor(h / 24);
+    const rh = h % 24;
+    return rh > 0 ? `${d}일 ${rh}시간` : `${d}일`;
+  }
   return h > 0 ? `${h}시간 ${m}분` : `${m}분`;
 }
 
