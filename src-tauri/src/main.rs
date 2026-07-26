@@ -248,6 +248,140 @@ fn has_spinner_glyph(bytes: &[u8]) -> bool {
     String::from_utf8_lossy(bytes).chars().any(|c| SPINNER_GLYPHS.contains(c))
 }
 
+
+// ---------- statusLine 탭 ----------
+// Claude Code는 상태줄 명령에 세션 JSON을 stdin으로 넘긴다. 거기엔 요금제 한도,
+// 실제 컨텍스트 윈도우 크기, 실제 비용이 들어 있다 — 우리가 지금 API 호출이나
+// 추측으로 얻는 값들이다. 그 흐름을 옆으로 복사해 두고, 화면 출력은 원래대로
+// 통과시킨다(사용자가 쓰던 상태줄이 있으면 그걸 실행해 그대로 넘긴다).
+//
+// 사용자의 ~/.claude/settings.json은 읽기만 하고 절대 수정하지 않는다.
+// 우리 설정은 별도 파일로 두고 spawn 시 --settings 로 넘긴다.
+
+fn status_dir() -> Option<PathBuf> {
+    Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("status"))
+}
+
+/// 사용자가 원래 쓰던 상태줄 명령 (없으면 None). 우리 자신은 걸러 재귀를 막는다.
+fn user_statusline_command() -> Option<String> {
+    let base = std::env::var("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"));
+    let v: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(base.join("settings.json")).ok()?).ok()?;
+    let cmd = v["statusLine"]["command"].as_str()?.trim().to_string();
+    if cmd.is_empty() || cmd.contains(STATUSLINE_FLAG) {
+        return None;
+    }
+    Some(cmd)
+}
+
+const STATUSLINE_FLAG: &str = "--statusline-tap";
+
+/// GUI를 띄우지 않고 stdin만 처리하고 끝나는 모드
+fn run_statusline_tap() {
+    use std::io::{Read as _, Write as _};
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return;
+    }
+    // 세션별로 저장 — 탭과 1:1로 매칭된다
+    if let (Some(dir), Ok(v)) = (
+        status_dir(),
+        serde_json::from_str::<serde_json::Value>(&input),
+    ) {
+        if let Some(sid) = v["session_id"].as_str() {
+            if fs::create_dir_all(&dir).is_ok() {
+                let _ = fs::write(dir.join(format!("{}.json", sid)), &input);
+            }
+        }
+    }
+    // 화면은 원래대로: 사용자 명령이 있으면 같은 stdin으로 실행해 출력을 그대로 넘긴다
+    if let Some(cmd) = user_statusline_command() {
+        use std::process::{Command, Stdio};
+        if let Ok(mut child) = Command::new("cmd.exe")
+            .args(["/c", &cmd])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut si) = child.stdin.take() {
+                let _ = si.write_all(input.as_bytes());
+            }
+            if let Ok(out) = child.wait_with_output() {
+                let _ = std::io::stdout().write_all(&out.stdout);
+            }
+        }
+    }
+}
+
+/// 세션의 최신 상태줄 페이로드
+fn read_status(session_id: &str) -> Option<serde_json::Value> {
+    let p = status_dir()?.join(format!("{}.json", session_id));
+    serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
+}
+
+/// 가장 최근에 갱신된 상태줄 페이로드의 요금제 한도.
+/// 너무 오래된 값은 쓰지 않는다(세션이 다 닫혀 있으면 갱신이 멈춘다).
+fn statusline_rate_limits() -> Option<serde_json::Value> {
+    let dir = status_dir()?;
+    let mut newest: Option<(f64, PathBuf)> = None;
+    for e in fs::read_dir(&dir).ok()?.flatten() {
+        let p = e.path();
+        let t = file_mtime(&p);
+        if newest.as_ref().map(|(bt, _)| t > *bt).unwrap_or(true) {
+            newest = Some((t, p));
+        }
+    }
+    let (mtime, path) = newest?;
+    let age = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64()
+        - mtime;
+    if age > 600.0 {
+        return None; // 10분 넘게 안 갱신됐으면 신뢰하지 않는다
+    }
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    let rl = &v["rate_limits"];
+    if rl["five_hour"].is_null() {
+        return None;
+    }
+    let map = |w: &serde_json::Value| {
+        serde_json::json!({
+            "utilization_pct": w["used_percentage"],
+            "resets_at": w["resets_at"].as_i64().map(|t| t * 1000),
+        })
+    };
+    Some(serde_json::json!({
+        "source": "statusline",
+        "five_hour": map(&rl["five_hour"]),
+        "seven_day": map(&rl["seven_day"]),
+        "polled_at": chrono_now_iso(),
+    }))
+}
+
+/// CLI Deck 전용 설정 파일을 만들고 경로를 돌려준다. 이 경로를 spawn 시
+/// --settings 로 넘기면 사용자 settings.json을 건드리지 않고 상태줄만 얹는다.
+#[tauri::command]
+fn statusline_settings_path() -> Result<String, String> {
+    let dir = dirs::data_local_dir()
+        .map(|d| d.join("com.user.cli-deck"))
+        .ok_or("데이터 폴더를 찾을 수 없습니다")?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let cfg = serde_json::json!({
+        "statusLine": {
+            "type": "command",
+            "command": format!("\"{}\" {}", exe.to_string_lossy(), STATUSLINE_FLAG),
+        }
+    });
+    let p = dir.join("statusline-settings.json");
+    fs::write(&p, serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(p.to_string_lossy().to_string())
+}
+
 // ---------- 작업 상태 판정 ----------
 // 전부 pty-trace.log 실측으로 정한 값이다. 근거는 각 상수에 적어둔다.
 // 핵심 구조: "지금 작업 중인가"는 PTY 출력 밀도가 답하고(Rust에서 판정하므로
@@ -330,9 +464,15 @@ struct Activity {
     file: Option<PathBuf>,
     /// 마지막 제출 이후 뭔가 입력됨 (내용은 몰라도 됨 — 있는지만 알면 된다)
     draft: bool,
-    /// draft 중 ESC 시퀀스 관측 — 화살표·히스토리·여러 줄일 수 있어 Ctrl+U 한 번으로
-    /// 안전하게 지울 수 없다. 다음 제출까지 핑을 건너뛴다.
-    draft_risky: bool,
+    /// 이스케이프 시퀀스 파싱 상태 (0=없음, 1=ESC 직후, 2=CSI 안)
+    esc_state: u8,
+    /// draft 안의 줄바꿈 수 (Alt+Enter 또는 붙여넣기). Ctrl+U 횟수 계산에 쓴다.
+    draft_lines: u32,
+    /// 괄호 붙여넣기(ESC[200~ … ESC[201~) 안인지. 붙여넣은 개행은 제출이 아니다.
+    in_paste: bool,
+    /// CSI 파라미터 앞 3바이트 — 붙여넣기 마커(200/201) 판별용
+    csi: [u8; 3],
+    csi_len: u8,
     last_ping: Option<std::time::Instant>,
     first_ping: Option<std::time::Instant>,
 }
@@ -414,7 +554,7 @@ fn turn_in_progress(file: &std::path::Path) -> bool {
 ///   메시지 + Enter
 ///   Ctrl+Y(0x19)  원문 복원
 ///   Backspace(0x7f)  위에서 넣은 스페이스 제거
-fn send_keepalive(app: AppHandle, id: String, agent: String, message: String) {
+fn send_keepalive(app: AppHandle, id: String, agent: String, message: String, draft: bool) {
     std::thread::spawn(move || {
         let write = |bytes: &[u8]| {
             let state = app.state::<PtyState>();
@@ -424,6 +564,10 @@ fn send_keepalive(app: AppHandle, id: String, agent: String, message: String) {
                 None => false, // 탭이 닫혔다
             }
         };
+        // 스페이스 → Ctrl+U 로 한 줄을 kill ring에 옮긴다. 스페이스를 먼저 넣는 건
+        // 입력이 비어 있어도 kill ring에 이번 내용이 확실히 들어가게 하고, 빈 프롬프트에서
+        // Ctrl+U가 다른 동작을 하는 것도 막기 위해서다. 여러 줄 draft는 애초에 보내지
+        // 않으므로(keepalive_pass) 한 번이면 충분하다.
         if !write(&[b' ', 0x15]) {
             return;
         }
@@ -432,7 +576,7 @@ fn send_keepalive(app: AppHandle, id: String, agent: String, message: String) {
         }
         std::thread::sleep(std::time::Duration::from_millis(KEEPALIVE_RESTORE_DELAY_MS));
         write(&[0x19, 0x7f]);
-        trace(&id, &agent, "keepalive", &message);
+        trace(&id, &agent, "keepalive", &format!("{} (draft={})", message, draft));
     });
 }
 
@@ -449,6 +593,59 @@ fn cache_ttl_remaining(file: &PathBuf) -> Option<(f64, u32)> {
         .ok()?
         .as_secs_f64();
     Some((last + f64::from(ttl) - now, ttl))
+}
+
+/// 사용자가 입력창에 뭔가 써 뒀는지 추적한다. 내용은 알 필요 없고 있는지만 알면 된다.
+///
+/// 터미널은 앱의 질의에 이스케이프 시퀀스로 **자동 응답**한다(커서 위치 보고 등).
+/// 그 응답에도 숫자·문자가 들어 있어서 단순히 "출력 가능 문자 = 타이핑"으로 세면
+/// 자리를 비운 사이에도 draft가 참으로 굳는다 — 실측에서 85분 동안 427건이 들어왔다.
+/// 그래서 시퀀스를 건너뛴 뒤에 남는 문자만 입력으로 인정한다.
+fn note_draft(a: &mut Activity, bytes: &[u8]) {
+    for &b in bytes {
+        match a.esc_state {
+            1 => {
+                // Alt+Enter(ESC+CR)는 제출이 아니라 입력창 안의 줄바꿈이다
+                if b == 13 || b == 10 {
+                    a.draft = true;
+                    a.draft_lines += 1;
+                }
+                a.esc_state = if b == b'[' { 2 } else { 0 };
+            }
+            2 => {
+                if (0x40..=0x7e).contains(&b) {
+                    // 괄호 붙여넣기 시작/끝 마커 (ESC[200~ / ESC[201~)
+                    if b == b'~' && a.csi_len == 3 {
+                        if &a.csi == b"200" {
+                            a.in_paste = true;
+                        } else if &a.csi == b"201" {
+                            a.in_paste = false;
+                        }
+                    }
+                    a.esc_state = 0; // CSI 종료 바이트
+                    a.csi_len = 0;
+                } else if (a.csi_len as usize) < a.csi.len() {
+                    a.csi[a.csi_len as usize] = b;
+                    a.csi_len += 1;
+                }
+            }
+            _ => match b {
+                0x1b => a.esc_state = 1,
+                // 붙여넣은 개행은 제출이 아니라 입력창 안의 줄바꿈이다
+                13 | 10 if a.in_paste => {
+                    a.draft = true;
+                    a.draft_lines += 1;
+                }
+                13 | 10 | 3 | 0x15 => {
+                    a.draft = false; // Enter(제출) / Ctrl+C / Ctrl+U
+                    a.draft_lines = 0;
+                    a.in_paste = false;
+                }
+                0x20..=0x7e | 0x80..=0xff => a.draft = true,
+                _ => {}
+            },
+        }
+    }
 }
 
 /// 출력 청크 도착 — 타이핑 에코가 아니면 버스트를 잇는다
@@ -593,25 +790,27 @@ fn keepalive_pass(app: &AppHandle, now: std::time::Instant) {
     let ms = |a: std::time::Instant| now.duration_since(a).as_millis() as u64;
 
     // 잠금 안에서는 후보만 고른다 (파일 파싱은 잠금 밖에서)
-    let mut candidates: Vec<(String, String, PathBuf)> = Vec::new();
+    let mut candidates: Vec<(String, String, PathBuf, bool, u32)> = Vec::new();
     {
         let act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
         for (id, a) in act.iter() {
             let Some(file) = a.file.clone() else { continue };
-            if a.working || a.draft || a.draft_risky {
-                continue; // 작업 중이거나 쓰다 만 입력이 있다
+            if a.working {
+                continue; // 작업 중이면 애초에 캐시가 살아 있다
             }
+            // 쓰다 만 입력이 있어도 보낸다 — 전송 시퀀스가 Ctrl+U로 kill ring에
+            // 옮겼다가 Ctrl+Y로 되돌린다. draft 여부는 트레이스에만 남긴다.
             if a.last_input.map(|t| ms(t) < KEEPALIVE_INPUT_QUIET_MS).unwrap_or(false) {
                 continue; // 방금 타이핑했다
             }
             if a.first_ping.map(|t| ms(t) > KEEPALIVE_MAX_SPAN_MS).unwrap_or(false) {
                 continue; // 너무 오래 자리를 비웠다 — 그만 유지한다
             }
-            candidates.push((id.clone(), a.agent.clone(), file));
+            candidates.push((id.clone(), a.agent.clone(), file, a.draft, a.draft_lines));
         }
     }
 
-    for (id, agent, file) in candidates {
+    for (id, agent, file, draft, _lines) in candidates {
         let Some((remain, ttl)) = cache_ttl_remaining(&file) else { continue };
         if remain <= 0.0 || remain > cfg.threshold_secs as f64 {
             continue; // 이미 만료됐거나 아직 여유 있음
@@ -625,7 +824,7 @@ fn keepalive_pass(app: &AppHandle, now: std::time::Instant) {
         a.last_ping = Some(now);
         a.first_ping.get_or_insert(now);
         drop(act);
-        send_keepalive(app.clone(), id, agent, cfg.message.clone());
+        send_keepalive(app.clone(), id, agent, cfg.message.clone(), draft);
     }
 }
 
@@ -730,7 +929,11 @@ fn spawn_pty(
             agent: agent.clone(),
             title: title.unwrap_or_default(),
             draft: false,
-            draft_risky: false,
+            esc_state: 0,
+            draft_lines: 0,
+            in_paste: false,
+            csi: [0; 3],
+            csi_len: 0,
             last_ping: None,
             first_ping: None,
             file: file.filter(|f| !f.trim().is_empty()).map(PathBuf::from),
@@ -790,15 +993,7 @@ fn write_pty(state: State<PtyState>, id: String, data: String) -> Result<(), Str
         trace(&id, &p.agent, "in", &data.len().to_string());
         if let Some(a) = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
             a.last_input = Some(std::time::Instant::now());
-            for &b in data.as_bytes() {
-                match b {
-                    13 | 10 | 3 => { a.draft = false; a.draft_risky = false; } // Enter / Ctrl+C
-                    0x15 => a.draft = false,                    // Ctrl+U — 줄 비움
-                    0x1b => { if a.draft { a.draft_risky = true; } } // ESC 시퀀스
-                    0x20..=0x7e | 0x80..=0xff => a.draft = true, // 출력 가능 문자(한글 포함)
-                    _ => {}
-                }
-            }
+            note_draft(a, data.as_bytes());
         }
         p.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
     }
@@ -851,6 +1046,14 @@ struct SessionMeta {
     ctx_window: Option<u64>,
     /// 마지막으로 관측된 모델명
     model: Option<String>,
+    /// 백그라운드 에이전트 상태 (working/blocked/failed) — 아니면 None
+    bg_state: Option<String>,
+    /// 백그라운드 에이전트가 지금 뭘 하고 있는지 한 줄
+    bg_detail: Option<String>,
+    /// 데몬 로스터에 살아 있는가 (죽은 bg 세션과 구분)
+    bg_running: bool,
+    /// 이 세션이 포크돼 나온 원본 세션 ID (실행 중일 때만 알 수 있음)
+    parent_id: Option<String>,
     /// 호버 미리보기용 최근 대화 (최대 3턴 = 6개). 오래된 것부터 순서대로.
     /// 목록에는 싣지 않는다 — 세션 수 × 3KB가 20초마다 IPC로 넘어가는데
     /// 프런트는 호버할 때만 쓰므로 session_preview로 그때 가져간다.
@@ -882,6 +1085,10 @@ fn light_meta(m: &SessionMeta) -> SessionMeta {
         ctx_tokens: m.ctx_tokens,
         ctx_window: m.ctx_window,
         model: m.model.clone(),
+        bg_state: m.bg_state.clone(),
+        bg_detail: m.bg_detail.clone(),
+        bg_running: m.bg_running,
+        parent_id: m.parent_id.clone(),
         recent: Vec::new(),
     }
 }
@@ -1059,6 +1266,10 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
         ctx_tokens: None,
         ctx_window: None,
         model: None,
+        bg_state: None,
+        bg_detail: None,
+        bg_running: false,
+        parent_id: None,
         recent: Vec::new(),
     };
 
@@ -1157,6 +1368,10 @@ fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
         ctx_tokens: None,
         ctx_window: None,
         model: None,
+        bg_state: None,
+        bg_detail: None,
+        bg_running: false,
+        parent_id: None,
         recent: Vec::new(),
     };
     for line in text.lines() {
@@ -1292,6 +1507,10 @@ fn read_gemini_meta(path: &PathBuf) -> Option<SessionMeta> {
         ctx_tokens: None,
         ctx_window: None,
         model: None,
+        bg_state: None,
+        bg_detail: None,
+        bg_running: false,
+        parent_id: None,
         recent,
     })
 }
@@ -1317,6 +1536,56 @@ fn scan_gemini(out: &mut Vec<SessionMeta>) {
         }
     }
 }
+
+/// Claude Code 백그라운드 에이전트 정보. `~/.claude/jobs/<8자리>/state.json` 규칙에 따라
+/// 세션 ID 앞 8자리를 키로 쓴다.
+struct BgInfo {
+    state: String,
+    detail: String,
+    running: bool,
+    parent_id: Option<String>,
+}
+
+fn scan_bg_jobs() -> HashMap<String, BgInfo> {
+    let mut out: HashMap<String, BgInfo> = HashMap::new();
+    let Some(home) = dirs::home_dir() else { return out };
+
+    // 살아 있는 워커만 로스터에 남는다. 포크 출처(원본 세션)도 여기서만 알 수 있다.
+    let mut running: HashMap<String, Option<String>> = HashMap::new();
+    if let Ok(text) = fs::read_to_string(home.join(".claude").join("daemon").join("roster.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(ws) = v["workers"].as_object() {
+                for (short, w) in ws {
+                    let parent = w["dispatch"]["launch"]["sessionId"].as_str().and_then(|p| {
+                        std::path::Path::new(p)
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                    });
+                    running.insert(short.clone(), parent);
+                }
+            }
+        }
+    }
+
+    let Ok(entries) = fs::read_dir(home.join(".claude").join("jobs")) else { return out };
+    for e in entries.flatten() {
+        let short = e.file_name().to_string_lossy().to_string();
+        let Ok(text) = fs::read_to_string(e.path().join("state.json")) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let run = running.get(&short);
+        out.insert(
+            short,
+            BgInfo {
+                state: v["state"].as_str().unwrap_or("unknown").to_string(),
+                detail: v["detail"].as_str().unwrap_or("").to_string(),
+                running: run.is_some(),
+                parent_id: run.and_then(|p| p.clone()),
+            },
+        );
+    }
+    out
+}
+
 
 #[tauri::command]
 fn list_sessions() -> Vec<SessionMeta> {
@@ -1349,6 +1618,33 @@ fn list_sessions() -> Vec<SessionMeta> {
             }
         }
     }
+    // 상태줄이 실제 컨텍스트 윈도우를 알려준다 — 모델명으로 추측하던 걸 대체한다
+    for m in out.iter_mut() {
+        let Some(v) = read_status(&m.session_id) else { continue };
+        if let Some(size) = v["context_window"]["context_window_size"].as_u64() {
+            m.ctx_window = Some(size);
+        }
+        if let Some(used) = v["context_window"]["total_input_tokens"].as_u64() {
+            if used > 0 {
+                m.ctx_tokens = Some(used);
+            }
+        }
+    }
+
+    // 백그라운드 에이전트 상태 붙이기 (세션 ID 앞 8자리로 매칭)
+    let bg = scan_bg_jobs();
+    for m in out.iter_mut() {
+        let Some(short) = m.session_id.get(..8) else { continue };
+        let Some(info) = bg.get(short) else { continue };
+        m.bg_state = Some(info.state.clone());
+        m.bg_running = info.running;
+        if !info.detail.is_empty() {
+            m.bg_detail = Some(info.detail.clone());
+        }
+        m.parent_id = info.parent_id.clone();
+    }
+
+
     out.sort_by(|a, b| b.mtime.partial_cmp(&a.mtime).unwrap_or(std::cmp::Ordering::Equal));
     out
 }
@@ -1629,6 +1925,10 @@ fn subscription_state(force: bool) -> Option<serde_json::Value> {
             }
         }
     }
+    // 상태줄이 살아 있으면 그 값을 쓴다 — API 호출도 토큰도 필요 없고 429도 없다
+    if let Some(sl) = statusline_rate_limits() {
+        return Some(sl);
+    }
     if let Some(direct) = fetch_usage_direct() {
         *USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), direct.clone()));
         return Some(direct);
@@ -1696,6 +1996,11 @@ fn delete_session(file: String) -> Result<(), String> {
 }
 
 fn main() {
+    // 상태줄 명령으로 불린 경우 GUI를 띄우지 않고 stdin만 처리한다
+    if std::env::args().any(|a| a == STATUSLINE_FLAG) {
+        run_statusline_tap();
+        return;
+    }
     install_panic_hook();
     init_trace();
     tauri::Builder::default()
@@ -1716,7 +2021,7 @@ fn main() {
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
             spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session,
-            session_preview, trace_enabled, set_trace, clear_diagnostics, set_keepalive, usage_stats, headroom_stats, subscription_state, codex_state,
+            session_preview, trace_enabled, set_trace, clear_diagnostics, set_keepalive, statusline_settings_path, usage_stats, headroom_stats, subscription_state, codex_state,
             open_path
         ])
         .setup(|app| {
@@ -1885,6 +2190,102 @@ mod tests {
         // Gemini는 턴 단위 기록이 없어 파일로 판정할 수 없다 → 타임아웃에 맡긴다
         assert!(!check("h.json", r#"{"sessionId":"x","messages":[]}"#));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Alt+Enter(ESC+CR)는 제출이 아니라 입력창 안의 줄바꿈이다.
+    /// 줄 수가 1을 넘으면 keepalive_pass가 전송을 건너뛴다 — Ctrl+U 한 번으로는
+    /// 다 지워지지 않아 남은 앞줄이 핑과 함께 제출되기 때문이다.
+    #[test]
+    fn alt_enter_counts_lines_without_submitting() {
+        let mut a = blank_activity();
+        note_draft(&mut a, b"first");
+        note_draft(&mut a, b"\x1b\r"); // Alt+Enter
+        note_draft(&mut a, b"second");
+        note_draft(&mut a, b"\x1b\r");
+        note_draft(&mut a, b"third");
+        assert!(a.draft);
+        assert_eq!(a.draft_lines, 2); // 줄바꿈 2번 = 세 줄
+
+
+        // 진짜 Enter로 제출하면 초기화된다
+        note_draft(&mut a, b"\r");
+        assert!(!a.draft);
+        assert_eq!(a.draft_lines, 0);
+    }
+
+    /// 여러 줄을 붙여넣으면 개행이 ESC 없이 맨 CR로 들어온다. 제출로 오인하면
+    /// 줄 수가 0으로 리셋되어 Ctrl+U를 한 번만 보내고 앞 줄들이 그대로 전송된다.
+    #[test]
+    fn pasted_newlines_count_as_lines_not_submits() {
+        let mut a = blank_activity();
+        note_draft(&mut a, b"\x1b[200~one\rtwo\rthree\x1b[201~");
+        assert!(a.draft);
+        assert_eq!(a.draft_lines, 2); // 개행 2번 = 세 줄
+
+
+        // 붙여넣기가 끝난 뒤의 Enter는 진짜 제출이다
+        note_draft(&mut a, b"\r");
+        assert!(!a.draft);
+        assert_eq!(a.draft_lines, 0);
+
+        // 붙여넣기 밖의 개행은 여전히 제출
+        let mut b = blank_activity();
+        note_draft(&mut b, b"hello\r");
+        assert!(!b.draft);
+    }
+
+    fn blank_activity() -> Activity {
+        Activity {
+            last_input: None,
+            last_out: None,
+            burst_start: None,
+            working: false,
+            last_check: None,
+            agent: String::new(),
+            title: String::new(),
+            draft: false,
+            esc_state: 0,
+            draft_lines: 0,
+            in_paste: false,
+            csi: [0; 3],
+            csi_len: 0,
+            last_ping: None,
+            first_ping: None,
+            file: None,
+        }
+    }
+
+    fn draft_after(chunks: &[&[u8]]) -> bool {
+        let mut a = blank_activity();
+        for c in chunks {
+            note_draft(&mut a, c);
+        }
+        a.draft
+    }
+
+    /// 캐시 유지가 한 번도 안 나갔던 원인. 터미널은 앱의 질의에 이스케이프 시퀀스로
+    /// 자동 응답하는데(실측: 자리 비운 85분 동안 427건), 그 안의 숫자·문자를 타이핑으로
+    /// 세면 draft가 영구히 참이 되어 핑이 계속 건너뛰어진다.
+    #[test]
+    fn draft_ignores_terminal_escape_replies() {
+        // 커서 위치 보고 — 사용자 입력이 아니다
+        assert!(!draft_after(&[b"\x1b[45;12R"]));
+        // 여러 건이 연달아 와도 마찬가지
+        assert!(!draft_after(&[b"\x1b[45;12R", b"\x1b[1;1R", b"\x1b[?1;2c"]));
+        // 시퀀스가 청크 경계에서 잘려도 상태가 이어져야 한다
+        assert!(!draft_after(&[b"\x1b[45", b";12R"]));
+        // 실제 타이핑은 잡는다
+        assert!(draft_after(&[b"hello"]));
+        // 한글(멀티바이트)도 잡는다
+        assert!(draft_after(&["안녕".as_bytes()]));
+        // Enter로 제출하면 해제
+        assert!(!draft_after(&[b"hello", b"\r"]));
+        // Ctrl+U로 지워도 해제
+        assert!(!draft_after(&[b"hello", &[0x15]]));
+        // 붙여넣기: 마커는 무시하고 내용은 입력으로 인정
+        assert!(draft_after(&[b"\x1b[200~pasted\x1b[201~"]));
+        // 시퀀스 뒤에 진짜 타이핑이 이어지면 잡는다
+        assert!(draft_after(&[b"\x1b[45;12R", b"a"]));
     }
 
     #[test]

@@ -856,3 +856,30 @@ kbd {
 .lmodal-row2 .l-inline { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; }
 .lmodal-row2 #ka-threshold { width: 64px; }
 .lmodal-row2 #ka-message { flex: 1; min-width: 0; }
+
+/* 백그라운드 에이전트: 원본 아래로 들여쓰고, 상태를 배지로 */
+.session-item.child {
+  margin-left: 14px;
+  border-left: 2px solid #3a3733;
+  padding-left: 8px;
+}
+.si-bg {
+  flex: none;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.si-bg.run  { color: #a3cba3; border-color: #3f5a3f; background: #26311f; }
+.si-bg.wait { color: #e8b878; border-color: #5c4a2c; background: #302819; }
+.si-bg.fail { color: #ef8080; border-color: #5c3333; background: #301f1f; }
+.si-bg.idle { color: var(--text-dim); border-color: #3a3733; }
+.si-bg-detail {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 3px;
+}

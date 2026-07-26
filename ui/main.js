@@ -68,6 +68,75 @@ let agentFilter = "all";
 // 탭 드래그의 isDraggingTab과 같은 이유, 같은 방식.
 let isRenaming = false;
 
+const BG_STATE = {
+  working: { cls: "run", label: "실행 중" },
+  blocked: { cls: "wait", label: "대기 — 입력 필요" },
+  failed:  { cls: "fail", label: "실패" },
+};
+
+// 사이드바 한 줄. child=true면 원본 아래 들여쓴 백그라운드 세션이다.
+function sessionRow(s, child) {
+  const el = document.createElement("div");
+  el.className = "session-item" + (s.session_id === activeId ? " active" : "") + (child ? " child" : "");
+  const t = terms.get(s.session_id);
+  const bg = s.bg_state ? (BG_STATE[s.bg_state] || { cls: "idle", label: s.bg_state }) : null;
+  const title = aliases[s.session_id] || s.summary || s.first_prompt || "(내용 없음)";
+
+  const dot = t ? `<span class="si-dot ${statusClass(t)}" title="${statusLabel(t)}"></span>` : "";
+  const pin = pins.includes(s.session_id) ? `<span class="si-pin">📌</span>` : "";
+  const glyph = `<span class="si-agent ${s.agent}" title="${s.agent}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
+  const badge = bg
+    ? `<span class="si-bg ${bg.cls}" title="백그라운드 에이전트 · ${bg.label}">⚙ ${s.bg_running ? bg.label : "종료됨"}</span>`
+    : "";
+  const expEpoch = s.cache_last_ts && s.cache_ttl_secs ? s.cache_last_ts + s.cache_ttl_secs : null;
+  const ttl = expEpoch ? `<span class="si-ttl" data-exp="${expEpoch}" title="프롬프트 캐시 남은 TTL"></span>` : "";
+  const ctxText = s.ctx_tokens
+    ? `<span class="si-ctx" title="마지막 응답 시점 컨텍스트 토큰 수">· ${fmtTok(s.ctx_tokens)} ctx</span>`
+    : "";
+
+  el.innerHTML = `
+    ${dot}
+    <div class="si-title">${pin}${glyph}${badge}<span class="si-title-text"></span></div>
+    <div class="si-meta">
+      <span class="si-proj"></span>
+      <span>${timeAgo(s.mtime)}</span>
+      ${ctxText}
+      ${ttl}
+    </div>
+    ${s.bg_detail ? `<div class="si-bg-detail"></div>` : ""}`;
+  el.querySelector(".si-title-text").textContent = title;
+  el.querySelector(".si-proj").textContent = basename(s.cwd);
+  if (s.bg_detail) el.querySelector(".si-bg-detail").textContent = s.bg_detail;
+
+  el.onclick = () => (s.bg_running ? showBgMenu(s, el) : openSession(s));
+  el.oncontextmenu = (e) => { e.preventDefault(); showCtxMenu(e, s, el); };
+  el.onmouseenter = () => schedulePreview(el, s);
+  el.onmouseleave = hidePreview;
+  return el;
+}
+
+// 실행 중인 백그라운드 세션은 --resume이 거절된다(데몬이 잡고 있음).
+// 원본으로 갈지, 복사본으로 갈라져 나올지 고르게 한다.
+function showBgMenu(s, el) {
+  hidePreview();
+  const parent = s.parent_id ? sessions.find((x) => x.session_id === s.parent_id) : null;
+  const items = [];
+  if (parent) items.push(["↖ 원본 세션 열기", () => openSession(parent)]);
+  items.push(["⑂ 복사본으로 열기", () => openSession(s, true, { fork: true })]);
+  ctxMenu.innerHTML = "";
+  for (const [label, fn] of items) {
+    const d = document.createElement("div");
+    d.className = "ctx-item";
+    d.textContent = label;
+    d.onclick = () => { hideCtxMenu(); fn(); };
+    ctxMenu.appendChild(d);
+  }
+  const r = el.getBoundingClientRect();
+  ctxMenu.classList.remove("hidden");
+  ctxMenu.style.left = Math.min(r.right + 4, window.innerWidth - 200) + "px";
+  ctxMenu.style.top = Math.min(r.top, window.innerHeight - 100) + "px";
+}
+
 function renderSidebar() {
   // 플래그만 믿으면 어떤 경로로든 안 풀렸을 때 사이드바가 영구히 멈춘다.
   // 실제 입력창이 남아 있을 때만 건너뛰고, 없으면 플래그를 스스로 되돌린다.
@@ -77,53 +146,54 @@ function renderSidebar() {
   }
   const q = $("#search").value.trim().toLowerCase();
   listEl.innerHTML = "";
-  let shown = 0;
-  const sorted = [...sessions].sort((a, b) => {
+
+  const visible = sessions.filter((s) => {
+    if (agentFilter !== "all" && s.agent !== agentFilter) return false;
+    if (!q) return true;
+    // 제목·프로젝트에 더해 백그라운드 상태 문구도 검색 대상에 넣는다
+    const hay = [
+      aliases[s.session_id] || s.summary || s.first_prompt || "",
+      basename(s.cwd),
+      s.bg_detail || "",
+      s.bg_state || "",
+    ].join(" ").toLowerCase();
+    return hay.includes(q);
+  });
+  const sorted = [...visible].sort((a, b) => {
     const pa = pins.includes(a.session_id) ? 1 : 0;
     const pb = pins.includes(b.session_id) ? 1 : 0;
     return pb - pa || b.mtime - a.mtime;
   });
-  for (const s of sorted) {
-    if (agentFilter !== "all" && s.agent !== agentFilter) continue;
-    const title = aliases[s.session_id] || s.summary || s.first_prompt || "(내용 없음)";
-    const proj = basename(s.cwd);
-    if (q && !(title.toLowerCase().includes(q) || proj.toLowerCase().includes(q))) continue;
-    shown++;
 
-    const el = document.createElement("div");
-    el.className = "session-item" + (s.session_id === activeId ? " active" : "");
-    const t = terms.get(s.session_id);
-    const dot = t ? `<span class="si-dot ${statusClass(t)}" title="${statusLabel(t)}"></span>` : "";
-    const pin = pins.includes(s.session_id) ? `<span class="si-pin">📌</span>` : "";
-    const glyph = `<span class="si-agent ${s.agent}" title="${s.agent}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
-    const expEpoch = s.cache_last_ts && s.cache_ttl_secs ? s.cache_last_ts + s.cache_ttl_secs : null;
-    const ttl = expEpoch ? `<span class="si-ttl" data-exp="${expEpoch}" title="프롬프트 캐시 남은 TTL"></span>` : "";
-    // 최대 윈도우를 추측하지 않고 모든 에이전트에 동일하게 토큰 수만 텍스트로 표시
-    const ctxText = s.ctx_tokens
-      ? `<span class="si-ctx" title="마지막 응답 시점 컨텍스트 토큰 수">· ${fmtTok(s.ctx_tokens)} ctx</span>`
-      : "";
-    el.innerHTML = `
-      ${dot}
-      <div class="si-title">${pin}${glyph}<span class="si-title-text"></span></div>
-      <div class="si-meta">
-        <span class="si-proj"></span>
-        <span>${timeAgo(s.mtime)}</span>
-        ${ctxText}
-        ${ttl}
-      </div>`;
-    el.querySelector(".si-title-text").textContent = title;
-    el.querySelector(".si-proj").textContent = proj;
-    el.onclick = () => openSession(s);
-    el.oncontextmenu = (e) => { e.preventDefault(); showCtxMenu(e, s, el); };
-    el.onmouseenter = (e) => schedulePreview(el, s);
-    el.onmouseleave = hidePreview;
-    listEl.appendChild(el);
+  // 백그라운드 세션은 원본 아래로 모은다 (원본이 목록에 있을 때만)
+  const shown = new Set(sorted.map((s) => s.session_id));
+  const kids = new Map();
+  for (const s of sorted) {
+    if (s.parent_id && shown.has(s.parent_id)) {
+      if (!kids.has(s.parent_id)) kids.set(s.parent_id, []);
+      kids.get(s.parent_id).push(s);
+    }
   }
+
+  let count = 0;
+  for (const s of sorted) {
+    if (s.parent_id && shown.has(s.parent_id)) continue; // 부모 밑에서 그린다
+    listEl.appendChild(sessionRow(s, false));
+    count++;
+    for (const k of kids.get(s.session_id) || []) {
+      listEl.appendChild(sessionRow(k, true));
+      count++;
+    }
+  }
+
   const busyN = [...terms.values()].filter((t) => !t.exited && t.busy).length;
   const runN = [...terms.values()].filter((t) => !t.exited).length;
+  const bgN = sessions.filter((s) => s.bg_running).length;
   const prof = currentProfile();
-  const profTag = prof.cmd !== "claude" ? ` · ${prof.name}` : "";
-  $("#foot-count").textContent = `세션 ${shown}개 · 실행 ${runN} · 답변중 ${busyN}${profTag}`;
+  const parts = [`세션 ${count}개`, `실행 ${runN}`, `답변중 ${busyN}`];
+  if (bgN) parts.push(`백그라운드 ${bgN}`);
+  if (prof.cmd !== "claude") parts.push(prof.name);
+  $("#foot-count").textContent = parts.join(" · ");
   updateTtlBadges();
 }
 
@@ -448,7 +518,7 @@ function commandFor(meta) {
   return { cmd: composeCommand(meta.session_id), profile: currentProfile() };
 }
 
-async function openSession(meta, focus = true) {
+async function openSession(meta, focus = true, opts = {}) {
   const id = meta.session_id;
   if (terms.has(id)) return focus && activate(id);
 
@@ -456,7 +526,8 @@ async function openSession(meta, focus = true) {
   const entry = makeTerm(id, title, meta.cwd);
   const spec = commandFor(meta);
   entry.profile = spec.profile;
-  entry.spawnCommand = spec.cmd;
+  // 실행 중인 백그라운드 세션은 그냥 --resume이 거절된다. 복사본으로 갈라져 나온다.
+  entry.spawnCommand = opts.fork ? `${spec.cmd} --fork-session` : spec.cmd;
   entry.file = meta.file;
   if (focus) activate(id);
   else renderTabs();
@@ -753,6 +824,18 @@ function envPrefix(envStr) {
 
 let globalEnv = localStorage.getItem("globalEnv") || "";
 
+// 상태줄 연동: Claude Code가 상태줄 명령에 넘기는 세션 JSON에는 요금제 한도와
+// 실제 컨텍스트 윈도우가 들어 있다. 사용자 settings.json은 건드리지 않고,
+// CLI Deck이 띄우는 세션에만 --settings 로 우리 설정을 얹는다.
+let statusLineOn = localStorage.getItem("statusLine") === "1";
+let statusLinePath = "";
+async function ensureStatusLinePath() {
+  if (!statusLineOn || statusLinePath) return statusLinePath;
+  try { statusLinePath = await invoke("statusline_settings_path"); } catch { statusLinePath = ""; }
+  return statusLinePath;
+}
+ensureStatusLinePath();
+
 // 캐시 유지 설정 — localStorage가 원본이고, 시작할 때와 저장할 때 Rust로 밀어넣는다
 const KA_DEFAULT = { enabled: false, thresholdSecs: 120, message: 'reply "." only' };
 let keepAlive = { ...KA_DEFAULT };
@@ -770,6 +853,7 @@ pushKeepAlive();
 function composeCommand(resumeId) {
   const p = currentProfile();
   let cmd = resumeId && p.resume !== false ? `${p.cmd} --resume ${resumeId}` : p.cmd;
+  if (statusLineOn && statusLinePath) cmd += ` --settings "${statusLinePath}"`;
   return envPrefix(globalEnv) + cmd;
 }
 
@@ -796,6 +880,7 @@ $("#btn-settings").onclick = () => {
   profiles.forEach((p, i) => addProfileRow(p.name, p.cmd, p.resume !== false, i === activeProfile));
   $("#global-env").value = globalEnv;
   invoke("trace_enabled").then((on) => { $("#opt-trace").checked = !!on; }).catch(() => {});
+  $("#opt-statusline").checked = statusLineOn;
   $("#opt-keepalive").checked = !!keepAlive.enabled;
   $("#ka-threshold").value = String(keepAlive.thresholdSecs / 60);
   $("#ka-message").value = keepAlive.message;
@@ -831,6 +916,9 @@ $("#lmodal-save").onclick = () => {
   localStorage.setItem("profiles", JSON.stringify(profiles));
   localStorage.setItem("profileSel", String(activeProfile));
   localStorage.setItem("globalEnv", globalEnv);
+  statusLineOn = $("#opt-statusline").checked;
+  localStorage.setItem("statusLine", statusLineOn ? "1" : "0");
+  ensureStatusLinePath();
   const kaMin = parseFloat($("#ka-threshold").value);
   keepAlive = {
     enabled: $("#opt-keepalive").checked,
