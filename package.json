@@ -1,6 +1,6 @@
 {
   "name": "cli-deck",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Multi-agent CLI session manager (Claude/Codex/Gemini) with embedded PTY terminals",
   "scripts": {
     "tauri": "tauri"
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
-    "@xterm/xterm": "^5.5.0"
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-unicode11": "^0.8.0"
   }
 }

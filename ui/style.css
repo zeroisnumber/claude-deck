@@ -838,3 +838,21 @@ kbd {
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* 설정 창의 체크박스 행 (진단 토글) */
+.lmodal-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg, #e8e6e3);
+  cursor: pointer;
+  user-select: none;
+}
+.lmodal-check input { cursor: pointer; }
+
+/* 설정 창: 캐시 유지 행 (임계값 + 메시지) */
+.lmodal-row2 { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.lmodal-row2 .l-inline { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 13px; }
+.lmodal-row2 #ka-threshold { width: 64px; }
+.lmodal-row2 #ka-message { flex: 1; min-width: 0; }

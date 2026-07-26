@@ -10,12 +10,13 @@ use std::{
     io::{Read, Write},
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         LazyLock, Mutex,
     },
     time::UNIX_EPOCH,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 
 // ---------- 크래시 진단 ----------
 // windows_subsystem="windows"(릴리스 빌드)는 콘솔이 없어 패닉 메시지(stderr)가
@@ -67,24 +68,84 @@ fn install_panic_hook() {
 //   in     = 사용자 입력 바이트수 (타이핑 에코를 출력과 구분하기 위해 필요)
 //   spawn  = 실행 명령, exit = 없음
 //   #start = <epoch ms>	<기준 경과ms> — 벽시계 환산용 (세션 jsonl과 대조)
-static PTY_TRACE: LazyLock<bool> = LazyLock::new(|| {
-    // 배포되는 빌드에는 진단 계측을 남기지 않는다 — 이 분기는 컴파일 시점에
-    // 상수로 접히므로 릴리스에서는 기록 경로 자체가 사라진다.
-    // 다시 수집하려면 디버그 빌드(debug.bat)로 실행하면 된다.
-    if !cfg!(debug_assertions) {
-        return false;
-    }
+/// 런타임 토글 — 설정 창의 체크박스로 켜고 끈다. 릴리스에서 컴파일로 빼버렸더니
+/// 정작 문제가 보고되는 빌드에서 원인을 못 보는 상황이 생겨서 되돌렸다.
+static PTY_TRACE: AtomicBool = AtomicBool::new(false);
+
+/// 마커 파일이 있으면 재시작 후에도 켜진 상태가 유지된다 (환경변수는 그걸 설정한
+/// 셸에서 띄웠을 때만 붙어서 놓치기 쉬움)
+fn trace_marker_path() -> Option<PathBuf> {
+    Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("TRACE"))
+}
+
+fn init_trace() {
     let by_env = std::env::var("CLI_DECK_PTY_TRACE")
         .map(|v| {
             let v = v.trim();
             !v.is_empty() && v != "0"
         })
         .unwrap_or(false);
-    let by_file = dirs::data_local_dir()
-        .map(|d| d.join("com.user.cli-deck").join("TRACE").exists())
-        .unwrap_or(false);
-    by_env || by_file
-});
+    let by_file = trace_marker_path().map(|p| p.exists()).unwrap_or(false);
+    PTY_TRACE.store(by_env || by_file, Ordering::Relaxed);
+}
+
+/// 진단 파일 정리. 지울 파일을 이름으로 명시한다 — 이 폴더에는 WebView2 프로필
+/// (EBWebView, 앱 설정이 들어 있는 localStorage)이 같이 있어서 폴더째 지우면
+/// 사용자 설정이 통째로 날아간다.
+#[tauri::command]
+fn clear_diagnostics() -> Result<String, String> {
+    // 기록 중인 파일은 핸들을 먼저 놓아야 Windows에서 삭제된다.
+    // 다음 trace 호출이 알아서 새로 연다.
+    *TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+
+    let dir = dirs::data_local_dir()
+        .map(|d| d.join("com.user.cli-deck"))
+        .ok_or("데이터 폴더를 찾을 수 없습니다")?;
+    let mut freed = 0u64;
+    let mut names: Vec<String> = Vec::new();
+    for name in ["pty-trace.log", "pty-trace.prev.log", "crash.log"] {
+        let p = dir.join(name);
+        let Ok(meta) = fs::metadata(&p) else { continue };
+        let len = meta.len();
+        if fs::remove_file(&p).is_ok() {
+            freed += len;
+            names.push(name.to_string());
+        }
+    }
+    if names.is_empty() {
+        return Ok("지울 파일이 없습니다".into());
+    }
+    Ok(format!(
+        "{} 삭제 · {:.1}MB 정리",
+        names.join(", "),
+        freed as f64 / (1024.0 * 1024.0)
+    ))
+}
+
+#[tauri::command]
+fn trace_enabled() -> bool {
+    PTY_TRACE.load(Ordering::Relaxed)
+}
+
+/// 설정에서 켜고 끄기. 마커 파일로 상태를 남겨 재시작 후에도 유지된다.
+/// 반환값은 로그 파일 경로 (설정 창에 표시).
+#[tauri::command]
+fn set_trace(enabled: bool) -> Result<String, String> {
+    PTY_TRACE.store(enabled, Ordering::Relaxed);
+    if let Some(p) = trace_marker_path() {
+        if enabled {
+            if let Some(dir) = p.parent() {
+                fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            fs::write(&p, b"").map_err(|e| e.to_string())?;
+        } else {
+            let _ = fs::remove_file(&p);
+        }
+    }
+    Ok(trace_marker_path()
+        .and_then(|p| p.parent().map(|d| d.join("pty-trace.log").to_string_lossy().to_string()))
+        .unwrap_or_default())
+}
 
 static TRACE_START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
 static TRACE_FILE: LazyLock<Mutex<Option<(fs::File, u64)>>> = LazyLock::new(|| Mutex::new(None));
@@ -97,7 +158,7 @@ const TRACE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 const SPINNER_GLYPHS: &str = "✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❇❈❉❊❋✢✣✤✥✦✧✨⊛⊕⊙◉◎◍⁂⁕※⍟☼★☆·•⏺▸▹∙⋅○●";
 
 fn trace(id: &str, agent: &str, kind: &str, value: &str) {
-    if !*PTY_TRACE {
+    if !PTY_TRACE.load(Ordering::Relaxed) {
         return;
     }
     let mut guard = TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner());
@@ -147,6 +208,28 @@ fn trace(id: &str, agent: &str, kind: &str, value: &str) {
     }
 }
 
+/// 트레이스에 남기기 전 환경변수 값을 가린다. 설정의 "전역 환경변수"는
+/// `set KEY=VAL&&` 형태로 실행 명령 앞에 붙는데, 거기 토큰을 넣어 쓰는 사용법이
+/// 있어서 그대로 적으면 로그 파일에 비밀값이 평문으로 남는다.
+/// 과하게 가려지는 편이 안전하므로 "set X=" 패턴은 모두 마스킹한다.
+fn redact_env(cmd: &str) -> String {
+    let mut out = String::with_capacity(cmd.len());
+    let mut rest = cmd;
+    while let Some(p) = rest.find("set ") {
+        out.push_str(&rest[..p + 4]);
+        rest = &rest[p + 4..];
+        let Some(eq) = rest.find('=') else { break };
+        out.push_str(&rest[..eq]);
+        out.push_str("=***");
+        rest = match rest[eq..].find("&&") {
+            Some(amp) => &rest[eq + amp..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
 /// 세 에이전트의 출력 분포가 섞이면 아무것도 못 배우므로 실행 명령에서 라벨을 뽑는다
 fn trace_agent_label(command: &str) -> String {
     let c = command.to_lowercase();
@@ -187,6 +270,53 @@ const MAX_WORKING_SILENCE_MS: u64 = 120_000;
 /// 버스트가 끝난 뒤 파일을 다시 확인하는 간격 (250ms마다 읽지 않도록)
 const FILE_RECHECK_MS: u64 = 2_000;
 
+// ---------- 프롬프트 캐시 유지 (keep-alive) ----------
+// 캐시는 읽을 때마다 TTL이 갱신되고, 읽기는 입력가의 0.1×인 반면 1시간 캐시를
+// 다시 쓰는 건 2×다. 만료 직전에 한 번 읽어주면 20배 싸게 유지된다.
+// 기본은 꺼져 있다 — 실제로 메시지를 보내고 돈을 쓰는 기능이라 명시적 opt-in.
+
+/// 핑 전송 후 다음 핑까지 최소 대기. 자기가 보낸 핑의 효과가 세션 파일에
+/// 반영되기 전에 또 쏘는 걸 막는다 (창이 최소화되면 목록 폴링이 멈춰서
+/// cache_last_ts 갱신이 늦어질 수 있음).
+fn keepalive_cooldown_ms(ttl_secs: u32) -> u64 {
+    (u64::from(ttl_secs) * 1000 / 2).max(60_000)
+}
+/// 최근 이만큼 안에 사용자 입력이 있었으면 건너뛴다 (타이핑 중 끼어들기 방지)
+const KEEPALIVE_INPUT_QUIET_MS: u64 = 60_000;
+/// 첫 핑으로부터 이 시간이 지나면 중단. 횟수가 아니라 경과 시간으로 끊는다 —
+/// 건너뛴 회차가 있으면 횟수 상한은 얼마든지 늘어난다.
+const KEEPALIVE_MAX_SPAN_MS: u64 = 8 * 60 * 60 * 1000;
+/// 이보다 작은 컨텍스트는 유지할 가치가 없다
+const KEEPALIVE_MIN_CTX: u64 = 20_000;
+/// Enter 이후 입력창이 비워지고 다시 그려질 때까지 기다리는 시간
+const KEEPALIVE_RESTORE_DELAY_MS: u64 = 400;
+
+#[derive(Clone)]
+struct KeepAlive {
+    enabled: bool,
+    /// 남은 TTL이 이보다 적으면 핑
+    threshold_secs: u64,
+    message: String,
+}
+
+static KEEPALIVE: LazyLock<Mutex<KeepAlive>> = LazyLock::new(|| {
+    Mutex::new(KeepAlive {
+        enabled: false,
+        threshold_secs: 120,
+        message: "reply \".\" only".into(),
+    })
+});
+
+#[tauri::command]
+fn set_keepalive(enabled: bool, threshold_secs: u64, message: String) {
+    let mut k = KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner());
+    k.enabled = enabled;
+    k.threshold_secs = threshold_secs.clamp(30, 3600);
+    if !message.trim().is_empty() {
+        k.message = message.trim().to_string();
+    }
+}
+
 struct Activity {
     last_input: Option<std::time::Instant>,
     last_out: Option<std::time::Instant>,
@@ -194,8 +324,17 @@ struct Activity {
     working: bool,
     last_check: Option<std::time::Instant>,
     agent: String,
+    /// 알림 문구용 탭 제목
+    title: String,
     /// 세션 파일 — 턴 종료 판정용. 없으면(새 세션) 침묵 타임아웃만 쓴다.
     file: Option<PathBuf>,
+    /// 마지막 제출 이후 뭔가 입력됨 (내용은 몰라도 됨 — 있는지만 알면 된다)
+    draft: bool,
+    /// draft 중 ESC 시퀀스 관측 — 화살표·히스토리·여러 줄일 수 있어 Ctrl+U 한 번으로
+    /// 안전하게 지울 수 없다. 다음 제출까지 핑을 건너뛴다.
+    draft_risky: bool,
+    last_ping: Option<std::time::Instant>,
+    first_ping: Option<std::time::Instant>,
 }
 
 static ACTIVITY: LazyLock<Mutex<HashMap<String, Activity>>> =
@@ -265,6 +404,53 @@ fn turn_in_progress(file: &std::path::Path) -> bool {
     false
 }
 
+
+/// 캐시 유지 핑 전송. 사용자가 쓰다 만 입력은 에이전트의 kill ring에 맡겼다가
+/// 되돌린다 — 우리가 내용을 추적하면 IME·여러 줄·히스토리를 전부 따라가야 하는데,
+/// Ctrl+U/Ctrl+Y는 에이전트 자신이 원문을 보관하므로 그럴 필요가 없다.
+///   스페이스 먼저 — 입력이 비어 있어도 kill ring에 이번 내용이 확실히 들어가고,
+///                   빈 프롬프트에서 Ctrl+U가 다른 동작을 하는 것도 막는다
+///   Ctrl+U(0x15)  줄 전체를 kill ring으로
+///   메시지 + Enter
+///   Ctrl+Y(0x19)  원문 복원
+///   Backspace(0x7f)  위에서 넣은 스페이스 제거
+fn send_keepalive(app: AppHandle, id: String, agent: String, message: String) {
+    std::thread::spawn(move || {
+        let write = |bytes: &[u8]| {
+            let state = app.state::<PtyState>();
+            let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
+            match map.get_mut(&id) {
+                Some(p) => p.writer.write_all(bytes).is_ok(),
+                None => false, // 탭이 닫혔다
+            }
+        };
+        if !write(&[b' ', 0x15]) {
+            return;
+        }
+        if !write(format!("{}\r", message).as_bytes()) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(KEEPALIVE_RESTORE_DELAY_MS));
+        write(&[0x19, 0x7f]);
+        trace(&id, &agent, "keepalive", &message);
+    });
+}
+
+/// 남은 캐시 TTL(초)과 티어. 세션 파일에서 직접 읽으므로 프런트 폴링 상태와 무관하다.
+fn cache_ttl_remaining(file: &PathBuf) -> Option<(f64, u32)> {
+    let meta = cached_meta_light(file, parser_for(file))?;
+    let last = meta.cache_last_ts?;
+    let ttl = meta.cache_ttl_secs?;
+    if meta.ctx_tokens.unwrap_or(0) < KEEPALIVE_MIN_CTX {
+        return None; // 작은 세션은 유지할 가치가 없다
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    Some((last + f64::from(ttl) - now, ttl))
+}
+
 /// 출력 청크 도착 — 타이핑 에코가 아니면 버스트를 잇는다
 fn note_output(id: &str) {
     let now = std::time::Instant::now();
@@ -290,10 +476,18 @@ fn note_output(id: &str) {
 /// 버스트 상태를 주기적으로 평가해 working 전이를 이벤트로 올린다.
 /// JS 타이머가 아니라 여기서 판정하는 게 요점 — 창이 백그라운드로 가도 멈추지 않는다.
 fn spawn_state_monitor(app: AppHandle) {
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
+        let mut tick: u64 = 0;
+        loop {
         std::thread::sleep(std::time::Duration::from_millis(250));
+        tick = tick.wrapping_add(1);
         let now = std::time::Instant::now();
         let ms = |a: std::time::Instant, b: std::time::Instant| b.duration_since(a).as_millis() as u64;
+
+        // 캐시 유지 검사 — 30초에 한 번이면 2분 임계에 충분하다
+        if tick % 120 == 0 {
+            keepalive_pass(&app, now);
+        }
 
         // 1단계: 잠금 안에서 판정에 필요한 것만 모은다 (파일 I/O는 잠금 밖에서)
         let mut turn_on: Vec<String> = Vec::new();
@@ -348,9 +542,91 @@ fn spawn_state_monitor(app: AppHandle) {
             let _ = app.emit("pty-state", PtyStateEvent { id, working: true });
         }
         for id in turn_off {
+            // 창이 최소화·백그라운드면 WebView2가 렌더러를 재워서 JS 리스너가 돌지
+            // 않는다 — 알림이 가장 필요한 순간이 정확히 그때이므로 여기서 직접 보낸다.
+            // 포커스가 있을 때는 JS가 앱 내 토스트를 띄우므로 중복되지 않는다.
+            let focused = app
+                .get_webview_window("main")
+                .and_then(|w| w.is_focused().ok())
+                .unwrap_or(false);
+            let (agent, title) = {
+                let act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+                let a = act.get(&id);
+                (
+                    a.map(|a| a.agent.clone()).unwrap_or_default(),
+                    a.map(|a| a.title.clone()).unwrap_or_default(),
+                )
+            };
+            if focused {
+                trace(&id, &agent, "notify", "skip:focused");
+            } else {
+                let r = app
+                    .notification()
+                    .builder()
+                    .title("✻ 응답 완료")
+                    .body(if title.is_empty() { "세션" } else { &title })
+                    .show();
+                // 알림이 안 뜬다는 신고가 있었는데 릴리스 빌드엔 계측이 없어 원인이
+                // 안 보였다. 전이·포커스·전송 결과를 남겨 다음엔 로그로 판별한다.
+                trace(
+                    &id,
+                    &agent,
+                    "notify",
+                    &match r {
+                        Ok(()) => "sent".to_string(),
+                        Err(e) => format!("err:{}", e),
+                    },
+                );
+            }
             let _ = app.emit("pty-state", PtyStateEvent { id, working: false });
         }
+        }
     });
+}
+
+/// 만료가 임박한 세션에 캐시 유지 핑을 보낸다.
+fn keepalive_pass(app: &AppHandle, now: std::time::Instant) {
+    let cfg = KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if !cfg.enabled {
+        return;
+    }
+    let ms = |a: std::time::Instant| now.duration_since(a).as_millis() as u64;
+
+    // 잠금 안에서는 후보만 고른다 (파일 파싱은 잠금 밖에서)
+    let mut candidates: Vec<(String, String, PathBuf)> = Vec::new();
+    {
+        let act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, a) in act.iter() {
+            let Some(file) = a.file.clone() else { continue };
+            if a.working || a.draft || a.draft_risky {
+                continue; // 작업 중이거나 쓰다 만 입력이 있다
+            }
+            if a.last_input.map(|t| ms(t) < KEEPALIVE_INPUT_QUIET_MS).unwrap_or(false) {
+                continue; // 방금 타이핑했다
+            }
+            if a.first_ping.map(|t| ms(t) > KEEPALIVE_MAX_SPAN_MS).unwrap_or(false) {
+                continue; // 너무 오래 자리를 비웠다 — 그만 유지한다
+            }
+            candidates.push((id.clone(), a.agent.clone(), file));
+        }
+    }
+
+    for (id, agent, file) in candidates {
+        let Some((remain, ttl)) = cache_ttl_remaining(&file) else { continue };
+        if remain <= 0.0 || remain > cfg.threshold_secs as f64 {
+            continue; // 이미 만료됐거나 아직 여유 있음
+        }
+        let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(a) = act.get_mut(&id) else { continue };
+        // 자기가 보낸 핑이 파일에 반영되기 전에 또 쏘지 않도록
+        if a.last_ping.map(|t| ms(t) < keepalive_cooldown_ms(ttl)).unwrap_or(false) {
+            continue;
+        }
+        a.last_ping = Some(now);
+        a.first_ping.get_or_insert(now);
+        drop(act);
+        send_keepalive(app.clone(), id, agent, cfg.message.clone());
+    }
 }
 
 // ---------- PTY 관리 ----------
@@ -406,6 +682,8 @@ fn spawn_pty(
     command: String,
     // 세션 파일 경로 — 턴 종료 판정용. 새 세션은 아직 파일이 없어 None.
     file: Option<String>,
+    // 알림에 쓸 탭 제목
+    title: Option<String>,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
@@ -439,7 +717,7 @@ fn spawn_pty(
     let generation = PTY_GENERATION.fetch_add(1, Ordering::Relaxed);
 
     let agent = trace_agent_label(&claude_cmd);
-    trace(&id, &agent, "spawn", &claude_cmd);
+    trace(&id, &agent, "spawn", &redact_env(&claude_cmd));
 
     ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).insert(
         id.clone(),
@@ -450,6 +728,11 @@ fn spawn_pty(
             working: false,
             last_check: None,
             agent: agent.clone(),
+            title: title.unwrap_or_default(),
+            draft: false,
+            draft_risky: false,
+            last_ping: None,
+            first_ping: None,
             file: file.filter(|f| !f.trim().is_empty()).map(PathBuf::from),
         },
     );
@@ -465,7 +748,7 @@ fn spawn_pty(
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if *PTY_TRACE {
+                    if PTY_TRACE.load(Ordering::Relaxed) {
                         let mut scan = std::mem::take(&mut carry);
                         scan.extend_from_slice(&buf[..n]);
                         let spin = u8::from(has_spinner_glyph(&scan));
@@ -507,6 +790,15 @@ fn write_pty(state: State<PtyState>, id: String, data: String) -> Result<(), Str
         trace(&id, &p.agent, "in", &data.len().to_string());
         if let Some(a) = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
             a.last_input = Some(std::time::Instant::now());
+            for &b in data.as_bytes() {
+                match b {
+                    13 | 10 | 3 => { a.draft = false; a.draft_risky = false; } // Enter / Ctrl+C
+                    0x15 => a.draft = false,                    // Ctrl+U — 줄 비움
+                    0x1b => { if a.draft { a.draft_risky = true; } } // ESC 시퀀스
+                    0x20..=0x7e | 0x80..=0xff => a.draft = true, // 출력 가능 문자(한글 포함)
+                    _ => {}
+                }
+            }
         }
         p.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
     }
@@ -1405,6 +1697,7 @@ fn delete_session(file: String) -> Result<(), String> {
 
 fn main() {
     install_panic_hook();
+    init_trace();
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1423,7 +1716,7 @@ fn main() {
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
             spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session,
-            session_preview, usage_stats, headroom_stats, subscription_state, codex_state,
+            session_preview, trace_enabled, set_trace, clear_diagnostics, set_keepalive, usage_stats, headroom_stats, subscription_state, codex_state,
             open_path
         ])
         .setup(|app| {
@@ -1592,6 +1885,18 @@ mod tests {
         // Gemini는 턴 단위 기록이 없어 파일로 판정할 수 없다 → 타임아웃에 맡긴다
         assert!(!check("h.json", r#"{"sessionId":"x","messages":[]}"#));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn redact_env_hides_values_not_command() {
+        assert_eq!(
+            redact_env("set TOKEN=sk-secret&&set B=2&&claude --resume abc"),
+            "set TOKEN=***&&set B=***&&claude --resume abc"
+        );
+        // 환경변수가 없으면 그대로
+        assert_eq!(redact_env("claude --resume abc"), "claude --resume abc");
+        // 값에 &&가 없는 마지막 항목도 가려져야 한다
+        assert_eq!(redact_env("set K=v"), "set K=***");
     }
 
     #[test]

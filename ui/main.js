@@ -64,7 +64,17 @@ try { pins = JSON.parse(localStorage.getItem("pins")) || []; } catch { /* 무시
 const AGENT_GLYPH = { claude: "✻", codex: "❖", gemini: "✦" };
 let agentFilter = "all";
 
+// 인라인 이름 편집 중 — 사이드바를 통째로 다시 그리면 입력창이 사라진다.
+// 탭 드래그의 isDraggingTab과 같은 이유, 같은 방식.
+let isRenaming = false;
+
 function renderSidebar() {
+  // 플래그만 믿으면 어떤 경로로든 안 풀렸을 때 사이드바가 영구히 멈춘다.
+  // 실제 입력창이 남아 있을 때만 건너뛰고, 없으면 플래그를 스스로 되돌린다.
+  if (isRenaming) {
+    if (listEl.querySelector(".si-rename")) return;
+    isRenaming = false;
+  }
   const q = $("#search").value.trim().toLowerCase();
   listEl.innerHTML = "";
   let shown = 0;
@@ -186,21 +196,26 @@ function startRename(s, itemEl) {
   input.className = "si-rename";
   input.value = aliases[s.session_id] || s.summary || s.first_prompt || "";
   span.replaceWith(input);
+  isRenaming = true; // 재렌더가 이 input을 지워버리지 않게 (20초 폴링이 있어 확정적으로 발생)
   input.focus();
   input.select();
-  const commit = () => {
-    const v = input.value.trim();
-    if (v) aliases[s.session_id] = v;
-    else delete aliases[s.session_id];
-    localStorage.setItem("aliases", JSON.stringify(aliases));
+  const finish = (save) => {
+    if (!isRenaming) return; // commit과 blur가 겹쳐 두 번 들어오는 경우
+    isRenaming = false;
+    if (save) {
+      const v = input.value.trim();
+      if (v) aliases[s.session_id] = v;
+      else delete aliases[s.session_id];
+      localStorage.setItem("aliases", JSON.stringify(aliases));
+    }
     renderSidebar();
   };
   input.onkeydown = (e) => {
-    if (e.key === "Enter") commit();
-    if (e.key === "Escape") renderSidebar();
+    if (e.key === "Enter") finish(true);
+    if (e.key === "Escape") finish(false);
     e.stopPropagation();
   };
-  input.onblur = commit;
+  input.onblur = () => finish(true);
   input.onclick = (e) => e.stopPropagation();
 }
 
@@ -308,21 +323,13 @@ function showToast(title, body, onClick) {
   }, 6000);
 }
 
-async function notifyDone(id, t) {
+function notifyDone(id, t) {
   // 활성 탭 + 창 포커스 상태면 사용자가 이미 보고 있음 — 알림 불필요
-  const watching = id === activeId && document.hasFocus();
-  if (watching) return;
+  if (id === activeId && document.hasFocus()) return;
   t.attention = true;
   showToast("✻ 응답 완료", t.title, () => activate(id));
-  if (!document.hasFocus()) {
-    try {
-      const n = window.__TAURI__ && window.__TAURI__.notification;
-      if (!n) return;
-      let ok = await n.isPermissionGranted();
-      if (!ok) ok = (await n.requestPermission()) === "granted";
-      if (ok) n.sendNotification({ title: "✻ 응답 완료", body: t.title });
-    } catch { /* 무시 */ }
-  }
+  // OS 알림은 Rust에서 보낸다. 창이 최소화되면 WebView2가 렌더러를 재워서
+  // 이 코드 자체가 늦게 도는데, 알림이 필요한 순간이 정확히 그때이기 때문이다.
 }
 
 // 작업중/완료 판정은 Rust가 한다 (PTY 출력 밀도 + 세션 파일의 턴 종료).
@@ -357,6 +364,13 @@ function makeTerm(id, title, cwd) {
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  // xterm 기본값은 유니코드 6 폭 테이블이라 ✅ ❌ 같은 이모지를 1칸으로 센다.
+  // 에이전트는 2칸으로 그리므로 행마다 1칸씩 어긋나고, 줄바꿈 지점이 달라지면서
+  // 표나 박스가 아래로 갈수록 왼쪽으로 밀린다. 11 테이블에서는 2칸으로 센다.
+  try {
+    term.loadAddon(new Unicode11Addon.Unicode11Addon());
+    term.unicode.activeVersion = "11";
+  } catch { /* 애드온 없으면 기본 동작 유지 */ }
   term.open(container);
 
   term.onData((d) => invoke("write_pty", { id, data: d }));
@@ -448,7 +462,7 @@ async function openSession(meta, focus = true) {
   else renderTabs();
   try {
     await invoke("spawn_pty", {
-      id, cwd: meta.cwd, command: entry.spawnCommand, file: meta.file,
+      id, cwd: meta.cwd, command: entry.spawnCommand, file: meta.file, title,
       cols: entry.term.cols, rows: entry.term.rows,
     });
   } catch (err) {
@@ -468,7 +482,7 @@ async function openNewSession(cwd) {
   activate(id);
   try {
     await invoke("spawn_pty", {
-      id, cwd, command: entry.spawnCommand, file: null,
+      id, cwd, command: entry.spawnCommand, file: null, title: entry.title,
       cols: entry.term.cols, rows: entry.term.rows,
     });
   } catch (err) {
@@ -490,7 +504,7 @@ async function restartTab(id) {
   activate(id);
   try {
     await invoke("spawn_pty", {
-      id, cwd: t.cwd, command: t.spawnCommand || "claude", file: t.file || null,
+      id, cwd: t.cwd, command: t.spawnCommand || "claude", file: t.file || null, title: t.title,
       cols: t.term.cols, rows: t.term.rows,
     });
   } catch (err) {
@@ -555,7 +569,14 @@ async function closeTab(id) {
 }
 
 function renderTabs() {
-  if (isDraggingTab) return;   // 드래그 중 재렌더 금지 (상태 갱신·이벤트가 드래그를 깨뜨리지 않게)
+  // 드래그 중엔 재렌더 금지 (상태 갱신·이벤트가 드래그를 깨뜨리지 않게).
+  // 단 실제로 드래그 중인 탭이 남아 있을 때만 — 플래그가 굳으면 탭 바가 영영 멈춘다.
+  if (isDraggingTab) {
+    // 넉넉하게 잡는다 — 여기서 가드를 풀면 드래그 중인 요소가 재렌더로 파괴되므로,
+    // 실제 드래그를 방해하지 않는 선에서 "끝나지 않은 드래그"만 걸러내는 게 목적이다.
+    if (Date.now() - dragStartedAt < 60_000) return;
+    isDraggingTab = false;
+  }
   tabsEl.innerHTML = "";
   for (const id of tabOrder) {
     const t = terms.get(id);
@@ -587,6 +608,7 @@ function renderTabs() {
 // 판정 기준은 드래그 시작 시점의 고정 좌표(rects)라서 진동이 없음.
 let suppressClick = false;
 let isDraggingTab = false;
+let dragStartedAt = 0;
 
 function makeTabDraggable(el) {
   el.addEventListener("pointerdown", (e) => {
@@ -596,9 +618,11 @@ function makeTabDraggable(el) {
     let tabs = [], rects = [], origIndex = 0, newIndex = 0;
 
     const move = (ev) => {
+      if (ev.pointerId !== e.pointerId) return; // window에서 받으므로 다른 포인터를 걸러야 한다
       if (!dragging && Math.abs(ev.clientX - startX) > 6) {
         dragging = true;
         isDraggingTab = true;
+        dragStartedAt = Date.now();
         el.setPointerCapture(e.pointerId);
         el.classList.add("dragging");
         tabsEl.classList.add("drag-active");
@@ -631,22 +655,34 @@ function makeTabDraggable(el) {
       });
     };
 
-    const up = () => {
-      el.removeEventListener("pointermove", move);
-      el.removeEventListener("pointerup", up);
+    // commit=false면 순서를 바꾸지 않고 원상복구만 한다 (드래그가 취소된 경우)
+    const up = (commit) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      el.removeEventListener("lostpointercapture", onCancel);
       if (!dragging) return;
       isDraggingTab = false;
       tabsEl.classList.remove("drag-active");
-      const id = el.dataset.id;
-      tabOrder = tabOrder.filter((x) => x !== id);
-      tabOrder.splice(newIndex, 0, id);
-      suppressClick = true;                 // 드래그 직후의 click은 무시
-      setTimeout(() => (suppressClick = false), 0);
+      if (commit) {
+        const id = el.dataset.id;
+        tabOrder = tabOrder.filter((x) => x !== id);
+        tabOrder.splice(newIndex, 0, id);
+        suppressClick = true;               // 드래그 직후의 click은 무시
+        setTimeout(() => (suppressClick = false), 0);
+      }
       renderTabs();                         // 재렌더로 transform 초기화 + 순서 확정
     };
+    // pointerup만 듣고 있으면, 창 밖에서 놓거나 포인터가 취소될 때 up이 영영 안 불린다.
+    // 그러면 isDraggingTab이 true로 굳어 renderTabs가 계속 early-return하고
+    // 탭 바 전체가 갱신을 멈춘다 — 드래그도 클릭도 먹지 않는 것처럼 보인다.
+    const onUp = (ev) => { if (ev.pointerId === e.pointerId) up(true); };
+    const onCancel = (ev) => { if (!ev || ev.pointerId === e.pointerId) up(false); };
 
-    el.addEventListener("pointermove", move);
-    el.addEventListener("pointerup", up);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    el.addEventListener("lostpointercapture", onCancel);
   });
 }
 
@@ -717,6 +753,19 @@ function envPrefix(envStr) {
 
 let globalEnv = localStorage.getItem("globalEnv") || "";
 
+// 캐시 유지 설정 — localStorage가 원본이고, 시작할 때와 저장할 때 Rust로 밀어넣는다
+const KA_DEFAULT = { enabled: false, thresholdSecs: 120, message: 'reply "." only' };
+let keepAlive = { ...KA_DEFAULT };
+try { keepAlive = { ...KA_DEFAULT, ...(JSON.parse(localStorage.getItem("keepAlive")) || {}) }; } catch { /* 무시 */ }
+function pushKeepAlive() {
+  invoke("set_keepalive", {
+    enabled: !!keepAlive.enabled,
+    thresholdSecs: keepAlive.thresholdSecs,
+    message: keepAlive.message,
+  }).catch(() => {});
+}
+pushKeepAlive();
+
 // 최종 실행 명령: 전역 env + 프로필 명령 + (재개 시) --resume <세션ID>
 function composeCommand(resumeId) {
   const p = currentProfile();
@@ -746,10 +795,22 @@ $("#btn-settings").onclick = () => {
   $("#profile-list").innerHTML = "";
   profiles.forEach((p, i) => addProfileRow(p.name, p.cmd, p.resume !== false, i === activeProfile));
   $("#global-env").value = globalEnv;
+  invoke("trace_enabled").then((on) => { $("#opt-trace").checked = !!on; }).catch(() => {});
+  $("#opt-keepalive").checked = !!keepAlive.enabled;
+  $("#ka-threshold").value = String(keepAlive.thresholdSecs / 60);
+  $("#ka-message").value = keepAlive.message;
+  $("#trace-path").textContent = "";
   $("#lmodal-backdrop").classList.remove("hidden");
 };
 $("#profile-add").onclick = () => addProfileRow();
-$("#lmodal-cancel").onclick = () => $("#lmodal-backdrop").classList.add("hidden");
+$("#btn-clear-diag").onclick = async () => {
+  try {
+    showToast("🧹 정리 완료", await invoke("clear_diagnostics"));
+  } catch (e) {
+    showToast("⚠ 정리 실패", String(e));
+  }
+};
+$("#lmodal-cancel").onclick = () => closeModal($("#lmodal-backdrop"));
 $("#lmodal-save").onclick = () => {
   const rows = [...document.querySelectorAll("#profile-list .lrow")];
   const next = [];
@@ -770,8 +831,21 @@ $("#lmodal-save").onclick = () => {
   localStorage.setItem("profiles", JSON.stringify(profiles));
   localStorage.setItem("profileSel", String(activeProfile));
   localStorage.setItem("globalEnv", globalEnv);
+  const kaMin = parseFloat($("#ka-threshold").value);
+  keepAlive = {
+    enabled: $("#opt-keepalive").checked,
+    thresholdSecs: Math.round((isNaN(kaMin) ? 2 : Math.min(60, Math.max(0.5, kaMin))) * 60),
+    message: $("#ka-message").value.trim() || KA_DEFAULT.message,
+  };
+  localStorage.setItem("keepAlive", JSON.stringify(keepAlive));
+  pushKeepAlive();
+  invoke("set_trace", { enabled: $("#opt-trace").checked })
+    .then((path) => {
+      if ($("#opt-trace").checked && path) showToast("진단 기록 켜짐", path);
+    })
+    .catch((e) => showToast("⚠ 진단 설정 실패", String(e)));
   renderSidebar();
-  $("#lmodal-backdrop").classList.add("hidden");
+  closeModal($("#lmodal-backdrop"));
 };
 // 설정 모달: 텍스트 입력창에서 Enter = 저장 (한글 조합 중 Enter 제외)
 $("#lmodal-backdrop").addEventListener("keydown", (e) => {
@@ -784,17 +858,26 @@ $("#lmodal-backdrop").addEventListener("keydown", (e) => {
 $("#btn-refresh").onclick = refreshSessions;
 $("#search").oninput = renderSidebar;
 
+// 모달을 닫을 때 터미널로 포커스를 돌려준다. 안 그러면 포커스가 body에 남아
+// 키 입력이 터미널로 안 들어가고, 설정·대시보드를 한 번 열었다 닫은 뒤부터
+// "입력이 안 먹는" 것처럼 보인다.
+function closeModal(el) {
+  el.classList.add("hidden");
+  const t = activeId ? terms.get(activeId) : null;
+  if (t && !t.exited) t.term.focus();
+}
+
 // 모달 공통: 배경 클릭 또는 Escape로 닫기
 const MODAL_BACKDROPS = ["#lmodal-backdrop", "#dash-backdrop", "#modal-backdrop"];
 for (const sel of MODAL_BACKDROPS) {
   const el = $(sel);
-  el.addEventListener("mousedown", (e) => { if (e.target === el) el.classList.add("hidden"); });
+  el.addEventListener("mousedown", (e) => { if (e.target === el) closeModal(el); });
 }
 window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   for (const sel of MODAL_BACKDROPS) {
     const el = $(sel);
-    if (!el.classList.contains("hidden")) { el.classList.add("hidden"); return; }
+    if (!el.classList.contains("hidden")) { closeModal(el); return; }
   }
 });
 
@@ -837,7 +920,7 @@ $("#modal-browse").onclick = async () => {
     if (d) $("#modal-path").value = d;
   } catch { /* 무시 */ }
 };
-$("#modal-cancel").onclick = () => $("#modal-backdrop").classList.add("hidden");
+$("#modal-cancel").onclick = () => closeModal($("#modal-backdrop"));
 $("#modal-ok").onclick = () => {
   const p = $("#modal-path").value.trim();
   if (p) {
@@ -1074,7 +1157,7 @@ async function openDash() {
 }
 
 $("#btn-dash").onclick = openDash;
-$("#dash-close").onclick = () => $("#dash-backdrop").classList.add("hidden");
+$("#dash-close").onclick = () => closeModal($("#dash-backdrop"));
 for (const b of document.querySelectorAll("#dash-period .dp")) {
   b.onclick = () => {
     dashDays = parseInt(b.dataset.days, 10);
