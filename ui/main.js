@@ -1,4 +1,20 @@
 // CLI Deck — 프런트엔드: 세션 사이드바 + PTY 터미널 관리
+
+// 이 스크립트가 어디서든 던지면 창도 안 뜨고 세션 목록도 안 그려지는데, 여태
+// 아무 데도 안 남아서 "트레이에서만 열린다"는 증상만 보였다. 무엇이 어디서
+// 터졌는지부터 남긴다 — 다른 어떤 코드보다 먼저 붙어야 의미가 있다.
+const reportFatal = (what) => {
+  try {
+    window.__TAURI__.core.invoke("trace_ui", { kind: "script-failed", value: String(what) });
+  } catch { /* 이것마저 안 되면 방법이 없다 */ }
+};
+window.addEventListener("error", (e) => {
+  reportFatal(`${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  reportFatal(`unhandled rejection: ${e.reason && e.reason.stack ? e.reason.stack : e.reason}`);
+});
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -834,7 +850,10 @@ function setSidebarCollapsed(v) {
   $("#app").classList.toggle("side-collapsed", v);
   if (!v) renderSidebar(); // 접혀 있는 동안 밀린 목록 갱신을 반영
 }
-setSidebarCollapsed(sideCollapsed);
+// 초기 적용은 클래스만 바꾼다. setSidebarCollapsed는 펼칠 때 renderSidebar를
+// 부르는데, 이 시점엔 profiles가 아직 선언 전이라 그대로 던진다(그러면 스크립트가
+// 죽어 창도 안 뜬다). 첫 그리기는 파일 끝의 refreshSessions가 맡는다.
+$("#app").classList.toggle("side-collapsed", sideCollapsed);
 $("#btn-side-hide").onclick = () => setSidebarCollapsed(true);
 $("#btn-side-show").onclick = () => setSidebarCollapsed(false);
 
