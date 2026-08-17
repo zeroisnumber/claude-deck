@@ -123,7 +123,11 @@ fn clear_diagnostics() -> Result<String, String> {
 /// 증상의 원인이 사이드바 재구축인지 터미널 페인트인지, 추론 대신 구분하기 위한 것.
 #[tauri::command]
 fn trace_ui(kind: String, value: String) {
-    trace("ui", "webview", &kind, &value);
+    if kind.ends_with("-failed") {
+        trace_always("ui", "webview", &kind, &value);
+    } else {
+        trace("ui", "webview", &kind, &value);
+    }
 }
 
 #[tauri::command]
@@ -210,7 +214,17 @@ fn trace_log_path() -> Option<PathBuf> {
 }
 
 fn trace(id: &str, agent: &str, kind: &str, value: &str) {
-    if !PTY_TRACE.load(Ordering::Relaxed) {
+    trace_inner(id, agent, kind, value, false);
+}
+
+/// 창을 못 띄운 것처럼 앱을 못 쓰게 만드는 실패는 진단 기록이 꺼져 있어도 남긴다.
+/// 원인을 알려면 로그가 필요한데, 로그를 켜려면 창이 열려야 하는 순환에 빠진다.
+fn trace_always(id: &str, agent: &str, kind: &str, value: &str) {
+    trace_inner(id, agent, kind, value, true);
+}
+
+fn trace_inner(id: &str, agent: &str, kind: &str, value: &str, force: bool) {
+    if !force && !PTY_TRACE.load(Ordering::Relaxed) {
         return;
     }
     let _ = TRACE_TX.send(format!(
@@ -2124,7 +2138,7 @@ fn main() {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(2500));
                     if !matches!(w3.is_visible(), Ok(true)) {
-                        trace("app", "", "window", "fallback-show");
+                        trace_always("app", "", "window", "fallback-show");
                         let _ = w3.show();
                         let _ = w3.set_focus();
                     }
