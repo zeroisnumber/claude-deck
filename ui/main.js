@@ -21,6 +21,19 @@ const terms = new Map();         // id -> { term, fit, container, title, cwd, ex
 let tabOrder = [];               // 탭 표시 순서 (드래그로 변경 가능)
 let activeId = null;
 
+// ---------- UI 계측 (진단 기록이 켜져 있을 때만 의미 있음) ----------
+// 메인 스레드가 막히면 xterm이 못 그려서 "입력이 늦다가 한번에" 보인다.
+// 막힌 구간의 길이와 시각을 브라우저가 직접 알려주므로, 원인이 20초 폴링인지
+// 터미널 페인트인지 추론 없이 갈린다.
+const uiTrace = (kind, ms) => {
+  invoke("trace_ui", { kind, value: String(Math.round(ms)) }).catch(() => {});
+};
+try {
+  new PerformanceObserver((list) => {
+    for (const e of list.getEntries()) uiTrace("longtask", e.duration);
+  }).observe({ entryTypes: ["longtask"] });
+} catch { /* 미지원 브라우저 */ }
+
 const $ = (s) => document.querySelector(s);
 const listEl = $("#session-list");
 const tabsEl = $("#tabs");
@@ -49,9 +62,13 @@ function timeAgo(mtime) {
 
 // ---------- 사이드바 ----------
 async function refreshSessions() {
+  const t0 = performance.now();
   sessions = await invoke("list_sessions");
+  const t1 = performance.now();
   if (syncCtxGauges()) renderTabs();
   renderSidebar();
+  if (t1 - t0 > 20) uiTrace("list-ipc", t1 - t0);
+  if (performance.now() - t1 > 5) uiTrace("poll-render", performance.now() - t1);
   restoreTabs(); // 최초 1회만 동작 (이전에 열려 있던 탭 자동 재개)
 }
 
@@ -138,6 +155,10 @@ function showBgMenu(s, el) {
 }
 
 function renderSidebar() {
+  // 접혀 있으면 그리지 않는다 — 20초 폴링마다 보이지도 않는 DOM을 통째로 다시
+  // 만들 이유가 없다. 펼칠 때 setSidebarCollapsed가 한 번 다시 그린다.
+  if (sideCollapsed) return;
+  const sbT0 = performance.now();
   // 플래그만 믿으면 어떤 경로로든 안 풀렸을 때 사이드바가 영구히 멈춘다.
   // 실제 입력창이 남아 있을 때만 건너뛰고, 없으면 플래그를 스스로 되돌린다.
   if (isRenaming) {
@@ -186,6 +207,7 @@ function renderSidebar() {
     }
   }
 
+  if (performance.now() - sbT0 > 5) uiTrace("sidebar", performance.now() - sbT0);
   const busyN = [...terms.values()].filter((t) => !t.exited && t.busy).length;
   const runN = [...terms.values()].filter((t) => !t.exited).length;
   const bgN = sessions.filter((s) => s.bg_running).length;
@@ -231,6 +253,9 @@ function showCtxMenu(e, s, itemEl) {
     ["✏️ 이름 바꾸기", () => startRename(s, itemEl)],
     ["📂 폴더 열기", () => {
       invoke("open_path", { path: s.cwd }).catch((e) => showToast("⚠ 폴더 열기 실패", String(e)));
+    }],
+    ["📄 로그 파일 열기", () => {
+      invoke("open_log_file", { file: s.file }).catch((e) => showToast("⚠ 로그 열기 실패", String(e)));
     }],
     ["🗑️ 세션 삭제", async () => {
       try {
@@ -761,7 +786,12 @@ function makeTabDraggable(el) {
 listen("pty-output", (ev) => {
   const { id, data } = ev.payload;
   const t = terms.get(id);
-  if (t) t.term.write(b64ToBytes(data));
+  if (t) {
+    const t0 = performance.now();
+    t.term.write(b64ToBytes(data));
+    const d = performance.now() - t0;
+    if (d > 5) uiTrace("term-write", d);
+  }
 });
 
 listen("pty-exit", (ev) => {
@@ -775,6 +805,20 @@ listen("pty-exit", (ev) => {
     refreshSessions();
   }
 });
+
+// ---------- 사이드바 접기 ----------
+// 접힌 상태에서도 되돌아올 수 있어야 하므로 펼치기 버튼은 #main에 따로 둔다.
+// 터미널 재적응은 아래 ResizeObserver가 알아서 한다.
+let sideCollapsed = localStorage.getItem("sideCollapsed") === "1";
+function setSidebarCollapsed(v) {
+  sideCollapsed = v;
+  localStorage.setItem("sideCollapsed", v ? "1" : "0");
+  $("#app").classList.toggle("side-collapsed", v);
+  if (!v) renderSidebar(); // 접혀 있는 동안 밀린 목록 갱신을 반영
+}
+setSidebarCollapsed(sideCollapsed);
+$("#btn-side-hide").onclick = () => setSidebarCollapsed(true);
+$("#btn-side-show").onclick = () => setSidebarCollapsed(false);
 
 // ---------- 리사이즈 ----------
 const ro = new ResizeObserver(() => {
@@ -1044,6 +1088,10 @@ function handleShortcut(e) {
   }
   if (e.shiftKey && e.code === "KeyN") {
     openNewModal();
+    return true;
+  }
+  if (e.shiftKey && e.code === "KeyB") {
+    setSidebarCollapsed(!sideCollapsed);
     return true;
   }
   return false;

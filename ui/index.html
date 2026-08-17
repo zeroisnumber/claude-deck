@@ -20,6 +20,7 @@
           <button id="btn-dash" class="icon-btn" title="사용량 대시보드">📊</button>
           <button id="btn-refresh" class="icon-btn" title="세션 목록 새로고침">⟳</button>
           <button id="btn-settings" class="icon-btn" title="설정">⚙</button>
+          <button id="btn-side-hide" class="icon-btn" title="사이드바 접기 (Ctrl+Shift+B)">⟨</button>
         </div>
       </header>
 
@@ -52,6 +53,8 @@
 
     <!-- 메인 -->
     <main id="main">
+      <!-- 펼치기 버튼은 #tabs 바깥에 둔다 — renderTabs()가 매번 innerHTML을 비운다 -->
+      <button id="btn-side-show" class="icon-btn" title="사이드바 펼치기 (Ctrl+Shift+B)">⟩</button>
       <div id="tabs"></div>
 
       <div id="term-area">
@@ -63,6 +66,7 @@
             <span><kbd>클릭</kbd> 세션 열기/전환</span>
             <span><kbd>Ctrl</kbd>+<kbd>Tab</kbd> 탭 순환</span>
             <span><kbd>Ctrl</kbd>+<kbd>V</kbd> 붙여넣기</span>
+            <span><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd> 사이드바 접기</span>
           </div>
         </div>
       </div>

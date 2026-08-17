@@ -413,7 +413,22 @@ html, body {
 #btn-update.hidden { display: none; }
 
 /* ─── 메인 / 탭 ────────────────────────────────────────── */
-#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+
+/* ─── 사이드바 접기 ─────────────────────────────────────── */
+/* width 전환을 넣지 않는 이유: ResizeObserver가 매 프레임 resize_pty를 쏴서
+   애니메이션 내내 TUI가 다시 그려진다. 즉시 전환이 오히려 깔끔하다. */
+#app.side-collapsed #sidebar { display: none; }
+#btn-side-show { display: none; }
+#app.side-collapsed #btn-side-show {
+  display: block;
+  position: absolute;
+  left: 8px;
+  top: 6px;
+  z-index: 5;
+}
+/* 펼치기 버튼이 첫 탭을 가리지 않게 자리를 비운다 */
+#app.side-collapsed #tabs { padding-left: 42px; }
 
 #tabs {
   display: flex;

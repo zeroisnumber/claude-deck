@@ -94,10 +94,7 @@ fn init_trace() {
 /// 사용자 설정이 통째로 날아간다.
 #[tauri::command]
 fn clear_diagnostics() -> Result<String, String> {
-    // 기록 중인 파일은 핸들을 먼저 놓아야 Windows에서 삭제된다.
-    // 다음 trace 호출이 알아서 새로 연다.
-    *TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner()) = None;
-
+    // 기록 스레드는 파일이 사라지면 다음 배치에서 스스로 다시 연다.
     let dir = dirs::data_local_dir()
         .map(|d| d.join("com.user.cli-deck"))
         .ok_or("데이터 폴더를 찾을 수 없습니다")?;
@@ -120,6 +117,13 @@ fn clear_diagnostics() -> Result<String, String> {
         names.join(", "),
         freed as f64 / (1024.0 * 1024.0)
     ))
+}
+
+/// 프런트엔드가 재는 값을 같은 트레이스 파일로 넘긴다. 입력이 늦다가 몰려 보이는
+/// 증상의 원인이 사이드바 재구축인지 터미널 페인트인지, 추론 대신 구분하기 위한 것.
+#[tauri::command]
+fn trace_ui(kind: String, value: String) {
+    trace("ui", "webview", &kind, &value);
 }
 
 #[tauri::command]
@@ -148,7 +152,6 @@ fn set_trace(enabled: bool) -> Result<String, String> {
 }
 
 static TRACE_START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
-static TRACE_FILE: LazyLock<Mutex<Option<(fs::File, u64)>>> = LazyLock::new(|| Mutex::new(None));
 
 /// 며칠 켜둬도 디스크를 잡아먹지 않도록. 샘플링 대신 상한으로 끊는다 —
 /// 청크 간격 분포가 신호 자체라 솎아내면 데이터가 망가진다.
@@ -157,55 +160,68 @@ const TRACE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 /// ccmanager가 Claude 감지에 쓰는 스피너 문자 집합
 const SPINNER_GLYPHS: &str = "✱✲✳✴✵✶✷✸✹✺✻✼✽✾✿❀❁❂❃❇❈❉❊❋✢✣✤✥✦✧✨⊛⊕⊙◉◎◍⁂⁕※⍟☼★☆·•⏺▸▹∙⋅○●";
 
+// 기록은 별도 스레드가 맡는다. 예전엔 청크마다 리더 스레드에서 바로 파일에 썼는데,
+// 실측 결과 초당 137번의 쓰기 시스템 콜이 났다 — 그 스레드는 터미널 출력을 배달하는
+// 스레드라, 파일 시스템이나 백신이 한 번 붙들면 그동안 화면이 멈춘다.
+// 이제 핫패스는 채널에 문자열 하나 보내고 끝이고, 실제 쓰기는 모아서 처리한다.
+static TRACE_TX: LazyLock<std::sync::mpsc::Sender<String>> = LazyLock::new(|| {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut sink: Option<(fs::File, u64)> = None;
+        while let Ok(first) = rx.recv() {
+            // 깨어난 김에 쌓인 것을 모두 모아 한 번에 쓴다
+            let mut batch = first;
+            while let Ok(more) = rx.try_recv() {
+                batch.push_str(&more);
+            }
+            let Some(path) = trace_log_path() else { continue };
+            // 밖에서 파일이 지워졌으면 핸들을 버리고 다시 연다 (안 그러면 삭제된
+            // 파일에 계속 쓰게 되어 기록이 조용히 사라진다)
+            if sink.is_some() && !path.exists() {
+                sink = None;
+            }
+            if sink.is_none() {
+                let Some(dir) = path.parent() else { continue };
+                if fs::create_dir_all(dir).is_err() {
+                    continue;
+                }
+                let Ok(f) = fs::OpenOptions::new().create(true).append(true).open(&path) else {
+                    continue;
+                };
+                let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+                sink = Some((f, size));
+            }
+            if let Some((f, written)) = sink.as_mut() {
+                if *written >= TRACE_MAX_BYTES {
+                    continue;
+                }
+                use std::io::Write as _;
+                if f.write_all(batch.as_bytes()).is_ok() {
+                    *written += batch.len() as u64;
+                }
+            }
+        }
+    });
+    tx
+});
+
+fn trace_log_path() -> Option<PathBuf> {
+    Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("pty-trace.log"))
+}
+
 fn trace(id: &str, agent: &str, kind: &str, value: &str) {
     if !PTY_TRACE.load(Ordering::Relaxed) {
         return;
     }
-    let mut guard = TRACE_FILE.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.is_none() {
-        let Some(dir) = dirs::data_local_dir() else { return };
-        let dir = dir.join("com.user.cli-deck");
-        if fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        let Ok(f) = fs::OpenOptions::new().create(true).append(true).open(dir.join("pty-trace.log"))
-        else {
-            return;
-        };
-        let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-        *guard = Some((f, size));
-        // 경과 ms만으로는 세션 jsonl의 타임스탬프와 대조할 수 없다 —
-        // "이 구간이 권한 대기였나 작업중이었나"의 정답이 거기 있으므로
-        // 실행마다 기준점을 남겨 벽시계 시각으로 환산할 수 있게 한다.
-        // wall_ms = epoch_ms + (경과ms - 기준경과ms)
-        let epoch_ms = std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let header = format!("#start\t{}\t{}\n", epoch_ms, TRACE_START.elapsed().as_millis());
-        if let Some((f, written)) = guard.as_mut() {
-            use std::io::Write as _;
-            if f.write_all(header.as_bytes()).is_ok() {
-                *written += header.len() as u64;
-            }
-        }
-    }
-    let Some((f, written)) = guard.as_mut() else { return };
-    if *written >= TRACE_MAX_BYTES {
-        return;
-    }
-    let line = format!(
-        "{}\t{}\t{}\t{}\t{}\n",
+    let _ = TRACE_TX.send(format!(
+        "{}	{}	{}	{}	{}
+",
         TRACE_START.elapsed().as_millis(),
         id,
         agent,
         kind,
         value
-    );
-    use std::io::Write as _;
-    if f.write_all(line.as_bytes()).is_ok() {
-        *written += line.len() as u64;
-    }
+    ));
 }
 
 /// 트레이스에 남기기 전 환경변수 값을 가린다. 설정의 "전역 환경변수"는
@@ -1967,12 +1983,24 @@ fn open_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 세션 로그 파일(JSONL)을 기본 연결 프로그램으로 연다.
+/// 연결 프로그램이 없으면 Windows가 "연결 프로그램 선택" 창을 띄운다 —
+/// spawn 자체는 성공하므로 프런트의 catch로는 그 경우를 알 수 없다.
 #[tauri::command]
-fn delete_session(file: String) -> Result<(), String> {
-    // ".." 같은 성분이 섞이면 starts_with 검사를 그냥 통과하므로 반드시 정규화 후 비교
-    let p = fs::canonicalize(&file).map_err(|e| e.to_string())?;
+fn open_log_file(file: String) -> Result<(), String> {
+    let p = session_file_in_store(&file)?;
+    std::process::Command::new("explorer.exe")
+        .arg(&p)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 알려진 세션 저장소 안의 세션 파일인지 검사하고 정규화된 경로를 돌려준다.
+/// ".." 같은 성분이 섞이면 starts_with 검사를 그냥 통과하므로 반드시 정규화 후 비교.
+fn session_file_in_store(file: &str) -> Result<PathBuf, String> {
+    let p = fs::canonicalize(file).map_err(|e| e.to_string())?;
     let home = dirs::home_dir().ok_or("no home dir")?;
-    // 알려진 세션 저장소 안의 세션 파일만 삭제 허용
     let allowed = [
         home.join(".claude").join("projects"),
         home.join(".codex").join("sessions"),
@@ -1989,6 +2017,13 @@ fn delete_session(file: String) -> Result<(), String> {
     if !in_store || !is_session {
         return Err("invalid session file path".into());
     }
+    Ok(p)
+}
+
+#[tauri::command]
+fn delete_session(file: String) -> Result<(), String> {
+    // 알려진 세션 저장소 안의 세션 파일만 삭제 허용
+    let p = session_file_in_store(&file)?;
     fs::remove_file(&p).map_err(|e| e.to_string())?;
     // 캐시 키는 스캔 당시의 원본 경로 문자열 (canonicalize한 \\?\ 형태가 아님)
     META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).remove(&file);
@@ -2021,7 +2056,7 @@ fn main() {
         .manage(PtyState::default())
         .invoke_handler(tauri::generate_handler![
             spawn_pty, write_pty, resize_pty, kill_pty, list_sessions, delete_session,
-            session_preview, trace_enabled, set_trace, clear_diagnostics, set_keepalive, statusline_settings_path, usage_stats, headroom_stats, subscription_state, codex_state,
+            session_preview, trace_enabled, set_trace, clear_diagnostics, set_keepalive, statusline_settings_path, trace_ui, usage_stats, headroom_stats, subscription_state, codex_state, open_log_file,
             open_path
         ])
         .setup(|app| {
