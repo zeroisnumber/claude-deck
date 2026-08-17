@@ -62,6 +62,10 @@ function timeAgo(mtime) {
 
 // ---------- 사이드바 ----------
 async function refreshSessions() {
+  // 창이 안 보이면 목록을 새로 읽지 않는다 — 전 프로젝트 폴더를 훑고 사이드바를
+  // 통째로 다시 만드는 작업이라, 보이지도 않는 동안 20초마다 할 이유가 없다.
+  // 다시 보이는 순간 아래 visibilitychange가 한 번 당겨 실행한다.
+  if (document.hidden && restored) return;
   const t0 = performance.now();
   sessions = await invoke("list_sessions");
   const t1 = performance.now();
@@ -221,6 +225,7 @@ function renderSidebar() {
 
 // 캐시 TTL 배지: 매초 남은 시간만 갱신 (전체 리렌더 없이 텍스트만 갱신해 저비용)
 function updateTtlBadges() {
+  if (document.hidden || sideCollapsed) return; // 안 보이는 배지는 갱신할 필요가 없다
   const now = Date.now() / 1000;
   for (const el of listEl.querySelectorAll(".si-ttl[data-exp]")) {
     const remain = Math.round(Number(el.dataset.exp) - now);
@@ -467,6 +472,14 @@ function makeTerm(id, title, cwd) {
     term.unicode.activeVersion = "11";
   } catch { /* 애드온 없으면 기본 동작 유지 */ }
   term.open(container);
+  // 기본 DOM 렌더러는 스크롤·출력마다 행을 메인 스레드에서 다시 만든다. WebGL은
+  // 글리프를 셀 단위로 GPU에서 그려서 그 비용이 사라진다. 컨텍스트를 잃으면
+  // (드라이버 리셋, GPU 전환) 애드온을 버리고 DOM 렌더러로 되돌아간다.
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    webgl.onContextLoss(() => webgl.dispose());
+    term.loadAddon(webgl);
+  } catch { /* GPU를 못 쓰면 DOM 렌더러 그대로 */ }
 
   term.onData((d) => invoke("write_pty", { id, data: d }));
 
@@ -1102,7 +1115,10 @@ window.addEventListener("keydown", (e) => {
 
 // Ctrl+휠 폰트 크기 조절
 let fontSize = parseFloat(localStorage.getItem("fontSize")) || 13.5;
-termArea.addEventListener("wheel", (e) => {
+// Ctrl+휠 = 폰트 크기. preventDefault가 필요해 비패시브여야 하는데, 비패시브
+// 휠 리스너가 붙어 있으면 평범한 스크롤도 브라우저가 메인 스레드를 기다린다
+// (스레드가 바쁘면 휠이 끊긴다). 그래서 Ctrl을 누르고 있는 동안만 붙인다.
+const onZoomWheel = (e) => {
   if (!e.ctrlKey) return;
   e.preventDefault();
   fontSize = Math.min(22, Math.max(9, fontSize + (e.deltaY < 0 ? 1 : -1)));
@@ -1114,7 +1130,17 @@ termArea.addEventListener("wheel", (e) => {
       invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
     }
   }
-}, { passive: false });
+};
+let zoomWheelOn = false;
+function setZoomWheel(on) {
+  if (on === zoomWheelOn) return;
+  zoomWheelOn = on;
+  if (on) termArea.addEventListener("wheel", onZoomWheel, { passive: false });
+  else termArea.removeEventListener("wheel", onZoomWheel, { passive: false });
+}
+window.addEventListener("keydown", (e) => { if (e.ctrlKey) setZoomWheel(true); });
+window.addEventListener("keyup", (e) => { if (!e.ctrlKey) setZoomWheel(false); });
+window.addEventListener("blur", () => setZoomWheel(false));
 
 // ---------- 자동 업데이트 ----------
 async function checkUpdate() {
@@ -1392,6 +1418,11 @@ btnRefreshLimits.onclick = async () => {
     }, 10_000);
   }
 };
+
+// 숨겨져 있는 동안 건너뛴 갱신을 다시 보이는 순간 한 번에 따라잡는다
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshSessions();
+});
 
 // 주기적 목록 갱신 (20초)
 setInterval(refreshSessions, 20000);
