@@ -1175,12 +1175,16 @@ setTimeout(checkUpdate, 5000);
 setInterval(checkUpdate, 6 * 3600 * 1000); // 6시간마다
 
 // 창 표시: WebView 로드 완료 후에 보여주고 포커스 (첫 실행 한글 IME 미연결 버그 회피)
+// 여기서 조용히 실패하면 앱이 트레이에서만 열린다. 실패는 반드시 남긴다 —
+// 못 띄웠을 때 Rust 쪽 안전망이 2.5초 뒤에 대신 띄운다.
 (async () => {
   try {
     const w = window.__TAURI__.window.getCurrentWindow();
     await w.show();
     await w.setFocus();
-  } catch { /* 무시 */ }
+  } catch (e) {
+    invoke("trace_ui", { kind: "window-show-failed", value: String(e) }).catch(() => {});
+  }
 })();
 
 // ---------- 사용량: 단가표 · 컨텍스트 게이지 · 대시보드 ----------

@@ -2116,6 +2116,19 @@ fn main() {
                         let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
                     });
                 });
+
+                // 안전망: 창 표시를 프런트에만 맡기면 JS가 거기까지 못 가는 순간
+                // 앱이 트레이에서만 열리는 유령이 된다(실제로 그렇게 됐다).
+                // 프런트가 먼저 띄우면 이 스레드는 아무것도 하지 않는다.
+                let w3 = w.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(2500));
+                    if !matches!(w3.is_visible(), Ok(true)) {
+                        trace("app", "", "window", "fallback-show");
+                        let _ = w3.show();
+                        let _ = w3.set_focus();
+                    }
+                });
             }
             Ok(())
         })
