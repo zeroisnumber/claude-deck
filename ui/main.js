@@ -944,8 +944,8 @@ function addProfileRow(name = "", cmd = "", resume = true, checked = false) {
   row.className = "lrow";
   row.innerHTML = `
     <label class="l-active" title="이 프로필 사용"><input type="radio" name="active-profile" /></label>
-    <input class="l-name" placeholder="이름" spellcheck="false" />
-    <input class="l-cmd" placeholder="실행 명령 (예: headroom wrap claude)" spellcheck="false" />
+    <input class="set-input l-name" placeholder="이름" spellcheck="false" />
+    <input class="set-input mono l-cmd" placeholder="실행 명령 (예: headroom wrap claude)" spellcheck="false" />
     <label class="l-resume" title="세션 재개 시 --resume <세션ID> 인자를 붙일지"><input type="checkbox" />재개</label>
     <button class="l-del" title="삭제">✕</button>`;
   row.querySelector(".l-active input").checked = checked;
@@ -965,9 +965,20 @@ $("#btn-settings").onclick = () => {
   $("#opt-keepalive").checked = !!keepAlive.enabled;
   $("#ka-threshold").value = String(keepAlive.thresholdSecs / 60);
   $("#ka-message").value = keepAlive.message;
+  syncKaFields();
   $("#trace-path").textContent = "";
   $("#lmodal-backdrop").classList.remove("hidden");
 };
+// 캐시 유지를 꺼두면 임계값과 메시지는 아무 데도 쓰이지 않는다 — 만질 수 있게
+// 두면 껐다는 사실이 안 보인다.
+function syncKaFields() {
+  const on = $("#opt-keepalive").checked;
+  $("#ka-fields").classList.toggle("off", !on);
+  $("#ka-threshold").disabled = !on;
+  $("#ka-message").disabled = !on;
+}
+$("#opt-keepalive").onchange = syncKaFields;
+
 $("#profile-add").onclick = () => addProfileRow();
 $("#btn-clear-diag").onclick = async () => {
   try {

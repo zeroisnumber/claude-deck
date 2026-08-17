@@ -93,44 +93,67 @@
   <!-- 실행기 관리 모달 -->
   <div id="lmodal-backdrop" class="hidden">
     <div id="modal" class="lmodal">
-      <div class="modal-title">설정</div>
+      <div class="lmodal-head"><div class="modal-title">설정</div></div>
 
-      <div class="lmodal-section">에이전트 실행 명령
-        <span class="lmodal-hint">세션을 열 때 실행할 명령 — ● 선택된 프로필이 사용됩니다</span>
-      </div>
-      <div id="profile-list"></div>
-      <button id="profile-add" class="btn-ghost btn-add">＋ 프로필 추가</button>
-      <div class="lmodal-note">예: <code>claude</code>, <code>headroom wrap claude</code>, <code>my-proxy run claude</code>. "재개"가 켜진 프로필은 세션 재개 시 명령 뒤에 <code>--resume &lt;세션ID&gt;</code>가 붙습니다.</div>
+      <div class="lmodal-body">
+        <section class="set-card">
+          <div class="set-head">
+            <div class="set-title">에이전트 실행 명령</div>
+            <div class="set-hint">세션을 열 때 실행할 명령 — ● 선택된 프로필이 사용됩니다</div>
+          </div>
+          <div id="profile-list"></div>
+          <button id="profile-add" class="btn-ghost btn-add">＋ 프로필 추가</button>
+          <div class="lmodal-note">예: <code>claude</code>, <code>headroom wrap claude</code>, <code>my-proxy run claude</code>. "재개"가 켜진 프로필은 세션 재개 시 명령 뒤에 <code>--resume &lt;세션ID&gt;</code>가 붙습니다.</div>
+        </section>
 
-      <div class="lmodal-section sep">전역 환경변수
-        <span class="lmodal-hint">프로필과 무관하게 모든 세션 실행에 적용</span>
-      </div>
-      <input id="global-env" placeholder="KEY=VAL;KEY2=VAL2 (예: HEADROOM_OUTPUT_SHAPER=1;PYTHONUTF8=1)" spellcheck="false" />
+        <section class="set-card">
+          <div class="set-head">
+            <div class="set-title">전역 환경변수</div>
+            <div class="set-hint">프로필과 무관하게 모든 세션 실행에 적용</div>
+          </div>
+          <input id="global-env" class="set-input mono" placeholder="KEY=VAL;KEY2=VAL2 (예: HEADROOM_OUTPUT_SHAPER=1;PYTHONUTF8=1)" spellcheck="false" />
+        </section>
 
-      <div class="lmodal-section sep">상태줄 연동
-        <span class="lmodal-hint">한도·컨텍스트를 Claude Code에서 직접 받아옵니다</span>
-      </div>
-      <label class="lmodal-check"><input type="checkbox" id="opt-statusline" />세션 데이터 받기</label>
-      <div class="lmodal-note">CLI Deck이 여는 세션에만 <code>--settings</code>로 상태줄을 얹어 요금제 한도와 실제 컨텍스트 윈도우를 받습니다. <b>사용자 <code>settings.json</code>은 읽기만 하고 수정하지 않으며</b>, 원래 쓰던 상태줄이 있으면 그대로 통과시켜 화면은 바뀌지 않습니다.</div>
+        <section class="set-card">
+          <label class="set-head switch-head">
+            <div>
+              <div class="set-title">상태줄 연동</div>
+              <div class="set-hint">한도·컨텍스트를 Claude Code에서 직접 받아옵니다</div>
+            </div>
+            <input type="checkbox" id="opt-statusline" class="switch" />
+          </label>
+          <div class="lmodal-note">CLI Deck이 여는 세션에만 <code>--settings</code>로 상태줄을 얹어 요금제 한도와 실제 컨텍스트 윈도우를 받습니다. <b>사용자 <code>settings.json</code>은 읽기만 하고 수정하지 않으며</b>, 원래 쓰던 상태줄이 있으면 그대로 통과시켜 화면은 바뀌지 않습니다.</div>
+        </section>
 
-      <div class="lmodal-section sep">프롬프트 캐시 유지
-        <span class="lmodal-hint">만료 직전에 짧은 메시지를 보내 캐시를 살려둡니다 — 실제로 요청이 나가고 비용이 듭니다</span>
-      </div>
-      <label class="lmodal-check"><input type="checkbox" id="opt-keepalive" />캐시 유지 사용</label>
-      <div class="lmodal-row2">
-        <label class="l-inline">남은 시간 <input id="ka-threshold" type="number" min="0.5" max="60" step="0.5" /> 분일 때</label>
-        <input id="ka-message" placeholder='보낼 메시지 (예: reply "." only)' spellcheck="false" />
-      </div>
-      <div class="lmodal-note">1시간 캐시 기준 재작성은 입력가의 2×, 읽기는 0.1×라 만료시키는 것보다 20배 쌉니다. 작업 중이거나 입력창에 쓰다 만 내용이 있으면 건너뜁니다. 첫 발송으로부터 8시간이 지나면 자동으로 멈춥니다.</div>
+        <section class="set-card">
+          <label class="set-head switch-head">
+            <div>
+              <div class="set-title">프롬프트 캐시 유지</div>
+              <div class="set-hint">만료 직전에 짧은 메시지를 보내 캐시를 살려둡니다 — 실제로 요청이 나가고 비용이 듭니다</div>
+            </div>
+            <input type="checkbox" id="opt-keepalive" class="switch" />
+          </label>
+          <div id="ka-fields" class="set-row">
+            <label class="l-inline">남은 시간 <input id="ka-threshold" class="set-input" type="number" min="0.5" max="60" step="0.5" /> 분일 때</label>
+            <input id="ka-message" class="set-input mono" placeholder='보낼 메시지 (예: reply "." only)' spellcheck="false" />
+          </div>
+          <div class="lmodal-note">1시간 캐시 기준 재작성은 입력가의 2×, 읽기는 0.1×라 만료시키는 것보다 20배 쌉니다. 작업 중이거나 입력창에 쓰다 만 내용이 있으면 건너뜁니다. 첫 발송으로부터 8시간이 지나면 자동으로 멈춥니다.</div>
+        </section>
 
-      <div class="lmodal-section sep">진단
-        <span class="lmodal-hint">문제 재현 시에만 켜세요 — 평소엔 꺼두면 됩니다</span>
+        <section class="set-card">
+          <label class="set-head switch-head">
+            <div>
+              <div class="set-title">진단 기록</div>
+              <div class="set-hint">문제 재현 시에만 켜세요 — 평소엔 꺼두면 됩니다</div>
+            </div>
+            <input type="checkbox" id="opt-trace" class="switch" />
+          </label>
+          <div class="lmodal-note">터미널 출력 타이밍과 작업중/완료 판정을 파일로 남깁니다. 알림이 안 뜨는 등의 문제를 추적할 때 씁니다. <span id="trace-path" class="lmodal-hint"></span></div>
+          <button id="btn-clear-diag" class="btn-ghost btn-sm">기록 파일 삭제</button>
+        </section>
       </div>
-      <label class="lmodal-check"><input type="checkbox" id="opt-trace" />PTY 활동 기록</label>
-      <button id="btn-clear-diag" class="btn-ghost">기록 파일 삭제</button>
-      <div class="lmodal-note">터미널 출력 타이밍과 작업중/완료 판정을 파일로 남깁니다. 알림이 안 뜨는 등의 문제를 추적할 때 씁니다. <span id="trace-path" class="lmodal-hint"></span></div>
 
-      <div class="modal-actions">
+      <div class="modal-actions lmodal-foot">
         <button id="lmodal-cancel" class="btn-ghost">취소</button>
         <button id="lmodal-save" class="btn-accent">저장</button>
       </div>
