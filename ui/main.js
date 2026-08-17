@@ -25,7 +25,12 @@ let activeId = null;
 // 메인 스레드가 막히면 xterm이 못 그려서 "입력이 늦다가 한번에" 보인다.
 // 막힌 구간의 길이와 시각을 브라우저가 직접 알려주므로, 원인이 20초 폴링인지
 // 터미널 페인트인지 추론 없이 갈린다.
+// 기록이 꺼져 있으면 IPC 자체를 보내지 않는다. Rust에서 버리게 두면 longtask가
+// 잦을 때 그만큼 왕복이 생기는데, 진단이 부하를 만드는 건 이미 한 번 겪었다.
+let traceOn = false;
+invoke("trace_enabled").then((v) => { traceOn = !!v; }).catch(() => {});
 const uiTrace = (kind, ms) => {
+  if (!traceOn) return;
   invoke("trace_ui", { kind, value: String(Math.round(ms)) }).catch(() => {});
 };
 try {
@@ -984,6 +989,7 @@ $("#lmodal-save").onclick = () => {
   };
   localStorage.setItem("keepAlive", JSON.stringify(keepAlive));
   pushKeepAlive();
+  traceOn = $("#opt-trace").checked;
   invoke("set_trace", { enabled: $("#opt-trace").checked })
     .then((path) => {
       if ($("#opt-trace").checked && path) showToast("진단 기록 켜짐", path);
