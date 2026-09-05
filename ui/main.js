@@ -116,13 +116,21 @@ const BG_STATE = {
   failed:  { cls: "fail", label: "실패" },
 };
 
+// 표시 이름: 사용자 별칭 → Claude Code가 붙인 세션 이름(포크면 "⑂", 복제면 "(2)"가
+// 이미 붙어 있다) → 요약 → 첫 프롬프트 순.
+function sessionTitle(s) {
+  return aliases[s.session_id] || s.title || s.summary || s.first_prompt || "";
+}
+
 // 사이드바 한 줄. child=true면 원본 아래 들여쓴 백그라운드 세션이다.
 function sessionRow(s, child) {
   const el = document.createElement("div");
   el.className = "session-item" + (s.session_id === activeId ? " active" : "") + (child ? " child" : "");
   const t = terms.get(s.session_id);
   const bg = s.bg_state ? (BG_STATE[s.bg_state] || { cls: "idle", label: s.bg_state }) : null;
-  const title = aliases[s.session_id] || s.summary || s.first_prompt || "(내용 없음)";
+  const title = sessionTitle(s) || "(내용 없음)";
+  // 포크된 세션인데 이름에 표식이 없으면 붙여 준다 (원본이 목록에 없어 들여쓰기가 안 될 때도 보이게)
+  const fork = s.parent_id && !title.includes("⑂") ? `<span class="si-fork" title="포크된 세션">⑂</span>` : "";
 
   const dot = t ? `<span class="si-dot ${statusClass(t)}" title="${statusLabel(t)}"></span>` : "";
   const pin = pins.includes(s.session_id) ? `<span class="si-pin">📌</span>` : "";
@@ -138,7 +146,7 @@ function sessionRow(s, child) {
 
   el.innerHTML = `
     ${dot}
-    <div class="si-title">${pin}${glyph}${badge}<span class="si-title-text"></span></div>
+    <div class="si-title">${pin}${glyph}${fork}${badge}<span class="si-title-text"></span></div>
     <div class="si-meta">
       <span class="si-proj"></span>
       <span>${timeAgo(s.mtime)}</span>
@@ -150,33 +158,21 @@ function sessionRow(s, child) {
   el.querySelector(".si-proj").textContent = basename(s.cwd);
   if (s.bg_detail) el.querySelector(".si-bg-detail").textContent = s.bg_detail;
 
-  el.onclick = () => (s.bg_running ? showBgMenu(s, el) : openSession(s));
+  el.onclick = () => openSession(s);
   el.oncontextmenu = (e) => { e.preventDefault(); showCtxMenu(e, s, el); };
   el.onmouseenter = () => schedulePreview(el, s);
   el.onmouseleave = hidePreview;
   return el;
 }
 
-// 실행 중인 백그라운드 세션은 --resume이 거절된다(데몬이 잡고 있음).
-// 원본으로 갈지, 복사본으로 갈라져 나올지 고르게 한다.
-function showBgMenu(s, el) {
-  hidePreview();
-  const parent = s.parent_id ? sessions.find((x) => x.session_id === s.parent_id) : null;
+// 백그라운드·포크 세션 전용 우클릭 항목. 왼쪽 클릭은 openSession이 알아서
+// (실행 중이면 attach, 아니면 --resume) 처리하므로 여기엔 대안만 둔다.
+function bgMenuItems(s) {
   const items = [];
+  const parent = s.parent_id ? sessions.find((x) => x.session_id === s.parent_id) : null;
   if (parent) items.push(["↖ 원본 세션 열기", () => openSession(parent)]);
-  items.push(["⑂ 복사본으로 열기", () => openSession(s, true, { fork: true })]);
-  ctxMenu.innerHTML = "";
-  for (const [label, fn] of items) {
-    const d = document.createElement("div");
-    d.className = "ctx-item";
-    d.textContent = label;
-    d.onclick = () => { hideCtxMenu(); fn(); };
-    ctxMenu.appendChild(d);
-  }
-  const r = el.getBoundingClientRect();
-  ctxMenu.classList.remove("hidden");
-  ctxMenu.style.left = Math.min(r.right + 4, window.innerWidth - 200) + "px";
-  ctxMenu.style.top = Math.min(r.top, window.innerHeight - 100) + "px";
+  if (s.bg_state) items.push(["⑂ 복사본으로 열기", () => openSession(s, true, { fork: true })]);
+  return items;
 }
 
 function renderSidebar() {
@@ -198,7 +194,7 @@ function renderSidebar() {
     if (!q) return true;
     // 제목·프로젝트에 더해 백그라운드 상태 문구도 검색 대상에 넣는다
     const hay = [
-      aliases[s.session_id] || s.summary || s.first_prompt || "",
+      sessionTitle(s),
       basename(s.cwd),
       s.bg_detail || "",
       s.bg_state || "",
@@ -271,6 +267,7 @@ function showCtxMenu(e, s, itemEl) {
   const pinned = pins.includes(s.session_id);
   ctxMenu.innerHTML = "";
   const items = [
+    ...bgMenuItems(s),
     [pinned ? "📌 핀 해제" : "📌 핀 고정", () => {
       pins = pinned ? pins.filter((x) => x !== s.session_id) : [...pins, s.session_id];
       localStorage.setItem("pins", JSON.stringify(pins));
@@ -286,7 +283,7 @@ function showCtxMenu(e, s, itemEl) {
     ["🗑️ 세션 삭제", async () => {
       try {
         const ok = await window.__TAURI__.dialog.confirm(
-          `이 세션 기록을 영구 삭제할까요?\n\n${aliases[s.session_id] || s.summary || s.first_prompt || s.session_id}`,
+          `이 세션 기록을 영구 삭제할까요?\n\n${sessionTitle(s) || s.session_id}`,
           { title: "세션 삭제", kind: "warning" });
         if (!ok) return;
         if (terms.has(s.session_id)) await closeTab(s.session_id);
@@ -458,11 +455,11 @@ function notifyDone(id, t) {
 // 실측 결과 턴 내부 침묵이 78.7초까지 나와서 그 방식으로는 완료를 알 수 없었다.
 // 창이 백그라운드로 가면 이 타이머 자체가 스로틀링되는 문제도 있었다.
 listen("pty-state", (ev) => {
-  const { id, working } = ev.payload;
+  const { id, working, notify } = ev.payload;
   const t = terms.get(id);
   if (!t || t.busy === working) return;
   t.busy = working;
-  if (!working && !t.exited) notifyDone(id, t);
+  if (!working && !t.exited && notify !== false) notifyDone(id, t);
   renderTabs();
   renderSidebar();
 });
@@ -498,7 +495,7 @@ function makeTerm(id, title, cwd) {
   // (드라이버 리셋, GPU 전환) 애드온을 버리고 DOM 렌더러로 되돌아간다.
   try {
     const webgl = new WebglAddon.WebglAddon();
-    webgl.onContextLoss(() => webgl.dispose());
+    webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* DOM 렌더러로 돌아가는 건 xterm이 한다 */ } });
     term.loadAddon(webgl);
   } catch { /* GPU를 못 쓰면 DOM 렌더러 그대로 */ }
 
@@ -577,16 +574,27 @@ function commandFor(meta) {
   return { cmd: composeCommand(meta.session_id), profile: currentProfile() };
 }
 
+// 데몬이 잡고 있는 백그라운드 세션은 --resume이 거절된다("claude attach <id>를 쓰라"고
+// 안내하고 종료). 그 세션을 이 탭에 그대로 붙인다. 래퍼 프로필(예: headroom wrap claude)은
+// 인자를 그대로 넘기므로 뒤에 attach를 붙이면 되고, claude가 아닌 명령이면 claude를 직접 부른다.
+function attachCommand(short) {
+  const p = currentProfile();
+  const base = /(^|\s)claude$/.test(p.cmd.trim()) ? p.cmd.trim() : "claude";
+  return envPrefix(globalEnv) + `${base} attach ${short}`;
+}
+
 async function openSession(meta, focus = true, opts = {}) {
   const id = meta.session_id;
   if (terms.has(id)) return focus && activate(id);
 
-  const title = basename(meta.cwd) + " · " + (aliases[id] || meta.summary || meta.first_prompt || id.slice(0, 8)).slice(0, 24);
+  const title = basename(meta.cwd) + " · " + (sessionTitle(meta) || id.slice(0, 8)).slice(0, 24);
   const entry = makeTerm(id, title, meta.cwd);
   const spec = commandFor(meta);
   entry.profile = spec.profile;
-  // 실행 중인 백그라운드 세션은 그냥 --resume이 거절된다. 복사본으로 갈라져 나온다.
-  entry.spawnCommand = opts.fork ? `${spec.cmd} --fork-session` : spec.cmd;
+  const attach = !opts.fork && meta.agent === "claude" && meta.bg_running && meta.bg_short;
+  entry.spawnCommand = attach
+    ? attachCommand(meta.bg_short)
+    : opts.fork ? `${spec.cmd} --fork-session` : spec.cmd;
   entry.file = meta.file;
   if (focus) activate(id);
   else renderTabs();
@@ -683,7 +691,10 @@ async function closeTab(id) {
   const t = terms.get(id);
   if (!t) return;
   await invoke("kill_pty", { id });
-  t.term.dispose();
+  // WebGL 애드온이 dispose 도중 던진 적이 있다(트레이스의 _isDisposed). 여기서 멈추면
+  // terms에 죽은 항목이 남아 그 세션은 사이드바에서 눌러도 "이미 열려 있음"으로
+  // 처리돼 아무 일도 안 일어난다. 정리는 무조건 끝까지 간다.
+  try { t.term.dispose(); } catch (err) { reportFatal(`term.dispose: ${err && err.stack || err}`); }
   t.container.remove();
   terms.delete(id);
   tabOrder = tabOrder.filter((x) => x !== id);
@@ -1416,6 +1427,11 @@ async function updateLimits(force = false) {
     const s = await invoke("subscription_state", { force });
     if (s && s.five_hour) {
       html += limitRow("✻ 5시간", s.five_hour) + limitRow("✻ 주간", s.seven_day || {});
+      // 모델별 주간 한도 (Fable 등) — 전체 주간과 별도로 소진된다
+      for (const w of s.scoped || []) {
+        if (w.utilization_pct == null) continue;
+        html += limitRow(`✻ 주간 ${w.label}`, w);
+      }
     }
   } catch { /* 무시 */ }
   // Codex (최근 rollout의 token_count 이벤트 — 마지막 codex 사용 시점 기준)

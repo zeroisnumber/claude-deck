@@ -383,10 +383,27 @@ fn statusline_rate_limits() -> Option<serde_json::Value> {
             "resets_at": w["resets_at"].as_i64().map(|t| t * 1000),
         })
     };
+    // 모델별 주간 창 (예: Fable). 서버가 줄 때만 있다.
+    let scoped: Vec<serde_json::Value> = rl["model_scoped"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|w| {
+                    let name = w["display_name"].as_str()?;
+                    Some(serde_json::json!({
+                        "label": name,
+                        "utilization_pct": w["utilization"],
+                        "resets_at": w["resets_at"],
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some(serde_json::json!({
         "source": "statusline",
         "five_hour": map(&rl["five_hour"]),
         "seven_day": map(&rl["seven_day"]),
+        "scoped": scoped,
         "polled_at": chrono_now_iso(),
     }))
 }
@@ -505,6 +522,9 @@ struct Activity {
     csi_len: u8,
     last_ping: Option<std::time::Instant>,
     first_ping: Option<std::time::Instant>,
+    /// ~/.claude/sessions의 상태 파일이 이 세션을 보고하고 있는가. 참이면 출력 밀도
+    /// 추정은 쓰지 않는다 — 에이전트가 직접 말해 주는데 추측할 이유가 없다.
+    file_backed: bool,
 }
 
 static ACTIVITY: LazyLock<Mutex<HashMap<String, Activity>>> =
@@ -514,6 +534,8 @@ static ACTIVITY: LazyLock<Mutex<HashMap<String, Activity>>> =
 struct PtyStateEvent {
     id: String,
     working: bool,
+    /// false면 "응답 완료" 알림을 띄우지 않는다 (상태 보정일 뿐 턴 종료가 아닐 때)
+    notify: bool,
 }
 
 /// 파일 끝부분만 읽는다 (턴 상태는 마지막 레코드에만 있음)
@@ -700,11 +722,53 @@ fn note_output(id: &str) {
     a.last_out = Some(now);
 }
 
+/// Claude Code(2.1.2xx+)가 프로세스마다 쓰는 상태 파일 `~/.claude/sessions/<pid>.json`.
+/// status 값: busy/working/compacting/shell = 작업 중, idle/blocked/waiting/exited = 대기.
+/// 세션 ID → 작업 중 여부. 프로세스가 끝나면 파일도 지워지지만, 비정상 종료로 남은
+/// 파일이 영원히 "작업 중"으로 읽히지 않게 갱신 시각이 오래된 건 버린다.
+fn scan_session_status() -> HashMap<String, bool> {
+    let mut out = HashMap::new();
+    let mut latest: HashMap<String, f64> = HashMap::new();
+    let Some(home) = dirs::home_dir() else { return out };
+    let Ok(entries) = fs::read_dir(home.join(".claude").join("sessions")) else { return out };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.extension().map(|x| x != "json").unwrap_or(true) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&p) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let (Some(sid), Some(status)) = (v["sessionId"].as_str(), v["status"].as_str()) else { continue };
+        let updated = v["updatedAt"].as_f64().unwrap_or(0.0);
+        if now_ms - updated > 6.0 * 3600.0 * 1000.0 {
+            continue;
+        }
+        let working = matches!(status, "busy" | "working" | "compacting" | "shell");
+        // 같은 세션을 두 프로세스가 보고할 수 있다(데몬 워커 + attach 클라이언트, 이중
+        // --resume). 디렉터리 순서에 맡기지 않고 가장 최근에 갱신된 쪽을 믿는다.
+        match latest.get(sid) {
+            Some(&t) if t >= updated => {}
+            _ => {
+                latest.insert(sid.to_string(), updated);
+                out.insert(sid.to_string(), working);
+            }
+        }
+    }
+    out
+}
+
 /// 버스트 상태를 주기적으로 평가해 working 전이를 이벤트로 올린다.
 /// JS 타이머가 아니라 여기서 판정하는 게 요점 — 창이 백그라운드로 가도 멈추지 않는다.
+/// 상태 파일이 있는 세션은 그 값을 그대로 쓰고, 없는 세션(codex/gemini, 파일이 아직
+/// 안 생긴 새 세션)만 출력 밀도로 추정한다.
 fn spawn_state_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         let mut tick: u64 = 0;
+        let mut file_status: HashMap<String, bool> = HashMap::new();
         loop {
         std::thread::sleep(std::time::Duration::from_millis(250));
         tick = tick.wrapping_add(1);
@@ -715,13 +779,35 @@ fn spawn_state_monitor(app: AppHandle) {
         if tick % 120 == 0 {
             keepalive_pass(&app, now);
         }
+        // 상태 파일은 1초에 한 번 (파일 몇 개를 읽는 정도라 부담이 없다)
+        if tick % 4 == 0 {
+            file_status = scan_session_status();
+        }
 
         // 1단계: 잠금 안에서 판정에 필요한 것만 모은다 (파일 I/O는 잠금 밖에서)
         let mut turn_on: Vec<String> = Vec::new();
+        let mut quiet_off: Vec<String> = Vec::new();
         let mut candidates: Vec<(String, Option<PathBuf>, u64)> = Vec::new();
+        let mut file_off: Vec<String> = Vec::new();
         {
             let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
             for (id, a) in act.iter_mut() {
+                if let Some(&w) = file_status.get(id) {
+                    let first = !a.file_backed;
+                    a.file_backed = true;
+                    if w && !a.working {
+                        a.working = true;
+                        trace(id, &a.agent, "state", "working(file)");
+                        turn_on.push(id.clone());
+                    } else if !w && a.working {
+                        a.working = false;
+                        trace(id, &a.agent, "state", "idle(file)");
+                        // 처음 파일을 본 순간의 idle은 시작 화면 출력을 버스트로 오인한
+                        // 것을 바로잡는 것이지 턴 종료가 아니다 — 알림 없이 상태만 되돌린다
+                        if first { quiet_off.push(id.clone()) } else { file_off.push(id.clone()) }
+                    }
+                    continue;
+                }
                 let (Some(bs), Some(lo)) = (a.burst_start, a.last_out) else { continue };
                 let silence = ms(lo, now);
                 if silence < BURST_GAP_MS {
@@ -765,8 +851,12 @@ fn spawn_state_monitor(app: AppHandle) {
                 _ => false,
             });
         }
+        turn_off.extend(file_off);
         for id in turn_on {
-            let _ = app.emit("pty-state", PtyStateEvent { id, working: true });
+            let _ = app.emit("pty-state", PtyStateEvent { id, working: true, notify: true });
+        }
+        for id in quiet_off {
+            let _ = app.emit("pty-state", PtyStateEvent { id, working: false, notify: false });
         }
         for id in turn_off {
             // 창이 최소화·백그라운드면 WebView2가 렌더러를 재워서 JS 리스너가 돌지
@@ -805,7 +895,7 @@ fn spawn_state_monitor(app: AppHandle) {
                     },
                 );
             }
-            let _ = app.emit("pty-state", PtyStateEvent { id, working: false });
+            let _ = app.emit("pty-state", PtyStateEvent { id, working: false, notify: true });
         }
         }
     });
@@ -967,6 +1057,7 @@ fn spawn_pty(
             last_ping: None,
             first_ping: None,
             file: file.filter(|f| !f.trim().is_empty()).map(PathBuf::from),
+            file_backed: false,
         },
     );
 
@@ -1082,8 +1173,14 @@ struct SessionMeta {
     bg_detail: Option<String>,
     /// 데몬 로스터에 살아 있는가 (죽은 bg 세션과 구분)
     bg_running: bool,
-    /// 이 세션이 포크돼 나온 원본 세션 ID (실행 중일 때만 알 수 있음)
+    /// 이 세션이 포크돼 나온 원본 세션 ID. 로스터(실행 중)보다 jobs/<short>/state.json이
+    /// 우선 — 워커가 거둬진 뒤에도 남아 있어서 계보가 사라지지 않는다.
     parent_id: Option<String>,
+    /// Claude Code가 세션에 붙인 이름 (agent-name/ai-title 레코드). 포크·복제본이면
+    /// "⑂", "(2)" 같은 표식이 이미 붙어 있어 요약보다 구분이 잘 된다.
+    title: Option<String>,
+    /// 백그라운드 잡의 8자리 short id — `claude attach <short>`에 쓴다
+    bg_short: Option<String>,
     /// 호버 미리보기용 최근 대화 (최대 3턴 = 6개). 오래된 것부터 순서대로.
     /// 목록에는 싣지 않는다 — 세션 수 × 3KB가 20초마다 IPC로 넘어가는데
     /// 프런트는 호버할 때만 쓰므로 session_preview로 그때 가져간다.
@@ -1119,6 +1216,8 @@ fn light_meta(m: &SessionMeta) -> SessionMeta {
         bg_detail: m.bg_detail.clone(),
         bg_running: m.bg_running,
         parent_id: m.parent_id.clone(),
+        title: m.title.clone(),
+        bg_short: m.bg_short.clone(),
         recent: Vec::new(),
     }
 }
@@ -1300,9 +1399,12 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
         bg_detail: None,
         bg_running: false,
         parent_id: None,
+        title: None,
+        bg_short: None,
         recent: Vec::new(),
     };
 
+    let mut named = false; // agent-name을 봤으면 ai-title은 무시
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -1317,6 +1419,24 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
         if obj["type"] == "summary" {
             if let Some(s) = obj["summary"].as_str() {
                 meta.summary = Some(s.to_string());
+            }
+        }
+        // 세션 이름: agent-name(사용자/피어가 정한 이름, 중복이면 "(2)")이 ai-title보다 우선.
+        // 둘 다 뒤에 나온 레코드가 최신이다.
+        if obj["type"] == "agent-name" {
+            if let Some(s) = obj["agentName"].as_str() {
+                let s = s.trim();
+                if !s.is_empty() {
+                    meta.title = Some(s.to_string());
+                    named = true;
+                }
+            }
+        } else if obj["type"] == "ai-title" && !named {
+            if let Some(s) = obj["aiTitle"].as_str() {
+                let s = s.trim();
+                if !s.is_empty() {
+                    meta.title = Some(s.to_string());
+                }
             }
         }
         let t = obj["type"].as_str().unwrap_or("");
@@ -1402,6 +1522,8 @@ fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
         bg_detail: None,
         bg_running: false,
         parent_id: None,
+        title: None,
+        bg_short: None,
         recent: Vec::new(),
     };
     for line in text.lines() {
@@ -1541,6 +1663,8 @@ fn read_gemini_meta(path: &PathBuf) -> Option<SessionMeta> {
         bg_detail: None,
         bg_running: false,
         parent_id: None,
+        title: None,
+        bg_short: None,
         recent,
     })
 }
@@ -1574,6 +1698,8 @@ struct BgInfo {
     detail: String,
     running: bool,
     parent_id: Option<String>,
+    /// state.json의 name — jsonl에 이름 레코드가 없을 때의 폴백
+    name: Option<String>,
 }
 
 fn scan_bg_jobs() -> HashMap<String, BgInfo> {
@@ -1581,16 +1707,24 @@ fn scan_bg_jobs() -> HashMap<String, BgInfo> {
     let Some(home) = dirs::home_dir() else { return out };
 
     // 살아 있는 워커만 로스터에 남는다. 포크 출처(원본 세션)도 여기서만 알 수 있다.
+    // launch.sessionId는 fork=true일 때만 원본이다. 데몬이 자기 세션을 다시 띄운
+    // 경우(resume, fork 없음)에도 같은 필드에 자기 ID가 들어 있어서, 구분 없이 쓰면
+    // 세션이 자기 자신의 자식이 되어 목록에서 사라진다.
     let mut running: HashMap<String, Option<String>> = HashMap::new();
     if let Ok(text) = fs::read_to_string(home.join(".claude").join("daemon").join("roster.json")) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(ws) = v["workers"].as_object() {
                 for (short, w) in ws {
-                    let parent = w["dispatch"]["launch"]["sessionId"].as_str().and_then(|p| {
-                        std::path::Path::new(p)
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().to_string())
-                    });
+                    let launch = &w["dispatch"]["launch"];
+                    let parent = if launch["fork"] == true {
+                        launch["sessionId"].as_str().and_then(|p| {
+                            std::path::Path::new(p)
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().to_string())
+                        })
+                    } else {
+                        None
+                    };
                     running.insert(short.clone(), parent);
                 }
             }
@@ -1603,13 +1737,21 @@ fn scan_bg_jobs() -> HashMap<String, BgInfo> {
         let Ok(text) = fs::read_to_string(e.path().join("state.json")) else { continue };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
         let run = running.get(&short);
+        // 원본 세션은 state.json이 먼저다 — 워커가 거둬져 로스터에서 빠져도 남는다.
+        let own = v["sessionId"].as_str().unwrap_or("");
+        let parent_id = v["forkParentSessionId"]
+            .as_str()
+            .map(|p| p.to_string())
+            .or_else(|| run.and_then(|p| p.clone()))
+            .filter(|p| !p.is_empty() && p != own);
         out.insert(
             short,
             BgInfo {
                 state: v["state"].as_str().unwrap_or("unknown").to_string(),
                 detail: v["detail"].as_str().unwrap_or("").to_string(),
                 running: run.is_some(),
-                parent_id: run.and_then(|p| p.clone()),
+                parent_id,
+                name: v["name"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
             },
         );
     }
@@ -1668,10 +1810,14 @@ fn list_sessions() -> Vec<SessionMeta> {
         let Some(info) = bg.get(short) else { continue };
         m.bg_state = Some(info.state.clone());
         m.bg_running = info.running;
+        m.bg_short = Some(short.to_string());
         if !info.detail.is_empty() {
             m.bg_detail = Some(info.detail.clone());
         }
         m.parent_id = info.parent_id.clone();
+        if m.title.is_none() {
+            m.title = info.name.clone();
+        }
     }
 
 
@@ -1865,10 +2011,28 @@ fn fetch_usage_direct() -> Option<serde_json::Value> {
             "resets_at": w["resets_at"],
         })
     };
+    // limits[]의 weekly_scoped 항목이 모델별 주간 한도다 (scope.model.display_name = "Fable" 등)
+    let scoped: Vec<serde_json::Value> = v["limits"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|l| l["kind"] == "weekly_scoped")
+                .filter_map(|l| {
+                    let name = l["scope"]["model"]["display_name"].as_str()?;
+                    Some(serde_json::json!({
+                        "label": name,
+                        "utilization_pct": l["percent"],
+                        "resets_at": l["resets_at"],
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some(serde_json::json!({
         "source": "direct",
         "five_hour": map_win(&v["five_hour"]),
         "seven_day": map_win(&v["seven_day"]),
+        "scoped": scoped,
         "limits": v["limits"],
         "polled_at": chrono_now_iso(),
     }))
@@ -2314,6 +2478,7 @@ mod tests {
             last_ping: None,
             first_ping: None,
             file: None,
+            file_backed: false,
         }
     }
 
