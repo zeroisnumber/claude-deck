@@ -598,18 +598,26 @@ async function openSession(meta, focus = true, opts = {}) {
   entry.file = meta.file;
   if (focus) activate(id);
   else renderTabs();
+  await spawnInto(id, entry, "실행 실패");
+  saveOpenTabs();
+}
+
+// 탭에 붙은 명령을 PTY로 띄운다. 실패하면 탭을 "종료됨"으로 두고 사유를 터미널과 토스트에 남긴다.
+// 세션 열기·새 세션·재시작이 모두 이 경로를 쓴다.
+async function spawnInto(id, t, failLabel) {
   try {
     await invoke("spawn_pty", {
-      id, cwd: meta.cwd, command: entry.spawnCommand, file: meta.file, title,
-      cols: entry.term.cols, rows: entry.term.rows,
+      id, cwd: t.cwd, command: t.spawnCommand || "claude", file: t.file || null, title: t.title,
+      cols: t.term.cols, rows: t.term.rows,
     });
   } catch (err) {
-    entry.exited = true;
-    entry.term.write(`\r\n\x1b[31m실행 실패: ${err}\x1b[0m\r\n`);
-    showToast("⚠ 세션 실행 실패", String(err));
+    t.exited = true;
+    t.term.write(`
+[31m${failLabel}: ${err}[0m
+`);
+    showToast(`⚠ 세션 ${failLabel}`, String(err));
     renderTabs();
   }
-  saveOpenTabs();
 }
 
 async function openNewSession(cwd) {
@@ -618,17 +626,7 @@ async function openNewSession(cwd) {
   entry.profile = currentProfile();
   entry.spawnCommand = composeCommand(null);
   activate(id);
-  try {
-    await invoke("spawn_pty", {
-      id, cwd, command: entry.spawnCommand, file: null, title: entry.title,
-      cols: entry.term.cols, rows: entry.term.rows,
-    });
-  } catch (err) {
-    entry.exited = true;
-    entry.term.write(`\r\n\x1b[31m실행 실패: ${err}\x1b[0m\r\n`);
-    showToast("⚠ 세션 실행 실패", String(err));
-    renderTabs();
-  }
+  await spawnInto(id, entry, "실행 실패");
   addRecentDir(cwd);
   setTimeout(refreshSessions, 4000);
 }
@@ -640,17 +638,7 @@ async function restartTab(id) {
   t.attention = false;
   t.term.write("\r\n\x1b[38;5;244m── 재시작 ──\x1b[0m\r\n\r\n");
   activate(id);
-  try {
-    await invoke("spawn_pty", {
-      id, cwd: t.cwd, command: t.spawnCommand || "claude", file: t.file || null, title: t.title,
-      cols: t.term.cols, rows: t.term.rows,
-    });
-  } catch (err) {
-    t.exited = true;
-    t.term.write(`\r\n\x1b[31m재시작 실패: ${err}\x1b[0m\r\n`);
-    showToast("⚠ 재시작 실패", String(err));
-    renderTabs();
-  }
+  await spawnInto(id, t, "재시작 실패");
 }
 
 // ---------- 탭 복원 ----------
