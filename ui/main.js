@@ -112,9 +112,25 @@ let isRenaming = false;
 
 const BG_STATE = {
   working: { cls: "run", label: "실행 중" },
-  blocked: { cls: "wait", label: "대기 — 입력 필요" },
+  blocked: { cls: "wait", label: "입력 필요" },
   failed:  { cls: "fail", label: "실패" },
 };
+
+const PIN_SVG = `<svg class="si-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"></path><path d="M9 3h6l-1 6 3 4H7l3-4z"></path></svg>`;
+
+// 상태 슬롯 하나에 두 축을 합친다. 탭이 열려 있으면 탭 상태(작업 중·대기·종료)가 이기고,
+// 없으면 백그라운드 잡 상태(실행 중·입력 필요·완료·실패), 둘 다 없으면 빈 자리.
+// 배지는 백그라운드 잡에만 붙고, 실행 중이 아닐 때는 "종료됨" 대신 완료/실패로 갈린다.
+function sessionStatus(s, t) {
+  if (t) return { cls: statusClass(t), label: statusLabel(t), badge: null };
+  if (!s.bg_state) return { cls: "", label: "", badge: null };
+  if (s.bg_running) {
+    const bg = BG_STATE[s.bg_state] || { cls: "run", label: s.bg_state };
+    return { cls: "bg-" + bg.cls, label: `백그라운드 · ${bg.label}`, badge: bg };
+  }
+  const bg = s.bg_state === "failed" ? BG_STATE.failed : { cls: "done", label: "완료" };
+  return { cls: "bg-" + bg.cls, label: `백그라운드 · ${bg.label}`, badge: bg };
+}
 
 // 표시 이름: 사용자 별칭 → Claude Code가 붙인 세션 이름(포크면 "⑂", 복제면 "(2)"가
 // 이미 붙어 있다) → 요약 → 첫 프롬프트 순.
@@ -127,33 +143,34 @@ function sessionRow(s, child) {
   const el = document.createElement("div");
   el.className = "session-item" + (s.session_id === activeId ? " active" : "") + (child ? " child" : "");
   const t = terms.get(s.session_id);
-  const bg = s.bg_state ? (BG_STATE[s.bg_state] || { cls: "idle", label: s.bg_state }) : null;
   const title = sessionTitle(s) || "(내용 없음)";
   // 포크된 세션인데 이름에 표식이 없으면 붙여 준다 (원본이 목록에 없어 들여쓰기가 안 될 때도 보이게)
   const fork = s.parent_id && !title.includes("⑂") ? `<span class="si-fork" title="포크된 세션">⑂</span>` : "";
 
-  const dot = t ? `<span class="si-dot ${statusClass(t)}" title="${statusLabel(t)}"></span>` : "";
-  const pin = pins.includes(s.session_id) ? `<span class="si-pin">📌</span>` : "";
+  const st = sessionStatus(s, t);
+  const slot = st.cls ? `<span class="si-status ${st.cls}" title="${st.label}"></span>` : "";
+  const pin = pins.includes(s.session_id) ? PIN_SVG : "";
   const glyph = `<span class="si-agent ${s.agent}" title="${s.agent}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
-  const badge = bg
-    ? `<span class="si-bg ${bg.cls}" title="백그라운드 에이전트 · ${bg.label}">⚙ ${s.bg_running ? bg.label : "종료됨"}</span>`
-    : "";
+  const badge = st.badge ? `<span class="si-bg ${st.badge.cls}" title="${st.label}">${st.badge.label}</span>` : "";
   const expEpoch = s.cache_last_ts && s.cache_ttl_secs ? s.cache_last_ts + s.cache_ttl_secs : null;
-  const ttl = expEpoch ? `<span class="si-ttl" data-exp="${expEpoch}" title="프롬프트 캐시 남은 TTL"></span>` : "";
+  const ttl = expEpoch ? `<span class="si-ttl" data-exp="${expEpoch}" title="프롬프트 캐시 남은 TTL"></span>` : "<span></span>";
   const ctxText = s.ctx_tokens
-    ? `<span class="si-ctx" title="마지막 응답 시점 컨텍스트 토큰 수">· ${fmtTok(s.ctx_tokens)} ctx</span>`
-    : "";
+    ? `<span class="si-ctx" title="마지막 응답 시점 컨텍스트 토큰 수">${fmtTok(s.ctx_tokens)} ctx</span>`
+    : "<span></span>";
 
+  // 왼쪽 상태 슬롯 + 본문. 메타 줄은 고정 칸(프로젝트 | 시각 | ctx | TTL)이라 행마다 자리가 같다.
   el.innerHTML = `
-    ${dot}
-    <div class="si-title">${pin}${glyph}${fork}${badge}<span class="si-title-text"></span></div>
-    <div class="si-meta">
-      <span class="si-proj"></span>
-      <span>${timeAgo(s.mtime)}</span>
-      ${ctxText}
-      ${ttl}
-    </div>
-    ${s.bg_detail ? `<div class="si-bg-detail"></div>` : ""}`;
+    <div class="si-slot">${slot}</div>
+    <div class="si-body">
+      <div class="si-title">${pin}${glyph}${fork}<span class="si-title-text"></span>${badge}</div>
+      <div class="si-meta">
+        <span class="si-proj"></span>
+        <span class="si-time">${timeAgo(s.mtime)}</span>
+        ${ctxText}
+        ${ttl}
+      </div>
+      ${s.bg_detail ? `<div class="si-bg-detail"></div>` : ""}
+    </div>`;
   el.querySelector(".si-title-text").textContent = title;
   el.querySelector(".si-proj").textContent = basename(s.cwd);
   if (s.bg_detail) el.querySelector(".si-bg-detail").textContent = s.bg_detail;
@@ -587,8 +604,11 @@ async function openSession(meta, focus = true, opts = {}) {
   const id = meta.session_id;
   if (terms.has(id)) return focus && activate(id);
 
-  const title = basename(meta.cwd) + " · " + (sessionTitle(meta) || id.slice(0, 8)).slice(0, 24);
+  const name = (sessionTitle(meta) || id.slice(0, 8)).slice(0, 40);
+  const title = basename(meta.cwd) + " · " + name.slice(0, 24);
   const entry = makeTerm(id, title, meta.cwd);
+  entry.name = name;
+  entry.proj = basename(meta.cwd);
   const spec = commandFor(meta);
   entry.profile = spec.profile;
   const attach = !opts.fork && meta.agent === "claude" && meta.bg_running && meta.bg_short;
@@ -623,6 +643,8 @@ async function spawnInto(id, t, failLabel) {
 async function openNewSession(cwd) {
   const id = "new-" + Date.now();
   const entry = makeTerm(id, basename(cwd) + " · 새 세션", cwd);
+  entry.name = "새 세션";
+  entry.proj = basename(cwd);
   entry.profile = currentProfile();
   entry.spawnCommand = composeCommand(null);
   activate(id);
@@ -717,8 +739,11 @@ function renderTabs() {
     const ctxBar = t.ctxPct != null && !t.exited
       ? `<span class="tab-ctx ${t.ctxPct >= 85 ? "hot" : t.ctxPct >= 60 ? "warm" : ""}" style="width:${t.ctxPct}%" title="컨텍스트 ${t.ctxPct}% (${fmtTok(t.ctxTokens || 0)})"></span>`
       : "";
-    el.innerHTML = `<span class="tab-dot ${statusClass(t)}" title="${statusLabel(t)}"></span><span class="tab-label"></span>${showBadge ? '<span class="tab-badge"></span>' : ""}${t.exited ? '<button class="tab-restart" title="다시 시작">↻</button>' : ""}<button class="tab-close" title="닫기">✕</button>${ctxBar}`;
-    el.querySelector(".tab-label").textContent = t.title;
+    el.innerHTML = `<span class="tab-dot ${statusClass(t)}" title="${statusLabel(t)}"></span><span class="tab-label"></span>${showBadge ? '<span class="tab-badge"></span>' : ""}${t.proj ? '<span class="tab-proj"></span>' : ""}${t.exited ? '<button class="tab-restart" title="다시 시작">↻</button>' : ""}<button class="tab-close" title="닫기">✕</button>${ctxBar}`;
+    // 세션 이름이 앞, 프로젝트는 칩 — 같은 프로젝트 탭이 여럿이어도 구분된다
+    el.querySelector(".tab-label").textContent = t.name || t.title;
+    el.title = t.title;
+    if (t.proj) el.querySelector(".tab-proj").textContent = t.proj;
     if (showBadge) {
       const b = el.querySelector(".tab-badge");
       b.textContent = t.profile.name.slice(0, 10);
