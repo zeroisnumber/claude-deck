@@ -1144,7 +1144,7 @@ fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String> {
 
 // ---------- 세션 스캔 ----------
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 struct SessionMeta {
     session_id: String,
     agent: String, // "claude" | "codex" | "gemini"
@@ -1188,6 +1188,19 @@ struct SessionMeta {
     recent: Vec<RecentMsg>,
 }
 
+impl SessionMeta {
+    /// 파서 공통 뼈대. 파일에서 아직 아무것도 읽지 않은 상태 — 나머지 필드는 기본값.
+    fn new(session_id: impl Into<String>, agent: &str, path: &std::path::Path) -> Self {
+        SessionMeta {
+            session_id: session_id.into(),
+            agent: agent.into(),
+            mtime: file_mtime(path),
+            file: path.to_string_lossy().to_string(),
+            ..Default::default()
+        }
+    }
+}
+
 /// 호버 미리보기 전용 페이로드 (목록에서 제외한 무거운 필드만)
 #[derive(Serialize)]
 struct SessionPreview {
@@ -1195,31 +1208,9 @@ struct SessionPreview {
     recent: Vec<RecentMsg>,
 }
 
-/// 사이드바 목록용 경량 사본 — 무거운 필드는 복사조차 하지 않는다.
+/// 사이드바 목록용 경량 사본 — 미리보기 전용 필드(last_text, recent)는 비운다.
 fn light_meta(m: &SessionMeta) -> SessionMeta {
-    SessionMeta {
-        session_id: m.session_id.clone(),
-        agent: m.agent.clone(),
-        cwd: m.cwd.clone(),
-        summary: m.summary.clone(),
-        first_prompt: m.first_prompt.clone(),
-        last_text: None,
-        message_count: m.message_count,
-        mtime: m.mtime,
-        file: m.file.clone(),
-        cache_last_ts: m.cache_last_ts,
-        cache_ttl_secs: m.cache_ttl_secs,
-        ctx_tokens: m.ctx_tokens,
-        ctx_window: m.ctx_window,
-        model: m.model.clone(),
-        bg_state: m.bg_state.clone(),
-        bg_detail: m.bg_detail.clone(),
-        bg_running: m.bg_running,
-        parent_id: m.parent_id.clone(),
-        title: m.title.clone(),
-        bg_short: m.bg_short.clone(),
-        recent: Vec::new(),
-    }
+    SessionMeta { last_text: None, recent: Vec::new(), ..m.clone() }
 }
 
 /// 파일 경로로 파서를 고른다 (claude/codex/gemini 저장소 구조가 서로 다름)
@@ -1374,35 +1365,12 @@ fn extract_text(content: &serde_json::Value) -> String {
 }
 
 fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
-    let mtime = file_mtime(path);
     // 큰 세션 파일(장기 세션)은 codex와 동일하게 head+tail만 읽어 폴링 부하를 낮춘다.
     // first_prompt는 head, last_text/캐시 TTL/summary는 tail에서 나오므로 손실 없음
     // (중간 구간의 message_count만 근사치가 됨).
     let text = read_head_tail(path, 512 * 1024)?;
 
-    let mut meta = SessionMeta {
-        session_id: path.file_stem()?.to_string_lossy().to_string(),
-        agent: "claude".into(),
-        cwd: String::new(),
-        summary: None,
-        first_prompt: None,
-        last_text: None,
-        message_count: 0,
-        mtime,
-        file: path.to_string_lossy().to_string(),
-        cache_last_ts: None,
-        cache_ttl_secs: None,
-        ctx_tokens: None,
-        ctx_window: None,
-        model: None,
-        bg_state: None,
-        bg_detail: None,
-        bg_running: false,
-        parent_id: None,
-        title: None,
-        bg_short: None,
-        recent: Vec::new(),
-    };
+    let mut meta = SessionMeta::new(path.file_stem()?.to_string_lossy(), "claude", path);
 
     let mut named = false; // agent-name을 봤으면 ai-title은 무시
     for line in text.lines() {
@@ -1503,29 +1471,7 @@ fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
 
 fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
     let text = read_head_tail(path, 512 * 1024)?;
-    let mut meta = SessionMeta {
-        session_id: String::new(),
-        agent: "codex".into(),
-        cwd: String::new(),
-        summary: None,
-        first_prompt: None,
-        last_text: None,
-        message_count: 0,
-        mtime: file_mtime(path),
-        file: path.to_string_lossy().to_string(),
-        cache_last_ts: None,
-        cache_ttl_secs: None,
-        ctx_tokens: None,
-        ctx_window: None,
-        model: None,
-        bg_state: None,
-        bg_detail: None,
-        bg_running: false,
-        parent_id: None,
-        title: None,
-        bg_short: None,
-        recent: Vec::new(),
-    };
+    let mut meta = SessionMeta::new("", "codex", path);
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -1645,27 +1591,12 @@ fn read_gemini_meta(path: &PathBuf) -> Option<SessionMeta> {
     recent.reverse();
 
     Some(SessionMeta {
-        session_id: sid.to_string(),
-        agent: "gemini".into(),
         cwd: name,
-        summary: None,
         first_prompt: first.map(|s| s.trim().chars().take(120).collect()),
         last_text: last.map(|s| s.trim().chars().take(1200).collect()),
         message_count: msgs.len() as u32,
-        mtime: file_mtime(path),
-        file: path.to_string_lossy().to_string(),
-        cache_last_ts: None,
-        cache_ttl_secs: None,
-        ctx_tokens: None,
-        ctx_window: None,
-        model: None,
-        bg_state: None,
-        bg_detail: None,
-        bg_running: false,
-        parent_id: None,
-        title: None,
-        bg_short: None,
         recent,
+        ..SessionMeta::new(sid, "gemini", path)
     })
 }
 
