@@ -329,6 +329,9 @@ html, body {
 .si-status.bg-wait { background: #e8b878; }
 .si-status.bg-done { border: 1.5px solid var(--text-faint); }
 .si-status.bg-fail { border: 1.5px solid #ef8080; }
+/* 읽지 않은 완료: 탭의 attention 글로우와 같은 뜻을 사이드바에도 */
+.si-status.unread { box-shadow: 0 0 0 3px rgba(217, 119, 87, 0.28); }
+.session-item.kb { outline: 1px solid rgba(217, 119, 87, 0.6); outline-offset: -1px; }
 .session-item:hover { background: var(--bg-hover); }
 .session-item.active {
   background: var(--accent-soft);

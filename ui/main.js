@@ -142,13 +142,15 @@ function sessionTitle(s) {
 function sessionRow(s, child) {
   const el = document.createElement("div");
   el.className = "session-item" + (s.session_id === activeId ? " active" : "") + (child ? " child" : "");
+  el.dataset.id = s.session_id;
   const t = terms.get(s.session_id);
   const title = sessionTitle(s) || "(내용 없음)";
   // 포크된 세션인데 이름에 표식이 없으면 붙여 준다 (원본이 목록에 없어 들여쓰기가 안 될 때도 보이게)
   const fork = s.parent_id && !title.includes("⑂") ? `<span class="si-fork" title="포크된 세션">⑂</span>` : "";
 
   const st = sessionStatus(s, t);
-  const slot = st.cls ? `<span class="si-status ${st.cls}" title="${st.label}"></span>` : "";
+  const unread = t && t.attention && !t.exited;
+  const slot = st.cls ? `<span class="si-status ${st.cls}${unread ? " unread" : ""}" title="${unread ? "응답 완료 — 아직 안 봄" : st.label}"></span>` : "";
   const pin = pins.includes(s.session_id) ? PIN_SVG : "";
   const glyph = `<span class="si-agent ${s.agent}" title="${s.agent}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
   const badge = st.badge ? `<span class="si-bg ${st.badge.cls}" title="${st.label}">${st.badge.label}</span>` : "";
@@ -188,9 +190,17 @@ function bgMenuItems(s) {
   const items = [];
   const parent = s.parent_id ? sessions.find((x) => x.session_id === s.parent_id) : null;
   if (parent) items.push(["↖ 원본 세션 열기", () => openSession(parent)]);
-  if (s.bg_state) items.push(["⑂ 복사본으로 열기", () => openSession(s, true, { fork: true })]);
+  // 복사본은 아무 claude 세션에서나 갈라져 나올 수 있다 (codex/gemini는 --fork-session이 없다)
+  if (s.agent === "claude") items.push(["⑂ 복사본으로 열기", () => openSession(s, true, { fork: true })]);
   return items;
 }
+
+const STATUS_FILTERS = {
+  "!": (s, t) => (t && t.busy && !t.exited) || (!t && s.bg_running && s.bg_state === "working"),
+  "@": (s, t) => (t && t.attention) || (!t && s.bg_running && s.bg_state === "blocked"),
+  "#": (s, t) => !!t,
+  "&": (s, t) => !t && s.bg_state === "failed",
+};
 
 function renderSidebar() {
   // 접혀 있으면 그리지 않는다 — 20초 폴링마다 보이지도 않는 DOM을 통째로 다시
@@ -203,11 +213,16 @@ function renderSidebar() {
     if (listEl.querySelector(".si-rename")) return;
     isRenaming = false;
   }
-  const q = $("#search").value.trim().toLowerCase();
+  // 검색어 앞의 기호 하나는 상태 필터다 (Agent Deck 방식):
+  //   !  작업 중  ·  @  입력 필요·읽지 않은 완료  ·  #  열린 탭  ·  &  실패
+  let q = $("#search").value.trim().toLowerCase();
+  const statusKey = STATUS_FILTERS[q[0]] ? q[0] : "";
+  if (statusKey) q = q.slice(1).trim();
   listEl.innerHTML = "";
 
   const visible = sessions.filter((s) => {
     if (agentFilter !== "all" && s.agent !== agentFilter) return false;
+    if (statusKey && !STATUS_FILTERS[statusKey](s, terms.get(s.session_id))) return false;
     if (!q) return true;
     // 제목·프로젝트에 더해 백그라운드 상태 문구도 검색 대상에 넣는다
     const hay = [
@@ -1167,8 +1182,49 @@ function handleShortcut(e) {
     setSidebarCollapsed(!sideCollapsed);
     return true;
   }
+  if (!e.shiftKey && e.code === "KeyK") {
+    if (sideCollapsed) setSidebarCollapsed(false);
+    $("#search").focus();
+    $("#search").select();
+    return true;
+  }
   return false;
 }
+
+// 사이드바 키보드 탐색: 검색창에 포커스가 있을 때 ↑↓로 행을 고르고 Enter로 연다.
+// Esc는 검색어를 비우고 터미널로 돌아간다. 고른 행은 .kb 클래스로 표시한다.
+let kbIndex = -1;
+function kbRows() { return [...listEl.querySelectorAll(".session-item")]; }
+function kbHighlight(i) {
+  const rows = kbRows();
+  rows.forEach((r) => r.classList.remove("kb"));
+  if (!rows.length) { kbIndex = -1; return; }
+  kbIndex = Math.max(0, Math.min(rows.length - 1, i));
+  rows[kbIndex].classList.add("kb");
+  rows[kbIndex].scrollIntoView({ block: "nearest" });
+}
+$("#search").addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    kbHighlight(kbIndex + (e.key === "ArrowDown" ? 1 : -1));
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    const rows = kbRows();
+    const row = rows[kbIndex] || rows[0];
+    if (!row) return;
+    const s = sessions.find((x) => x.session_id === row.dataset.id);
+    if (s) openSession(s);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    $("#search").value = "";
+    kbIndex = -1;
+    renderSidebar();
+    const t = terms.get(activeId);
+    if (t) t.term.focus();
+  }
+});
+$("#search").addEventListener("input", () => { kbIndex = -1; });
 window.addEventListener("keydown", (e) => {
   if (handleShortcut(e)) e.preventDefault();
 });
