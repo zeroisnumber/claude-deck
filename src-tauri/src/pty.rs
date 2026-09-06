@@ -112,6 +112,7 @@ pub(crate) fn spawn_pty(
             first_ping: None,
             file: file.filter(|f| !f.trim().is_empty()).map(PathBuf::from),
             file_backed: false,
+            waiting: false,
         },
     );
 

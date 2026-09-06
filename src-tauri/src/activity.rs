@@ -98,6 +98,8 @@ pub(crate) struct Activity {
     /// ~/.claude/sessions의 상태 파일이 이 세션을 보고하고 있는가. 참이면 출력 밀도
     /// 추정은 쓰지 않는다 — 에이전트가 직접 말해 주는데 추측할 이유가 없다.
     pub(crate) file_backed: bool,
+    /// 상태 파일이 "입력 필요"라고 보고한 마지막 값
+    pub(crate) waiting: bool,
 }
 
 pub(crate) static ACTIVITY: LazyLock<Mutex<HashMap<String, Activity>>> =
@@ -107,6 +109,8 @@ pub(crate) static ACTIVITY: LazyLock<Mutex<HashMap<String, Activity>>> =
 pub(crate) struct PtyStateEvent {
     pub(crate) id: String,
     pub(crate) working: bool,
+    /// 에이전트가 사람의 답을 기다린다 (권한 확인, 질문). 상태 파일이 있을 때만 알 수 있다.
+    pub(crate) waiting: bool,
     /// false면 "응답 완료" 알림을 띄우지 않는다 (상태 보정일 뿐 턴 종료가 아닐 때)
     pub(crate) notify: bool,
 }
@@ -296,10 +300,10 @@ pub(crate) fn note_output(id: &str) {
 }
 
 /// Claude Code(2.1.2xx+)가 프로세스마다 쓰는 상태 파일 `~/.claude/sessions/<pid>.json`.
-/// status 값: busy/working/compacting/shell = 작업 중, idle/blocked/waiting/exited = 대기.
-/// 세션 ID → 작업 중 여부. 프로세스가 끝나면 파일도 지워지지만, 비정상 종료로 남은
+/// status 값: busy/working/compacting/shell = 작업 중, blocked/waiting(또는 waitingFor가 있음) =
+/// 사람의 답을 기다림, idle/exited = 대기. 세션 ID → (작업 중, 입력 필요). 프로세스가 끝나면 파일도 지워지지만, 비정상 종료로 남은
 /// 파일이 영원히 "작업 중"으로 읽히지 않게 갱신 시각이 오래된 건 버린다.
-pub(crate) fn scan_session_status() -> HashMap<String, bool> {
+pub(crate) fn scan_session_status() -> HashMap<String, (bool, bool)> {
     let mut out = HashMap::new();
     let mut latest: HashMap<String, f64> = HashMap::new();
     let Some(home) = dirs::home_dir() else { return out };
@@ -321,13 +325,15 @@ pub(crate) fn scan_session_status() -> HashMap<String, bool> {
             continue;
         }
         let working = matches!(status, "busy" | "working" | "compacting" | "shell");
+        let waiting = matches!(status, "blocked" | "waiting")
+            || v["waitingFor"].as_str().map(|w| !w.is_empty()).unwrap_or(false);
         // 같은 세션을 두 프로세스가 보고할 수 있다(데몬 워커 + attach 클라이언트, 이중
         // --resume). 디렉터리 순서에 맡기지 않고 가장 최근에 갱신된 쪽을 믿는다.
         match latest.get(sid) {
             Some(&t) if t >= updated => {}
             _ => {
                 latest.insert(sid.to_string(), updated);
-                out.insert(sid.to_string(), working);
+                out.insert(sid.to_string(), (working, waiting));
             }
         }
     }
@@ -341,7 +347,7 @@ pub(crate) fn scan_session_status() -> HashMap<String, bool> {
 pub(crate) fn spawn_state_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         let mut tick: u64 = 0;
-        let mut file_status: HashMap<String, bool> = HashMap::new();
+        let mut file_status: HashMap<String, (bool, bool)> = HashMap::new();
         loop {
         std::thread::sleep(std::time::Duration::from_millis(250));
         tick = tick.wrapping_add(1);
@@ -362,12 +368,18 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
         let mut quiet_off: Vec<String> = Vec::new();
         let mut candidates: Vec<(String, Option<PathBuf>, u64)> = Vec::new();
         let mut file_off: Vec<String> = Vec::new();
+        let mut wait_changed: Vec<(String, bool)> = Vec::new();
         {
             let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
             for (id, a) in act.iter_mut() {
-                if let Some(&w) = file_status.get(id) {
+                if let Some(&(w, wt)) = file_status.get(id) {
                     let first = !a.file_backed;
                     a.file_backed = true;
+                    if wt != a.waiting {
+                        a.waiting = wt;
+                        trace(id, &a.agent, "state", if wt { "waiting(file)" } else { "unwait(file)" });
+                        wait_changed.push((id.clone(), wt));
+                    }
                     if w && !a.working {
                         a.working = true;
                         trace(id, &a.agent, "state", "working(file)");
@@ -426,10 +438,36 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
         }
         turn_off.extend(file_off);
         for id in turn_on {
-            let _ = app.emit("pty-state", PtyStateEvent { id, working: true, notify: true });
+            let _ = app.emit("pty-state", PtyStateEvent { id, working: true, waiting: false, notify: true });
         }
         for id in quiet_off {
-            let _ = app.emit("pty-state", PtyStateEvent { id, working: false, notify: false });
+            let _ = app.emit("pty-state", PtyStateEvent { id, working: false, waiting: false, notify: false });
+        }
+        // 입력 필요 전이는 작업 중/대기와 독립이다. 프런트가 waiting만 갱신하도록 working은
+        // 현재 값을 그대로 싣는다.
+        for (id, wt) in wait_changed {
+            let working = ACTIVITY
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&id)
+                .map(|a| a.working)
+                .unwrap_or(false);
+            if wt {
+                // 완료 알림과 같은 이유로 여기서 직접 보낸다 (창이 백그라운드면 JS가 늦다)
+                let title = ACTIVITY
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&id)
+                    .map(|a| a.title.clone())
+                    .unwrap_or_default();
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("✋ 입력 필요")
+                    .body(if title.is_empty() { "세션" } else { &title })
+                    .show();
+            }
+            let _ = app.emit("pty-state", PtyStateEvent { id, working, waiting: wt, notify: false });
         }
         for id in turn_off {
             // 창이 최소화·백그라운드면 WebView2가 렌더러를 재워서 JS 리스너가 돌지
@@ -468,7 +506,7 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
                     },
                 );
             }
-            let _ = app.emit("pty-state", PtyStateEvent { id, working: false, notify: true });
+            let _ = app.emit("pty-state", PtyStateEvent { id, working: false, waiting: false, notify: true });
         }
         }
     });
@@ -641,6 +679,7 @@ mod tests {
             first_ping: None,
             file: None,
             file_backed: false,
+            waiting: false,
         }
     }
 

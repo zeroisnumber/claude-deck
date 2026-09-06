@@ -196,8 +196,8 @@ function bgMenuItems(s) {
 }
 
 const STATUS_FILTERS = {
-  "!": (s, t) => (t && t.busy && !t.exited) || (!t && s.bg_running && s.bg_state === "working"),
-  "@": (s, t) => (t && t.attention) || (!t && s.bg_running && s.bg_state === "blocked"),
+  "!": (s, t) => (t && t.busy && !t.waiting && !t.exited) || (!t && s.bg_running && s.bg_state === "working"),
+  "@": (s, t) => (t && (t.attention || t.waiting)) || (!t && s.bg_running && s.bg_state === "blocked"),
   "#": (s, t) => !!t,
   "&": (s, t) => !t && s.bg_state === "failed",
 };
@@ -452,10 +452,10 @@ function hidePreview() {
 }
 
 function statusClass(t) {
-  return t.exited ? "exited" : t.busy ? "busy" : "idle";
+  return t.exited ? "exited" : t.waiting ? "wait" : t.busy ? "busy" : "idle";
 }
 function statusLabel(t) {
-  return t.exited ? "종료됨" : t.busy ? "답변/작업 중" : "대기 중";
+  return t.exited ? "종료됨" : t.waiting ? "입력 필요" : t.busy ? "답변/작업 중" : "대기 중";
 }
 
 // ---------- 완료 알림 (앱 내 토스트 + OS 알림) ----------
@@ -487,11 +487,19 @@ function notifyDone(id, t) {
 // 실측 결과 턴 내부 침묵이 78.7초까지 나와서 그 방식으로는 완료를 알 수 없었다.
 // 창이 백그라운드로 가면 이 타이머 자체가 스로틀링되는 문제도 있었다.
 listen("pty-state", (ev) => {
-  const { id, working, notify } = ev.payload;
+  const { id, working, waiting, notify } = ev.payload;
   const t = terms.get(id);
-  if (!t || t.busy === working) return;
+  if (!t) return;
+  const wasWaiting = !!t.waiting;
+  if (t.busy === working && wasWaiting === !!waiting) return;
   t.busy = working;
+  t.waiting = !!waiting;
   if (!working && !t.exited && notify !== false) notifyDone(id, t);
+  // 권한 확인·질문으로 멈춘 세션: 보고 있지 않으면 완료 알림과 같은 방식으로 알린다
+  if (t.waiting && !wasWaiting && !(id === activeId && document.hasFocus())) {
+    t.attention = true;
+    showToast("✋ 입력 필요", t.title, () => activate(id));
+  }
   renderTabs();
   renderSidebar();
 });
