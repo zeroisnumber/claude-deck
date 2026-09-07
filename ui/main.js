@@ -533,9 +533,17 @@ function makeTerm(id, title, cwd) {
   // 기본 DOM 렌더러는 스크롤·출력마다 행을 메인 스레드에서 다시 만든다. WebGL은
   // 글리프를 셀 단위로 GPU에서 그려서 그 비용이 사라진다. 컨텍스트를 잃으면
   // (드라이버 리셋, GPU 전환) 애드온을 버리고 DOM 렌더러로 되돌아간다.
+  // 2026-09-07 실측: NVIDIA 드라이버 리셋 → WebView2 GPU 프로세스 재시작 → 모든 탭의
+  // 컨텍스트가 동시에 사라지고 화면에 글자 몇 개만 남았다. 애드온을 버린 뒤 화면을
+  // 통째로 한 번 다시 그려야 DOM 렌더러가 현재 버퍼를 그린다. 손실 이벤트 때만 도는
+  // 코드라 평소 비용은 없다.
   try {
     const webgl = new WebglAddon.WebglAddon();
-    webgl.onContextLoss(() => { try { webgl.dispose(); } catch { /* DOM 렌더러로 돌아가는 건 xterm이 한다 */ } });
+    webgl.onContextLoss(() => {
+      try { webgl.dispose(); } catch { /* DOM 렌더러로 돌아가는 건 xterm이 한다 */ }
+      reportFatal("webgl context lost — DOM 렌더러로 전환");
+      setTimeout(() => { try { term.refresh(0, term.rows - 1); } catch { /* 이미 닫힌 탭 */ } }, 0);
+    });
     term.loadAddon(webgl);
   } catch { /* GPU를 못 쓰면 DOM 렌더러 그대로 */ }
 
