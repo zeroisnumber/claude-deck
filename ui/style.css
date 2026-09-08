@@ -992,7 +992,7 @@ kbd {
 .turn-miss td { color: var(--red-soft); }
 
 /* 질문 열이 붙어 열이 8개가 되므로 이 팝업만 넓게 */
-#modal.turns { width: min(860px, 92vw); }
+#modal.turns { width: min(720px, 92vw); }
 #turns-all .tp-q { max-width: 190px; }
 
 /* 질문 열: 길어도 한 줄로 자르고 전체는 툴팁으로 */
@@ -1085,19 +1085,75 @@ kbd {
   white-space: nowrap;
   color: var(--text-dim) !important;
 }
-.tp-detail td { padding: 6px 8px 10px; }
+/* ─── 질문 상세 ─────────────────────────────────────────
+   목록 아래로 펼치면 화면이 계속 길어져 한눈에 안 들어온다. 목록과 자리를 바꿔
+   한 번에 한 가지만 보이게 한다. */
+#turns-detail {
+  /* 스크롤은 여기 하나만 둔다. 질문·답변·흔적이 각자 스크롤하면 어디를 굴려야
+     하는지 알 수 없고, 바깥 모달까지 굴러 네 겹이 된다. */
+  max-height: 264px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding: 10px 12px 12px 14px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent-soft);
+  border-radius: 8px;
+}
+#turns-detail.hidden { display: none; }
+#turns-prompts.hidden { display: none; }
+.td-q {
+  color: var(--text);
+  font-weight: 600;
+  line-height: 1.5;
+}
+.td-q { padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.td-a-head {
+  margin: 12px 0 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.td-a {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.td-a p { margin: 0 0 4px; }
+.td-a ul { margin: 2px 0 4px 16px; }
+.td-a pre {
+  margin: 4px 0;
+  padding: 5px 7px;
+  background: var(--bg);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.td-sum {
+  margin-left: 10px;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+/* 비용과 내용을 2열로 고정한다 — 글이 길어 줄바꿈돼도 비용 칸과 어긋나지 않는다 */
 .tr-line {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 8px;
   align-items: baseline;
-  gap: 5px;
   padding: 2px 0;
   font-size: 11.5px;
   line-height: 1.5;
 }
+.tr-what {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
 .tr-line.miss { color: var(--red-soft); }
 .tr-cost {
-  flex: 0 0 52px;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   text-align: right;
