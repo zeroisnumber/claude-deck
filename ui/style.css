@@ -1091,3 +1091,20 @@ kbd {
   font-size: 10.5px;
   white-space: nowrap;
 }
+
+/* 호버 카드의 축약 렌더 — 표·인용·번호 목록은 한 줄로 눌러 내용만 남긴다 */
+.pv-body .md-row {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.pv-body .md-more {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  opacity: 0.8;
+}
+.pv-body .md-quote {
+  padding-left: 7px;
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
+}
+.pv-body .md-num { margin: 0; }

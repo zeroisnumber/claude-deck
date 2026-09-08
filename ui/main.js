@@ -384,41 +384,116 @@ function startRename(s, itemEl) {
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-function mdToHtml(src) {
-  const lines = escapeHtml(src).split("\n");
-  const out = [];
-  let inCode = false, codeBuf = [], listOpen = false;
-  const closeList = () => { if (listOpen) { out.push("</ul>"); listOpen = false; } };
-  // href는 http(s)만 허용 — escapeHtml은 javascript: 스킴을 걸러주지 않는데
-  // 여기서 렌더하는 건 세션 파일에서 온 외부 입력이고, 이 웹뷰에는 invoke가 노출돼 있다.
-  const safeHref = (u) => (/^https?:\/\//i.test(u.trim()) ? u.trim() : null);
-  const inline = (t) => t
+// 인라인 표시만 HTML로. 먼저 이스케이프하고 그 위에 장식을 얹는 순서라
+// 세션 파일에서 온 문자열이 태그로 되살아나지 않는다.
+// 링크는 글자만 남긴다 — 이걸 쓰는 화면(호버 카드, 토큰 팝업)은 마우스를 떼면
+// 사라지거나 클릭을 받지 않는 자리라 앵커를 만들 이유가 없다.
+function mdInline(src) {
+  return escapeHtml(String(src || ""))
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, url) => {
-      const href = safeHref(url);
-      return href ? `<a href="${href}">${label}</a>` : m;
-    });
-  for (const raw of lines) {
-    const line = raw;
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1");
+}
+
+// 호버 카드용 축약 렌더. 카드가 좁아서 표나 코드 블록을 제대로 그려도 못 읽는다.
+// 그래서 블록 요소를 없애는 대신 한 줄로 눌러 내용은 남긴다 — 표는 셀을 가운뎃점으로
+// 잇고, 코드 블록은 앞 두 줄만 보이고 나머지는 줄 수로 적는다.
+const MD_TABLE_ROWS = 4;
+const MD_CODE_LINES = 2;
+function mdToHtml(src) {
+  const lines = String(src || "").split("\n");
+  const out = [];
+  let inCode = false;
+  let codeBuf = [];
+  let listOpen = false;
+  let tableBuf = [];
+  const closeList = () => {
+    if (listOpen) {
+      out.push("</ul>");
+      listOpen = false;
+    }
+  };
+  const flushTable = () => {
+    if (!tableBuf.length) return;
+    const rows = tableBuf.slice(0, MD_TABLE_ROWS);
+    for (const r of rows) out.push(`<p class="md-row">${mdInline(r)}</p>`);
+    if (tableBuf.length > rows.length) {
+      out.push(`<p class="md-more">…${tableBuf.length - rows.length}줄 더</p>`);
+    }
+    tableBuf = [];
+  };
+  const flushCode = () => {
+    const head = codeBuf.slice(0, MD_CODE_LINES).map(escapeHtml).join("\n");
+    const rest = codeBuf.length - Math.min(codeBuf.length, MD_CODE_LINES);
+    out.push(`<pre><code>${head}</code></pre>`);
+    if (rest > 0) out.push(`<p class="md-more">코드 ${rest}줄 더</p>`);
+    codeBuf = [];
+  };
+  for (const line of lines) {
     if (line.trim().startsWith("```")) {
-      if (inCode) { out.push(`<pre><code>${codeBuf.join("\n")}</code></pre>`); codeBuf = []; inCode = false; }
-      else { closeList(); inCode = true; }
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        closeList();
+        flushTable();
+        inCode = true;
+      }
       continue;
     }
-    if (inCode) { codeBuf.push(line); continue; }
+    if (inCode) {
+      codeBuf.push(line);
+      continue;
+    }
+    const t = line.trim();
+    if (t.startsWith("|") && t.endsWith("|")) {
+      const cells = t.slice(1, -1).split("|").map((c) => c.trim());
+      if (!cells.every((c) => /^:?-{2,}:?$/.test(c))) {
+        closeList();
+        tableBuf.push(cells.filter(Boolean).join(" · "));
+      }
+      continue;
+    }
+    flushTable();
     const h = line.match(/^(#{1,6})\s+(.*)/);
-    if (h) { closeList(); out.push(`<h6>${inline(h[2])}</h6>`); continue; }
+    if (h) {
+      closeList();
+      out.push(`<h6>${mdInline(h[2])}</h6>`);
+      continue;
+    }
+    const q = line.match(/^\s*>\s?(.*)/);
+    if (q) {
+      closeList();
+      out.push(`<p class="md-quote">${mdInline(q[1])}</p>`);
+      continue;
+    }
     const li = line.match(/^\s*[-*]\s+(.*)/);
-    if (li) { if (!listOpen) { out.push("<ul>"); listOpen = true; } out.push(`<li>${inline(li[1])}</li>`); continue; }
+    if (li) {
+      if (!listOpen) {
+        out.push("<ul>");
+        listOpen = true;
+      }
+      out.push(`<li>${mdInline(li[1])}</li>`);
+      continue;
+    }
+    const ol = line.match(/^\s*(\d+)[.)]\s+(.*)/);
+    if (ol) {
+      closeList();
+      out.push(`<p class="md-num">${ol[1]}. ${mdInline(ol[2])}</p>`);
+      continue;
+    }
     closeList();
-    if (line.trim() === "") { out.push(""); continue; }
-    out.push(`<p>${inline(line)}</p>`);
+    if (line.trim() === "") {
+      out.push("");
+      continue;
+    }
+    out.push(`<p>${mdInline(line)}</p>`);
   }
-  if (inCode) out.push(`<pre><code>${codeBuf.join("\n")}</code></pre>`);
+  if (inCode) flushCode();
+  flushTable();
   closeList();
-  return out.join("\n");
+  return out.join("");
 }
 
 // ---------- hover 미리보기 ----------
@@ -1656,7 +1731,7 @@ function renderCurve(cost, total, misses) {
     tip.hidden = false;
     tip.innerHTML =
       `<b>${turnTime(t.ts)}</b> · 이 턴 ${fmtVal(cost[i], true)} / 여기까지 ${fmtVal(acc[i])}<br>` +
-      `${escapeHtml(firstLine(t.text, 60) || (t.tools[0] ? t.tools[0] : "도구 호출"))}`;
+      `${mdInline(firstLine(t.text, 60) || (t.tools[0] ? t.tools[0] : "도구 호출"))}`;
     const w = tip.offsetWidth || 220;
     tip.style.left = `${Math.min(Math.max(e.clientX - r.left - w / 2, 0), r.width - w)}px`;
   };
@@ -1709,7 +1784,7 @@ function renderPrompts(cost) {
       const head =
         `<tr class="tp-row${g.miss ? " turn-miss" : ""}" data-g="${gi}">` +
         `<td class="tp-q" title="${escapeHtml(g.prompt)}">${escapeHtml(firstLine(g.prompt, 70))}</td>` +
-        `<td class="tp-a" title="${escapeHtml(g.answer)}">${escapeHtml(firstLine(g.answer, 70) || "—")}</td>` +
+        `<td class="tp-a" title="${escapeHtml(g.answer)}">${mdInline(firstLine(g.answer, 70) || "—")}</td>` +
         `<td>${g.idxs.length}</td><td>${fmtVal(g.cost)}</td></tr>`;
       const trail =
         `<tr class="tp-detail hidden" data-d="${gi}"><td colspan="4">${trailOf(g, cost)}</td></tr>`;
@@ -1736,7 +1811,7 @@ function trailOf(g, cost) {
     .map((i) => {
       const t = turnsData[i];
       const what = t.text && t.text.trim()
-        ? `<span class="tr-say">${escapeHtml(firstLine(t.text, 90))}</span>`
+        ? `<span class="tr-say">${mdInline(firstLine(t.text, 90))}</span>`
         : "";
       const tools = (t.tools || [])
         .map((x) => `<code class="tr-tool">${escapeHtml(x)}</code>`)
