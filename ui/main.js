@@ -979,6 +979,13 @@ function adoptFor(meta) {
   const t = terms.get(pick);
   t.sessionId = meta.session_id;
   t.file = meta.file;
+  // 복사본은 원본의 기록을 그대로 물려받아 제목까지 같다. 갈라져 나온 순간에
+  // 이름을 붙여 둬야 사이드바에서 원본과 구분해 쓸 수 있다.
+  if (t.forkOf && !aliases[meta.session_id]) {
+    const base = (t.name || "").replace(/ \(복사본\)$/, "");
+    aliases[meta.session_id] = `${base} (복사본)`.slice(0, 60);
+    localStorage.setItem("aliases", JSON.stringify(aliases));
+  }
   const name = (sessionTitle(meta) || meta.session_id.slice(0, 8)).slice(0, 40);
   t.name = name;
   t.title = basename(meta.cwd) + " · " + name.slice(0, 24);
