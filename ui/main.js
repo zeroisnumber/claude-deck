@@ -104,6 +104,15 @@ let pins = [];
 try { pins = JSON.parse(localStorage.getItem("pins")) || []; } catch { /* 무시 */ }
 
 const AGENT_GLYPH = { claude: "✻", codex: "❖", gemini: "✦" };
+
+// 모델 ID를 사람이 읽는 이름으로. 목록에 글자로 넣기엔 자리가 없어 글리프 툴팁에만 쓴다.
+// 알려진 접두사만 다듬고 모르는 ID는 그대로 보여준다 — 새 모델이 나와도 틀린 이름이 안 나오게.
+function modelName(id) {
+  if (!id || id === "<synthetic>") return "";
+  const m = id.match(/^claude-(fable|opus|sonnet|haiku|mythos)-(\d+)(?:-(\d+))?/);
+  if (!m) return id;
+  return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? "." + m[3] : ""}`;
+}
 let agentFilter = "all";
 
 // 인라인 이름 편집 중 — 사이드바를 통째로 다시 그리면 입력창이 사라진다.
@@ -152,7 +161,10 @@ function sessionRow(s, child) {
   const unread = t && t.attention && !t.exited;
   const slot = st.cls ? `<span class="si-status ${st.cls}${unread ? " unread" : ""}" title="${unread ? "응답 완료 — 아직 안 봄" : st.label}"></span>` : "";
   const pin = pins.includes(s.session_id) ? PIN_SVG : "";
-  const glyph = `<span class="si-agent ${s.agent}" title="${s.agent}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
+  // 에이전트 글리프에 마지막으로 관측된 모델을 얹는다 (툴팁만 — 메타 줄은 이미 꽉 찼다)
+  const model = modelName(s.model);
+  const glyphTitle = model ? `${s.agent} · ${model} (마지막 응답 기준)` : s.agent;
+  const glyph = `<span class="si-agent ${s.agent}" title="${glyphTitle}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
   const badge = st.badge ? `<span class="si-bg ${st.badge.cls}" title="${st.label}">${st.badge.label}</span>` : "";
   const expEpoch = s.cache_last_ts && s.cache_ttl_secs ? s.cache_last_ts + s.cache_ttl_secs : null;
   const ttl = expEpoch ? `<span class="si-ttl" data-exp="${expEpoch}" title="프롬프트 캐시 남은 TTL"></span>` : "<span></span>";
@@ -230,6 +242,7 @@ function renderSidebar() {
       basename(s.cwd),
       s.bg_detail || "",
       s.bg_state || "",
+      modelName(s.model),
     ].join(" ").toLowerCase();
     return hay.includes(q);
   });
