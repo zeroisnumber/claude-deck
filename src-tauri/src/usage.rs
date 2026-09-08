@@ -25,10 +25,28 @@ pub(crate) struct UsageRow {
 
 pub(crate) type UsageKey = (String, String, String); // (날짜, 모델, 프로젝트)
 
-/// 세션 파일 하나를 (날짜, 모델, 프로젝트)별로 집계
-pub(crate) fn usage_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
+/// 응답 하나. 파일별 캐시는 집계된 행이 아니라 이걸 담는다 — 포크·재개가 부모의
+/// 기록을 자식 파일에 같은 응답 id로 복사하기 때문에, 파일 안에서만 중복을 지우면
+/// 파일 사이의 중복이 남는다 (실측: 최근 30일 화면에서 비용 36% 과다).
+#[derive(Serialize, Default, Clone)]
+pub(crate) struct UsageEntry {
+    /// API 응답 id. 코덱스처럼 id가 없는 저장소는 파일 경로로 만든 고유값을 쓴다.
+    pub(crate) id: String,
+    pub(crate) date: String,
+    pub(crate) model: String,
+    pub(crate) cwd: String,
+    pub(crate) agent: String,
+    pub(crate) input: u64,
+    pub(crate) output: u64,
+    pub(crate) cache_read: u64,
+    pub(crate) cache_5m: u64,
+    pub(crate) cache_1h: u64,
+}
+
+/// 세션 파일 하나의 응답 목록. 집계는 호출 쪽에서 파일 사이 중복까지 지운 뒤에 한다.
+pub(crate) fn usage_entries_of_file(path: &PathBuf) -> Vec<UsageEntry> {
     let Ok(text) = fs::read_to_string(path) else { return vec![] };
-    let mut map: HashMap<UsageKey, UsageRow> = HashMap::new();
+    let mut out = Vec::new();
     let mut cwd = String::new();
     // 한 응답이 텍스트 블록과 도구 호출 블록으로 나뉘면 Claude Code는 같은 message.id와
     // 같은 usage를 가진 assistant 줄을 여러 개 쓴다. 줄마다 더하면 같은 토큰을 여러 번
@@ -48,31 +66,68 @@ pub(crate) fn usage_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
         if u.is_null() {
             continue;
         }
-        if let Some(id) = obj["message"]["id"].as_str() {
-            if !counted.insert(id.to_string()) {
-                continue;
+        let id = match obj["message"]["id"].as_str() {
+            Some(id) => {
+                if !counted.insert(id.to_string()) {
+                    continue;
+                }
+                id.to_string()
             }
-        }
+            // id가 없는 옛 기록은 파일 안 위치로 고유값을 만든다 (파일 간 중복 제거 대상 아님)
+            None => format!("{}#{}", path.to_string_lossy(), out.len()),
+        };
         let ts = obj["timestamp"].as_str().unwrap_or("");
         if ts.len() < 10 {
             continue;
         }
-        let date = ts[..10].to_string();
-        let model = obj["message"]["model"].as_str().unwrap_or("?").to_string();
+        out.push(UsageEntry {
+            id,
+            date: ts[..10].to_string(),
+            model: obj["message"]["model"].as_str().unwrap_or("?").to_string(),
+            cwd: cwd.clone(),
+            agent: "claude".into(),
+            input: u["input_tokens"].as_u64().unwrap_or(0),
+            output: u["output_tokens"].as_u64().unwrap_or(0),
+            cache_read: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
+            cache_5m: u["cache_creation"]["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0),
+            cache_1h: u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0),
+        });
+    }
+    // cwd는 파일 앞부분에서야 나오는 경우가 있어 뒤늦게 채운다
+    if !cwd.is_empty() {
+        for e in out.iter_mut() {
+            if e.cwd.is_empty() {
+                e.cwd = cwd.clone();
+            }
+        }
+    }
+    out
+}
+
+/// 파일 하나만 집계한 행 (테스트용 — 실사용 경로는 파일 사이 중복까지 지운다)
+#[cfg(test)]
+pub(crate) fn usage_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
+    aggregate(usage_entries_of_file(path))
+}
+
+/// 항목들을 (날짜, 모델, 프로젝트)별로 합친다
+pub(crate) fn aggregate(entries: Vec<UsageEntry>) -> Vec<UsageRow> {
+    let mut map: HashMap<UsageKey, UsageRow> = HashMap::new();
+    for e in entries {
         let row = map
-            .entry((date.clone(), model.clone(), cwd.clone()))
+            .entry((e.date.clone(), e.model.clone(), e.cwd.clone()))
             .or_insert_with(|| UsageRow {
-                date,
-                model,
-                cwd: cwd.clone(),
-                agent: "claude".into(),
+                date: e.date.clone(),
+                model: e.model.clone(),
+                cwd: e.cwd.clone(),
+                agent: e.agent.clone(),
                 ..Default::default()
             });
-        row.input += u["input_tokens"].as_u64().unwrap_or(0);
-        row.output += u["output_tokens"].as_u64().unwrap_or(0);
-        row.cache_read += u["cache_read_input_tokens"].as_u64().unwrap_or(0);
-        row.cache_5m += u["cache_creation"]["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0);
-        row.cache_1h += u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0);
+        row.input += e.input;
+        row.output += e.output;
+        row.cache_read += e.cache_read;
+        row.cache_5m += e.cache_5m;
+        row.cache_1h += e.cache_1h;
         row.requests += 1;
     }
     map.into_values().collect()
@@ -280,7 +335,7 @@ pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
     let mut out: Vec<TurnRow> = Vec::new();
     let mut prompt = String::new();
     let mut prompt_idx: u32 = 0;
-    // usage_rows_of_file과 같은 이유로 message.id 기준 중복 제거 (한 응답 = 한 줄이 아니다)
+    // usage_entries_of_file과 같은 이유로 message.id 기준 중복 제거 (한 응답 = 한 줄이 아니다)
     let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 방금 만든 턴의 id — 뒷줄을 합칠 때 위치가 아니라 id로 확인한다
     let mut last_id = String::new();
@@ -359,9 +414,15 @@ pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
 ///
 /// input_tokens는 cached_input_tokens를 포함한다. 대시보드의 input은 캐시가 아닌
 /// 입력이므로 둘의 차이를 넣는다.
+/// 파일 하나만 집계한 행 (테스트용)
+#[cfg(test)]
 pub(crate) fn codex_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
+    aggregate(codex_entries_of_file(path))
+}
+
+pub(crate) fn codex_entries_of_file(path: &PathBuf) -> Vec<UsageEntry> {
     let Ok(text) = fs::read_to_string(path) else { return vec![] };
-    let mut map: HashMap<UsageKey, UsageRow> = HashMap::new();
+    let mut out: Vec<UsageEntry> = Vec::new();
     let mut cwd = String::new();
     let mut model = String::from("?");
     let (mut p_in, mut p_cached, mut p_out) = (0u64, 0u64, 0u64);
@@ -412,25 +473,25 @@ pub(crate) fn codex_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
                 if ts.len() < 10 {
                     continue;
                 }
-                let date = ts[..10].to_string();
-                let row = map
-                    .entry((date.clone(), model.clone(), cwd.clone()))
-                    .or_insert_with(|| UsageRow {
-                        date,
-                        model: model.clone(),
-                        cwd: cwd.clone(),
-                        agent: "codex".into(),
-                        ..Default::default()
-                    });
-                row.input += d_in - d_c.min(d_in);
-                row.cache_read += d_c;
-                row.output += d_out;
-                row.requests += 1;
+                // 코덱스 rollout에는 응답 id가 없다. 파일 사이 중복 대상이 아니므로
+                // 파일 경로와 순번으로 고유값을 만든다.
+                out.push(UsageEntry {
+                    id: format!("{}#{}", path.to_string_lossy(), out.len()),
+                    date: ts[..10].to_string(),
+                    model: model.clone(),
+                    cwd: cwd.clone(),
+                    agent: "codex".into(),
+                    input: d_in - d_c.min(d_in),
+                    output: d_out,
+                    cache_read: d_c,
+                    cache_5m: 0,
+                    cache_1h: 0,
+                });
             }
             _ => {}
         }
     }
-    map.into_values().collect()
+    out
 }
 
 /// Windows의 `\\?\` 접두사를 떼어 탭의 cwd와 같은 모양으로 맞춘다
@@ -459,13 +520,15 @@ pub(crate) fn codex_rollout_files() -> Vec<PathBuf> {
 
 /// 파일별 집계 캐시 — 대시보드를 열 때마다 최근 N일치 jsonl을 전량 다시 읽지 않도록
 /// mtime이 그대로면 재사용한다 (세션 목록의 META_CACHE와 같은 전략).
-pub(crate) static USAGE_FILE_CACHE: LazyLock<Mutex<HashMap<String, (f64, Vec<UsageRow>)>>> =
+pub(crate) static USAGE_FILE_CACHE: LazyLock<Mutex<HashMap<String, (f64, Vec<UsageEntry>)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 대시보드용: 최근 N일간 (날짜, 모델, 프로젝트)별 토큰 집계
 #[tauri::command]
 pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
-    let mut map: HashMap<UsageKey, UsageRow> = HashMap::new();
+    let mut all_entries: Vec<UsageEntry> = Vec::new();
+    // 파일 사이 중복 제거용 — 포크가 복사해 온 응답을 두 번 세지 않기 위해
+    let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
     let Some(home) = dirs::home_dir() else { return vec![] };
     let projects = home.join(".claude").join("projects");
     let cutoff = std::time::SystemTime::now()
@@ -483,6 +546,8 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
         }
     }
     all.extend(codex_rollout_files());
+    // 원본이 사본보다 먼저 오도록 오래된 파일부터 — 중복은 나중에 만난 쪽을 버린다
+    all.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
 
     {
         for p in all {
@@ -507,31 +572,26 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
                     _ => None,
                 }
             };
-            let rows = cached.unwrap_or_else(|| {
+            let entries = cached.unwrap_or_else(|| {
                 let is_codex = p.components().any(|c| c.as_os_str() == ".codex");
-                let rows = if is_codex { codex_rows_of_file(&p) } else { usage_rows_of_file(&p) };
+                let rows = if is_codex {
+                    codex_entries_of_file(&p)
+                } else {
+                    usage_entries_of_file(&p)
+                };
                 USAGE_FILE_CACHE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(key, (mtime, rows.clone()));
                 rows
             });
-            for r in rows {
-                let entry = map
-                    .entry((r.date.clone(), r.model.clone(), r.cwd.clone()))
-                    .or_insert_with(|| UsageRow {
-                        date: r.date.clone(),
-                        model: r.model.clone(),
-                        cwd: r.cwd.clone(),
-                        agent: r.agent.clone(),
-                        ..Default::default()
-                    });
-                entry.input += r.input;
-                entry.output += r.output;
-                entry.cache_read += r.cache_read;
-                entry.cache_5m += r.cache_5m;
-                entry.cache_1h += r.cache_1h;
-                entry.requests += r.requests;
+            for e in entries {
+                // 포크·재개는 부모의 기록을 그대로 복사해 온다. 같은 응답 id를
+                // 다시 만나면 버린다 — 파일을 오래된 순으로 도니 원본이 남는다.
+                if !counted.insert(e.id.clone()) {
+                    continue;
+                }
+                all_entries.push(e);
             }
         }
     }
@@ -540,7 +600,7 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .retain(|k, _| seen.contains(k));
-    map.into_values().collect()
+    aggregate(all_entries)
 }
 
 // ---------- 요금제 한도 (5시간/주간 사용률 + 리셋 시각) ----------
@@ -831,6 +891,40 @@ mod codex_tests {
         assert_eq!(r.agent, "codex");
         assert_eq!(r.cwd, r"C:\work", r"\?\ 접두사는 떼어낸다");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 30일 창의 실제 합계 — `cargo test -- --ignored window_cost`
+    #[test]
+    #[ignore]
+    fn window_cost() {
+        let rows = usage_stats(30);
+        let price = |m: &str| -> (f64, f64) {
+            if m.contains("sonnet") {
+                (3.0, 15.0)
+            } else if m.contains("haiku") {
+                (1.0, 5.0)
+            } else {
+                (5.0, 25.0)
+            }
+        };
+        let mut cost = 0.0;
+        let mut req = 0u64;
+        for r in &rows {
+            // 프런트가 하는 날짜 필터를 똑같이 적용해야 비교가 된다
+            let cutoff = std::env::var("DECK_CUTOFF").unwrap_or_default();
+            if r.agent != "claude" || r.date < cutoff {
+                continue;
+            }
+            let (i, o) = price(&r.model);
+            cost += (r.input as f64 * i
+                + r.cache_read as f64 * i * 0.1
+                + r.cache_5m as f64 * i * 1.25
+                + r.cache_1h as f64 * i * 2.0
+                + r.output as f64 * o)
+                / 1e6;
+            req += r.requests;
+        }
+        eprintln!("claude rows={} requests={req} cost=${cost:.2}", rows.len());
     }
 
     /// 대시보드가 실제로 코덱스 줄을 내보내는지 — `cargo test -- --ignored dash_rows`
