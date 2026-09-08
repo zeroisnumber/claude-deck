@@ -635,6 +635,7 @@ listen("pty-state", (ev) => {
 
 // ---------- 터미널 ----------
 function loadWebgl(entry) {
+  if (!webglOn) { entry.webgl = null; return; }
   try {
     const webgl = new WebglAddon.WebglAddon();
     // 복구 없이 3초가 지나면 애드온이 이걸 쏜다 (GPU를 아예 못 쓰게 된 경우). 재생성을
@@ -643,6 +644,17 @@ function loadWebgl(entry) {
     entry.term.loadAddon(webgl);
     entry.webgl = webgl;
   } catch { entry.webgl = null; /* GPU를 못 쓰면 DOM 렌더러 그대로 */ }
+}
+
+// 설정을 바꾸면 열려 있는 탭에 바로 반영한다 — 끊길 때 켜고 끄며 확인하는 값이라
+// 재시작을 요구하면 쓸모가 없다.
+function applyRenderer() {
+  for (const t of terms.values()) {
+    try { t.webgl && t.webgl.dispose(); } catch { /* 죽은 컨텍스트 위의 dispose는 던질 수 있다 */ }
+    t.webgl = null;
+    if (webglOn) loadWebgl(t);
+    try { t.term.refresh(0, t.term.rows - 1); } catch { /* 닫히는 중인 탭 */ }
+  }
 }
 
 let webglRebuildTimer = null;
@@ -1155,6 +1167,9 @@ let globalEnv = localStorage.getItem("globalEnv") || "";
 // 실제 컨텍스트 윈도우가 들어 있다. 사용자 settings.json은 건드리지 않고,
 // CLI Deck이 띄우는 세션에만 --settings 로 우리 설정을 얹는다.
 let statusLineOn = localStorage.getItem("statusLine") === "1";
+// GPU를 오래 붙잡는 작업(학습 등)과 같은 기기에서 돌 때는 CPU 렌더러가 덜 끊긴다.
+// 기본은 켬 — 평소에는 GPU 쪽이 확실히 빠르다.
+let webglOn = localStorage.getItem("webgl") !== "0";
 let statusLinePath = "";
 async function ensureStatusLinePath() {
   if (!statusLineOn || statusLinePath) return statusLinePath;
@@ -1207,6 +1222,7 @@ $("#btn-settings").onclick = () => {
   profiles.forEach((p, i) => addProfileRow(p.name, p.cmd, p.resume !== false, i === activeProfile));
   $("#global-env").value = globalEnv;
   invoke("trace_enabled").then((on) => { $("#opt-trace").checked = !!on; }).catch(() => {});
+  $("#opt-webgl").checked = webglOn;
   $("#opt-statusline").checked = statusLineOn;
   $("#opt-keepalive").checked = !!keepAlive.enabled;
   $("#ka-threshold").value = String(keepAlive.thresholdSecs / 60);
@@ -1254,6 +1270,10 @@ $("#lmodal-save").onclick = () => {
   localStorage.setItem("profiles", JSON.stringify(profiles));
   localStorage.setItem("profileSel", String(activeProfile));
   localStorage.setItem("globalEnv", globalEnv);
+  const webglWas = webglOn;
+  webglOn = $("#opt-webgl").checked;
+  localStorage.setItem("webgl", webglOn ? "1" : "0");
+  if (webglOn !== webglWas) applyRenderer();
   statusLineOn = $("#opt-statusline").checked;
   localStorage.setItem("statusLine", statusLineOn ? "1" : "0");
   ensureStatusLinePath();
