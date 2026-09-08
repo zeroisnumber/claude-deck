@@ -383,14 +383,22 @@ function renderPrompts(cost) {
   $("#turns-prompts").classList.remove("hidden");
   const by = new Map();
   turnsData.forEach((t, i) => {
-    const g = by.get(t.prompt_idx) || { idx: t.prompt_idx, prompt: t.prompt, cost: 0, idxs: [], miss: 0, answer: "" };
+    const g = by.get(t.prompt_idx) ||
+      { idx: t.prompt_idx, prompt: t.prompt, cost: 0, idxs: [], miss: 0, answer: "", ts: t.ts, end: t.ts };
     g.cost += cost[i];
     g.idxs.push(i);
+    if (t.ts) {
+      if (!g.ts || t.ts < g.ts) g.ts = t.ts;
+      if (!g.end || t.ts > g.end) g.end = t.ts;
+    }
     if (isCacheMiss(t, i)) g.miss += 1;
     if (t.text && t.text.trim()) g.answer = t.text; // 마지막 말이 그 질문의 답
     by.set(t.prompt_idx, g);
   });
   const all = [...by.values()].filter((g) => g.prompt);
+  // 막대의 기준은 세션 전체에서 가장 큰 질문이다. 보이는 8개 안에서 재면 "더 보기"를
+  // 누르거나 시간순으로 바꿀 때마다 같은 줄의 막대 길이가 달라진다.
+  const peak = Math.max(...all.map((g) => g.cost), 0) || 1;
   turnGroups = (promptsByTime
     ? [...all].sort((a, b) => a.idxs[0] - b.idxs[0])
     : [...all].sort((a, b) => b.cost - a.cost)
@@ -408,17 +416,22 @@ function renderPrompts(cost) {
     $("#turns-prompts").innerHTML = `<div class="dash-note">질문 기록이 없습니다</div>`;
     return;
   }
+  // 숫자만 늘어놓으면 어느 것이 큰지 읽어서 비교해야 한다. 값 칸 뒤에 비율만큼 칠해
+  // 두면 순위가 눈에 먼저 들어온다 — 새 정보가 아니라 같은 값을 한 번 더 보여주는 것.
   const rows = turnGroups
     .map((g, gi) =>
       `<tr class="tp-row${g.miss ? " turn-miss" : ""}" data-g="${gi}">` +
       `<td class="tp-q" title="${escapeHtml(g.prompt)}">${escapeHtml(firstLine(mdPlain(g.prompt), 60))}</td>` +
       `<td class="tp-a" title="${escapeHtml(g.answer)}">${escapeHtml(firstLine(mdPlain(g.answer), 60) || "—")}</td>` +
-      `<td>${g.idxs.length}</td><td>${fmtVal(g.cost)}</td></tr>`)
+      `<td class="tp-time">${g.ts ? turnTime(g.ts) : "—"}</td>` +
+      `<td class="tp-n">${g.idxs.length}</td>` +
+      `<td class="tp-val"><i style="width:${((g.cost / peak) * 100).toFixed(1)}%"></i>` +
+      `<span>${fmtVal(g.cost)}</span></td></tr>`)
     .join("");
   const rest = promptTotal - turnGroups.length;
   // 표만 스크롤한다 — "더 보기"가 스크롤 안에 있으면 기본 상태에서도 밀려 잘린다.
   $("#turns-prompts").innerHTML =
-    `<div class="tp-scroll"><table><thead><tr><th>질문</th><th>답변</th><th>턴</th>` +
+    `<div class="tp-scroll"><table><thead><tr><th>질문</th><th>답변</th><th>시각</th><th>턴</th>` +
     `<th>${turnsPriced ? "비용" : "토큰"}</th></tr></thead><tbody>${rows}</tbody></table></div>` +
     (rest > 0
       ? `<button id="turns-more" class="btn-ghost tp-more">더 보기 (남은 ${rest}개)</button>`
@@ -447,6 +460,7 @@ function renderDetail(g, cost) {
   $("#turns-prompts-head").innerHTML =
     `<button id="turns-back" class="btn-ghost">← 질문 목록</button>` +
     `<span class="td-sum">턴 ${g.idxs.length}개 · ${fmtVal(g.cost)}` +
+    `${g.ts ? " · " + turnTime(g.ts) : ""}${spanOf(g)}` +
     `${g.miss ? " · 캐시 끊김 " + g.miss + "회" : ""}</span>`;
   d.innerHTML =
     `<div class="td-q">${mdInline(g.prompt)}</div>` +
@@ -459,6 +473,14 @@ function renderDetail(g, cost) {
     renderPrompts(cost);
   };
   highlightSpan(g);   // 상세를 보는 동안 차트에 그 구간을 붙여 둔다
+}
+
+// 그 질문에 얼마나 매달렸나. 1분 미만은 표시할 값이 아니다.
+function spanOf(g) {
+  const sec = (g.end || 0) - (g.ts || 0);
+  if (sec < 60) return "";
+  const m = Math.round(sec / 60);
+  return m < 60 ? ` · ${m}분` : ` · ${Math.floor(m / 60)}시간 ${m % 60}분`;
 }
 
 // 한 질문이 만든 턴들의 흔적 — 무슨 말을 했고 어떤 도구를 몇 번 불렀는지.

@@ -1098,8 +1098,34 @@ kbd {
 .tp-row { cursor: pointer; }
 .tp-row:hover td { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
 .tp-row.open td { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
+/* 시각·턴 수·값은 자리가 흔들리면 눈이 매번 다시 찾는다. 폭을 고정하고 숫자는
+   자리 맞춤 글꼴로 세로줄이 맞게 둔다. */
+.tp-time {
+  width: 84px;
+  color: var(--text-faint) !important;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.tp-n { width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+.tp-val {
+  position: relative;
+  width: 76px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* 값 뒤에 비율만큼 깔리는 막대 — 순위를 숫자로 비교하지 않아도 되게 */
+.tp-val i {
+  position: absolute;
+  right: 6px;
+  top: 5px;
+  bottom: 5px;
+  background: rgba(var(--accent-rgb), 0.22);
+  border-radius: 3px;
+  pointer-events: none;
+}
+.tp-val span { position: relative; }
 .tp-a {
-  max-width: 300px;
+  max-width: 210px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
