@@ -310,6 +310,7 @@ function showCtxMenu(e, s, itemEl) {
   ctxMenu.innerHTML = "";
   const items = [
     ...bgMenuItems(s),
+    ["📊 토큰 상세", () => openTurns(s)],
     [pinned ? "📌 핀 해제" : "📌 핀 고정", () => {
       pins = pinned ? pins.filter((x) => x !== s.session_id) : [...pins, s.session_id];
       localStorage.setItem("pins", JSON.stringify(pins));
@@ -1138,7 +1139,7 @@ function closeModal(el) {
 }
 
 // 모달 공통: 배경 클릭 또는 Escape로 닫기
-const MODAL_BACKDROPS = ["#lmodal-backdrop", "#dash-backdrop", "#modal-backdrop"];
+const MODAL_BACKDROPS = ["#lmodal-backdrop", "#dash-backdrop", "#turns-backdrop", "#modal-backdrop"];
 for (const sel of MODAL_BACKDROPS) {
   const el = $(sel);
   el.addEventListener("mousedown", (e) => { if (e.target === el) closeModal(el); });
@@ -1497,6 +1498,121 @@ for (const b of document.querySelectorAll("#dash-period .dp")) {
     renderDash();
   };
 }
+
+// ---------- 토큰 상세 (세션 하나의 턴별 사용량) ----------
+// 긴 세션은 응답이 100개를 넘는다. 표를 그대로 쏟으면 아무것도 안 보이므로 기본 화면은
+// 막대 타임라인과 "눈에 띄는 턴"뿐이고, 전체 표는 버튼으로 펼친다.
+let turnsData = [];
+let turnsTitle = "";
+
+function turnCost(t) {
+  const [i, o] = priceFor(t.model || "");
+  return (t.input * i + t.cache_read * i * 0.1 + t.cache_5m * i * 1.25 + t.cache_1h * i * 2 + t.output * o) / 1e6;
+}
+// 캐시가 끊긴 턴: 읽기가 없는데 쓰기는 큰 경우. 첫 턴은 원래 그러므로 제외한다.
+function isCacheMiss(t, idx) {
+  return idx > 0 && t.cache_read === 0 && t.cache_5m + t.cache_1h > 5000;
+}
+function turnTime(ts) {
+  const d = new Date(ts * 1000);
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ` +
+    `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+async function openTurns(s) {
+  hidePreview();
+  turnsTitle = sessionTitle(s) || s.session_id.slice(0, 8);
+  turnsData = [];
+  $("#turns-sub").textContent = "읽는 중…";
+  $("#turns-tiles").innerHTML = "";
+  $("#turns-chart").innerHTML = "";
+  $("#turns-notable").innerHTML = "";
+  $("#turns-all").innerHTML = "";
+  $("#turns-all").classList.add("hidden");
+  $("#turns-toggle-all").textContent = "전체 턴 표 보기";
+  $("#turns-backdrop").classList.remove("hidden");
+  try {
+    turnsData = await invoke("session_turns", { file: s.file });
+  } catch (err) {
+    $("#turns-sub").textContent = `읽기 실패: ${err}`;
+    return;
+  }
+  renderTurns(s);
+}
+
+function renderTurns(s) {
+  const ts = turnsData;
+  if (!ts.length) {
+    $("#turns-sub").textContent = `${turnsTitle} — 토큰 기록이 있는 응답이 없습니다`;
+    return;
+  }
+  const cost = ts.map(turnCost);
+  const total = cost.reduce((a, b) => a + b, 0);
+  const misses = ts.map((t, i) => (isCacheMiss(t, i) ? i : -1)).filter((i) => i >= 0);
+  const readTot = ts.reduce((a, t) => a + t.cache_read, 0);
+  const writeTot = ts.reduce((a, t) => a + t.cache_5m + t.cache_1h, 0);
+  const outTot = ts.reduce((a, t) => a + t.output, 0);
+  const hit = readTot + writeTot > 0 ? Math.round((readTot / (readTot + writeTot)) * 100) : 0;
+
+  $("#turns-sub").textContent =
+    `${turnsTitle} · ${basename(s.cwd)} · ${modelName(ts[ts.length - 1].model) || ts[ts.length - 1].model}`;
+
+  const tile = (v, l, cls) => `<div class="tile"><div class="tile-v ${cls || ""}">${v}</div><div class="tile-l">${l}</div></div>`;
+  $("#turns-tiles").innerHTML =
+    tile(`$${total.toFixed(2)}`, "누적 비용") +
+    tile(String(ts.length), "응답 수") +
+    tile(`${hit}%`, "캐시 적중률") +
+    tile(String(misses.length), "캐시 끊김", misses.length ? "hot" : "");
+
+  // 막대 높이는 비용 비례. 한 턴이 유독 비싸면 나머지가 다 눌리므로 상위 5%를 상한으로 쓴다.
+  const sorted = [...cost].sort((a, b) => a - b);
+  const cap = sorted[Math.floor(sorted.length * 0.95)] || sorted[sorted.length - 1] || 1;
+  $("#turns-chart").innerHTML = ts
+    .map((t, i) => {
+      const h = Math.max(2, Math.min(100, (cost[i] / cap) * 100));
+      const miss = isCacheMiss(t, i);
+      const title = `${turnTime(t.ts)} · $${cost[i].toFixed(3)}\n입력 ${fmtTok(t.input)} · 캐시읽기 ${fmtTok(t.cache_read)}` +
+        ` · 캐시쓰기 ${fmtTok(t.cache_5m + t.cache_1h)} · 출력 ${fmtTok(t.output)}${miss ? "\n캐시 끊김" : ""}`;
+      return `<div class="tc-bar${miss ? " miss" : ""}" style="height:${h}%" title="${title}"></div>`;
+    })
+    .join("");
+
+  // 눈에 띄는 턴: 캐시가 끊긴 턴 전부 + 비싼 상위 5개
+  const top = cost.map((c, i) => [c, i]).sort((a, b) => b[0] - a[0]).slice(0, 5).map(([, i]) => i);
+  // 끊김이 수십 번인 세션도 있어 상한을 둔다 — 비싼 순으로 자르고 다시 시간순으로 보여준다
+  const NOTABLE_MAX = 20;
+  let idxs = [...new Set([...misses, ...top])];
+  const cut = idxs.length > NOTABLE_MAX;
+  if (cut) idxs = idxs.sort((a, b) => cost[b] - cost[a]).slice(0, NOTABLE_MAX);
+  idxs.sort((a, b) => a - b);
+  $("#turns-notable").innerHTML = turnTable(idxs, cost);
+  $("#turns-notable-head").textContent =
+    `눈에 띄는 턴 — 캐시 끊김 ${misses.length}개, 비싼 응답 상위 5개` +
+    (cut ? ` (비싼 ${NOTABLE_MAX}개만 표시)` : "");
+  $("#turns-all").innerHTML = turnTable(ts.map((_, i) => i), cost);
+  $("#turns-all").dataset.built = "1";
+}
+
+function turnTable(idxs, cost) {
+  if (!idxs.length) return `<div class="dash-note">해당하는 턴이 없습니다</div>`;
+  const rows = idxs
+    .map((i) => {
+      const t = turnsData[i];
+      const miss = isCacheMiss(t, i);
+      return `<tr class="${miss ? "turn-miss" : ""}"><td>${turnTime(t.ts)}</td><td>${fmtTok(t.input)}</td>` +
+        `<td>${fmtTok(t.cache_read)}</td><td>${fmtTok(t.cache_5m + t.cache_1h)}</td>` +
+        `<td>${fmtTok(t.output)}</td><td>$${cost[i].toFixed(3)}</td><td>${miss ? "캐시 끊김" : ""}</td></tr>`;
+    })
+    .join("");
+  return `<table><thead><tr><th>시각</th><th>입력</th><th>캐시 읽기</th><th>캐시 쓰기</th><th>출력</th><th>비용</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+$("#turns-close").onclick = () => closeModal($("#turns-backdrop"));
+$("#turns-toggle-all").onclick = () => {
+  const el = $("#turns-all");
+  const shown = !el.classList.toggle("hidden");
+  $("#turns-toggle-all").textContent = shown ? "전체 턴 표 접기" : "전체 턴 표 보기";
+};
 
 // ---------- 요금제 한도 위젯 (사이드바 하단) ----------
 function fmtRemain(iso) {

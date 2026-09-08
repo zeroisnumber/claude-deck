@@ -612,7 +612,7 @@ kbd {
 }
 
 /* ─── 모달 ─────────────────────────────────────────────── */
-#modal-backdrop, #lmodal-backdrop, #dash-backdrop {
+#modal-backdrop, #lmodal-backdrop, #dash-backdrop, #turns-backdrop {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
@@ -622,7 +622,7 @@ kbd {
   z-index: 100;
   backdrop-filter: blur(2px);
 }
-#modal-backdrop.hidden, #lmodal-backdrop.hidden, #dash-backdrop.hidden { display: none; }
+#modal-backdrop.hidden, #lmodal-backdrop.hidden, #dash-backdrop.hidden, #turns-backdrop.hidden { display: none; }
 
 #modal {
   width: 440px;
@@ -898,6 +898,7 @@ kbd {
 }
 .tile-v { font-size: 17px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
 .tile-l { font-size: 10.5px; color: var(--text-faint); margin-top: 3px; }
+.tile-v.hot { color: var(--red); }
 
 .dash-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .dash-table th {
@@ -955,3 +956,37 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ─── 토큰 상세 팝업 ───────────────────────────────────── */
+/* 턴이 100개가 넘는 세션이 흔해서 표를 그대로 쏟으면 못 본다. 기본은 막대 타임라인 +
+   눈에 띄는 턴 몇 줄이고, 전체 표는 접어 둔다. */
+#turns-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 84px;
+  padding: 0 2px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.tc-bar {
+  flex: 1 0 3px;
+  min-width: 3px;
+  background: var(--accent);
+  opacity: 0.75;
+  border-radius: 1px 1px 0 0;
+  cursor: default;
+}
+.tc-bar:hover { opacity: 1; }
+.tc-bar.miss { background: var(--red); opacity: 0.9; }
+#turns-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+#turns-sub { margin-bottom: 2px; }
+.turn-miss td { color: #ef8080; }

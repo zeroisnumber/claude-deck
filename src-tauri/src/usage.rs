@@ -61,6 +61,50 @@ pub(crate) fn usage_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
     map.into_values().collect()
 }
 
+/// 세션 하나의 턴별 토큰. 대시보드는 날짜·모델로 합쳐 버리지만, 여기서는 응답 하나가
+/// 한 줄이다 — 캐시가 끊긴 지점(cache_read가 0으로 떨어지고 쓰기가 튀는 턴)을 찾기 위한 것.
+#[derive(Serialize, Default, Clone)]
+pub(crate) struct TurnRow {
+    /// epoch seconds
+    pub(crate) ts: f64,
+    pub(crate) model: String,
+    pub(crate) input: u64,
+    pub(crate) output: u64,
+    pub(crate) cache_read: u64,
+    pub(crate) cache_5m: u64,
+    pub(crate) cache_1h: u64,
+}
+
+/// 세션 파일의 모든 assistant 응답을 시간순으로. 알려진 세션 저장소 안의 파일만 읽는다.
+#[tauri::command]
+pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
+    let path = session_file_in_store(&file)?;
+    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        if obj["type"] != "assistant" {
+            continue;
+        }
+        let u = &obj["message"]["usage"];
+        if u.is_null() {
+            continue;
+        }
+        let Some(ts) = obj["timestamp"].as_str().and_then(parse_iso_ts) else { continue };
+        out.push(TurnRow {
+            ts,
+            model: obj["message"]["model"].as_str().unwrap_or("?").to_string(),
+            input: u["input_tokens"].as_u64().unwrap_or(0),
+            output: u["output_tokens"].as_u64().unwrap_or(0),
+            cache_read: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
+            cache_5m: u["cache_creation"]["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0),
+            cache_1h: u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0),
+        });
+    }
+    out.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(out)
+}
+
 /// 파일별 집계 캐시 — 대시보드를 열 때마다 최근 N일치 jsonl을 전량 다시 읽지 않도록
 /// mtime이 그대로면 재사용한다 (세션 목록의 META_CACHE와 같은 전략).
 pub(crate) static USAGE_FILE_CACHE: LazyLock<Mutex<HashMap<String, (f64, Vec<UsageRow>)>>> =

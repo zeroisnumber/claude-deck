@@ -161,6 +161,26 @@
   </div>
 
   <!-- 사용량 대시보드 모달 -->
+  <div id="turns-backdrop" class="hidden">
+    <div id="modal" class="dash">
+      <div class="dash-head">
+        <div class="modal-title">토큰 상세</div>
+        <button id="turns-close" class="btn-ghost">닫기</button>
+      </div>
+      <div id="turns-sub" class="modal-sub"></div>
+      <div id="turns-tiles"></div>
+      <div class="lmodal-section">턴별 비용 — 세로 막대 하나가 응답 하나, 빨강은 캐시가 끊긴 턴</div>
+      <div id="turns-chart"></div>
+      <div id="turns-notable-head" class="lmodal-section">눈에 띄는 턴</div>
+      <div id="turns-notable" class="dash-table"></div>
+      <div class="dash-note">
+        <button id="turns-toggle-all" class="btn-ghost">전체 턴 표 보기</button>
+        <span>비용은 API 단가 환산값입니다 — 구독 요금과는 별개</span>
+      </div>
+      <div id="turns-all" class="dash-table hidden"></div>
+    </div>
+  </div>
+
   <div id="dash-backdrop" class="hidden">
     <div id="modal" class="dash">
       <div class="dash-head">
