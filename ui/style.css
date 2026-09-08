@@ -1028,8 +1028,15 @@ kbd {
    막대 하나당 한 턴이던 방식은 턴이 수백 개면 가로로 넘치고, 비싼 턴 하나 때문에
    높이 상한에 걸려 큰 값들이 전부 같은 높이로 뭉갰다. 누적 곡선은 계단 높이가
    곧 그 턴의 비용이라 잘리는 값이 없고 몇백 개든 한 화면에 들어간다. */
+/* 차트에서 누른 턴 — 흔적 수십 줄 가운데 어디였는지 눈에 짚어 준다 */
+.tr-line.hit {
+  background: var(--accent-soft);
+  border-radius: 5px;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 #turns-chart {
   position: relative;
+  cursor: pointer;   /* 누르면 그때의 문답으로 들어간다 */
   height: 96px;
   background: var(--bg-deep);
   border: 1px solid var(--border);
@@ -1076,6 +1083,16 @@ kbd {
   bottom: 0;
   width: 1px;
   background: var(--border-strong, #555);
+}
+/* 눌러서 짚어 둔 턴 — 마우스 커서와 달리 상세를 닫을 때까지 남는다 */
+.tc-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  pointer-events: none;
 }
 .tc-tip {
   position: absolute;

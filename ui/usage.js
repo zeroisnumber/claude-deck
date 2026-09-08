@@ -171,6 +171,11 @@ let turnGroups = [];
 // 예전에는 목록 아래로 흔적이 펼쳐져 화면이 계속 길어졌다.
 // 선택은 목록 순서가 아니라 질문 번호로 기억한다 (정렬을 바꾸면 순서가 흔들린다).
 let selectedPrompt = null;
+// 목록은 8개만 보여주지만 차트에서는 아무 지점이나 누를 수 있다 — 자르기 전의 전체를
+// 따로 들고 있어야 그 질문을 열 수 있다.
+let allGroups = [];
+// 차트에서 눌러 들어왔을 때 그 턴을 흔적에서 짚어 준다
+let focusTurn = null;
 let promptsByTime = false;
 // 기본은 8줄만. 전체 표를 되살리면 다시 빽빽해지므로 필요할 때만 8줄씩 늘린다.
 let promptLimit = 0;
@@ -320,7 +325,8 @@ function renderCurve(cost, total, misses) {
   $("#turns-chart").innerHTML =
     `<svg viewBox="0 0 100 100" preserveAspectRatio="none">${bars}` +
     `<polyline points="${pts}" /></svg>` +
-    `<i class="tc-cursor" hidden></i><i class="tc-span" hidden></i><div class="tc-tip" hidden></div>`;
+    `<i class="tc-cursor" hidden></i><i class="tc-mark" hidden></i>` +
+    `<i class="tc-span" hidden></i><div class="tc-tip" hidden></div>`;
   $("#turns-curve-head").textContent =
     `${turnsPriced ? "비용" : "토큰"} — 막대는 응답 하나(${n}개), 얇은 선은 누적` +
     (misses.length ? `, 빨간 막대는 캐시가 끊긴 턴` : "");
@@ -345,6 +351,33 @@ function renderCurve(cost, total, misses) {
     tip.hidden = true;
     cur.hidden = true;
   };
+  // 봉우리를 보고 "이때 무슨 대화였지"가 궁금해지는 자리다. 누르면 그 턴이 속한
+  // 질문의 상세로 들어가고, 흔적에서 그 턴을 짚어 준다.
+  box.onclick = (e) => {
+    const r = box.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const i = Math.min(n - 1, Math.floor(f * n));
+    const t = turnsData[i];
+    if (!t || t.prompt_idx == null) return;
+    focusTurn = i;
+    selectedPrompt = t.prompt_idx;
+    promptLimit = PROMPT_ROWS;
+    renderPrompts(cost);
+  };
+}
+
+// 차트에서 눌러 들어온 턴을 차트에 계속 짚어 둔다. 마우스를 따라다니는 커서와는
+// 별도의 표시여야 한다 — 커서를 쓰면 마우스를 움직이는 순간 짚은 자리를 잃는다.
+function markTurn(i) {
+  const mark = $("#turns-chart").querySelector(".tc-mark");
+  if (!mark) return;
+  if (i == null || !turnsData.length) {
+    mark.hidden = true;
+    return;
+  }
+  const bw = turnsData.length > 1 ? 100 / turnsData.length : 100;
+  mark.hidden = false;
+  mark.style.left = `${(i + 0.5) * bw}%`;
 }
 
 // 질문 줄에 마우스를 올리면 그 질문이 차지한 구간을 차트에 칠해 준다 —
@@ -372,13 +405,18 @@ let promptTotal = 0;
 
 function renderPrompts(cost) {
   // 상세를 보고 있으면 목록 대신 그것만 그린다
-  const picked = selectedPrompt == null ? null : turnGroups.find((g) => g.idx === selectedPrompt);
+  const picked = selectedPrompt == null
+    ? null
+    : (turnGroups.find((g) => g.idx === selectedPrompt) ||
+       allGroups.find((g) => g.idx === selectedPrompt));
   if (picked) {
     renderDetail(picked, cost);
     return;
   }
   selectedPrompt = null;
+  focusTurn = null;
   highlightSpan(null);   // 다시 그리면 hover 해제가 오지 않아 띠가 남는다
+  markTurn(null);
   $("#turns-detail").classList.add("hidden");
   $("#turns-prompts").classList.remove("hidden");
   const by = new Map();
@@ -396,6 +434,7 @@ function renderPrompts(cost) {
     by.set(t.prompt_idx, g);
   });
   const all = [...by.values()].filter((g) => g.prompt);
+  allGroups = all;
   // 막대의 기준은 세션 전체에서 가장 큰 질문이다. 보이는 8개 안에서 재면 "더 보기"를
   // 누르거나 시간순으로 바꿀 때마다 같은 줄의 막대 길이가 달라진다.
   const peak = Math.max(...all.map((g) => g.cost), 0) || 1;
@@ -469,9 +508,14 @@ function renderDetail(g, cost) {
     `<div class="td-trail">${trailOf(g, cost)}</div>` +
     `<div class="td-a-head">답변</div>` +
     `<div class="td-a">${mdToHtml(g.answer || "(답변 없음)")}</div>`;
+  const hit = d.querySelector(".tr-line.hit");
+  if (hit) hit.scrollIntoView({ block: "center" });
+  markTurn(focusTurn);
   $("#turns-back").onclick = () => {
+    focusTurn = null;
     selectedPrompt = null;
     highlightSpan(null);
+    markTurn(null);
     renderPrompts(cost);
   };
   highlightSpan(g);   // 상세를 보는 동안 차트에 그 구간을 붙여 둔다
@@ -512,7 +556,9 @@ function trailOf(g, cost) {
         .map((x) => `<code class="tr-tool">${escapeHtml(x)}</code>`)
         .join(" ");
       if (!what && !tools) return "";
-      return `<div class="tr-line${isCacheMiss(t, i) ? " miss" : ""}">` +
+      const mix = breakdownOf({ idxs: [i] });
+      return `<div class="tr-line${isCacheMiss(t, i) ? " miss" : ""}` +
+        `${i === focusTurn ? " hit" : ""}" title="${turnTime(t.ts)} · ${mix}">` +
         `<span class="tr-cost">${fmtVal(cost[i], true)}</span>` +
         `<span class="tr-what">${what}${what && tools ? " " : ""}${tools}</span></div>`;
     })
