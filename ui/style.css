@@ -16,6 +16,8 @@
   --text-faint:#6d7178;
   --accent:    #8b9bf5;
   --accent-soft: rgba(139, 155, 245, 0.15);
+  /* 강조색 위에 얹는 글자색. 흰색은 대비가 2.6까지 떨어져 읽기 힘들다 (어두운 쪽은 6.7). */
+  --on-accent: #16171a;
   --green:     #87b387;
   --red:       #e05d5d;
   --radius:    10px;
@@ -74,7 +76,7 @@ html, body {
   margin: 0 14px 10px;
   padding: 9px 12px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: none;
   border-radius: var(--radius);
   font-family: var(--font-ui);
@@ -469,7 +471,7 @@ html, body {
 #btn-update {
   padding: 3px 10px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: none;
   border-radius: 7px;
   font-family: var(--font-ui);
@@ -670,7 +672,7 @@ kbd {
 }
 .btn-ghost { background: none; color: var(--text-dim); }
 .btn-ghost:hover { background: var(--bg-hover); color: var(--text); }
-.btn-accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-accent { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .btn-accent:hover { filter: brightness(1.08); }
 
 /* ─── 완료 어텐션 / 재시작 버튼 ─────────────────────────── */

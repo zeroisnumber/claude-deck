@@ -18,17 +18,19 @@ window.addEventListener("unhandledrejection", (e) => {
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+// 배경·커서·선택색은 앱 팔레트를 따른다 (style.css의 --bg 등과 같은 값). ANSI 16색은
+// 에이전트 출력이 기대하는 색이므로 그대로 둔다.
 const TERM_THEME = {
-  background: "#262624",
-  foreground: "#e8e6e3",
-  cursor: "#d97757",
-  cursorAccent: "#262624",
-  selectionBackground: "#4a463f",
-  black: "#33312e", red: "#e05d5d", green: "#87b387", yellow: "#d9a057",
-  blue: "#6a9bcc", magenta: "#b58dae", cyan: "#6aa8a8", white: "#c9c6c0",
-  brightBlack: "#6e6a63", brightRed: "#ef8080", brightGreen: "#a3cba3",
+  background: "#202124",
+  foreground: "#e6e7ea",
+  cursor: "#8b9bf5",
+  cursorAccent: "#202124",
+  selectionBackground: "#3b4050",
+  black: "#2e3035", red: "#e05d5d", green: "#87b387", yellow: "#d9a057",
+  blue: "#6a9bcc", magenta: "#b58dae", cyan: "#6aa8a8", white: "#c7c9cd",
+  brightBlack: "#6d7178", brightRed: "#ef8080", brightGreen: "#a3cba3",
   brightYellow: "#e8b878", brightBlue: "#8cb4dd", brightMagenta: "#cba6c4",
-  brightCyan: "#8cc2c2", brightWhite: "#e8e6e3",
+  brightCyan: "#8cc2c2", brightWhite: "#e6e7ea",
 };
 
 // ---------- 상태 ----------
