@@ -756,6 +756,16 @@ kbd {
 
 /* ─── 세션 핀 / 이름 편집 ─────────────────────────────── */
 .si-pin { flex: none; width: 10px; height: 10px; color: var(--text-dim); }
+.si-dup {
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--bg-active);
+  color: var(--text-faint);
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  flex-shrink: 0;
+}
 .si-fork { flex: none; font-size: 11px; color: #b58dae; }
 .si-rename {
   width: 100%;

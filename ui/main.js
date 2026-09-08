@@ -191,6 +191,21 @@ function sessionTitle(s) {
 }
 
 // 사이드바 한 줄. child=true면 원본 아래 들여쓴 백그라운드 세션이다.
+// 컨텍스트가 차서 이어 붙거나 포크로 갈라진 세션은 앞부분이 통째로 같아서 제목도 같다
+// (실측: 한 폴더에 같은 줄 3개). 제목이 겹칠 때만 세션 id 앞 4자리를 덧붙인다 —
+// 안 겹치는 줄에는 아무것도 붙지 않는다.
+let dupTitles = new Set();
+
+function markDuplicateTitles(list) {
+  const seen = new Map();
+  for (const s of list) {
+    const k = sessionTitle(s) || "";
+    if (!k) continue;
+    seen.set(k, (seen.get(k) || 0) + 1);
+  }
+  dupTitles = new Set([...seen].filter(([, n]) => n > 1).map(([k]) => k));
+}
+
 function sessionRow(s, child) {
   const el = document.createElement("div");
   el.className = "session-item" + (s.session_id === activeId ? " active" : "") + (child ? " child" : "");
@@ -226,6 +241,13 @@ function sessionRow(s, child) {
       ${s.bg_detail ? `<div class="si-bg-detail"></div>` : ""}
     </div>`;
   el.querySelector(".si-title-text").textContent = title;
+  if (dupTitles.has(sessionTitle(s))) {
+    const tag = document.createElement("span");
+    tag.className = "si-dup";
+    tag.textContent = s.session_id.slice(0, 4);
+    tag.title = "같은 이름이 여럿이라 세션 id를 함께 표시합니다";
+    el.querySelector(".si-title").appendChild(tag);
+  }
   el.querySelector(".si-proj").textContent = basename(s.cwd);
   if (s.bg_detail) el.querySelector(".si-bg-detail").textContent = s.bg_detail;
 
@@ -291,6 +313,8 @@ function renderSidebar() {
     const pb = pins.includes(b.session_id) ? 1 : 0;
     return pb - pa || b.mtime - a.mtime;
   });
+
+  markDuplicateTitles(sorted);
 
   // 백그라운드 세션은 원본 아래로 모은다 (원본이 목록에 있을 때만)
   const shown = new Set(sorted.map((s) => s.session_id));

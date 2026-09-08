@@ -224,6 +224,14 @@ pub(crate) fn extract_text(content: &serde_json::Value) -> String {
     }
 }
 
+/// 컨텍스트가 찼거나 포크로 이어 붙은 세션의 첫 메시지는 사용자가 친 말이 아니라
+/// "이전 대화에서 이어집니다" 안내문이다. 이걸 제목으로 쓰면 이어 붙은 세션이 전부
+/// 같은 이름으로 보인다(실측: 한 폴더에 같은 줄 3개). 미리보기에도 통째로 실리므로
+/// 제목·미리보기 양쪽에서 뺀다.
+pub(crate) fn is_continuation_notice(txt: &str) -> bool {
+    txt.starts_with("This session is being continued from a previous conversation")
+}
+
 pub(crate) fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
     // 큰 세션 파일(장기 세션)은 codex와 동일하게 head+tail만 읽어 폴링 부하를 낮춘다.
     // first_prompt는 head, last_text/캐시 TTL/summary는 tail에서 나오므로 손실 없음
@@ -279,6 +287,7 @@ pub(crate) fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
                     && !txt.starts_with('<')
                     && !txt.starts_with("Caveat:")
                     && !txt.starts_with("[Request interrupted")
+                    && !is_continuation_notice(txt)
                 {
                     if meta.first_prompt.is_none() {
                         meta.first_prompt = Some(txt.chars().take(120).collect());
@@ -646,6 +655,16 @@ mod tests {
             let v = list_sessions();
             eprintln!("round {round}: {} sessions in {:?}", v.len(), t0.elapsed());
         }
+    }
+
+    /// 이어 붙은 세션들이 안내문 때문에 같은 이름으로 보이던 문제.
+    #[test]
+    fn a_continuation_notice_is_not_a_title() {
+        assert!(is_continuation_notice(
+            "This session is being continued from a previous conversation that ran out of context."
+        ));
+        assert!(!is_continuation_notice("This session works fine"));
+        assert!(!is_continuation_notice("세션이 같은게 3개 있는데 뭐야"));
     }
 
     #[test]
