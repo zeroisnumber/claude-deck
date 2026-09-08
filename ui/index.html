@@ -178,7 +178,10 @@
     <div id="modal" class="dash turns">
       <div class="dash-head">
         <div class="modal-title">토큰 상세</div>
-        <button id="turns-close" class="btn-ghost">닫기</button>
+        <div class="dash-head-actions">
+          <button id="turns-unit" class="btn-ghost hidden">토큰으로</button>
+          <button id="turns-close" class="btn-ghost">닫기</button>
+        </div>
       </div>
       <div id="turns-sub" class="modal-sub"></div>
       <div id="turns-tiles"></div>
@@ -188,7 +191,7 @@
       <div id="turns-prompts" class="dash-table"></div>
       <div id="turns-detail" class="hidden"></div>
       <div class="dash-note">
-        <span>비용은 API 단가 환산값입니다 — 구독 요금과는 별개</span>
+        <span id="turns-note">비용은 API 단가 환산값입니다 — 구독 요금과는 별개</span>
       </div>
     </div>
   </div>

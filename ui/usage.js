@@ -177,8 +177,14 @@ let promptLimit = 0;
 // 코덱스는 구독제라 토큰 단가가 없다. 금액을 지어내는 대신 같은 자리에 토큰을 쓴다 —
 // 어느 질문이 비쌌나를 묻는 화면이므로 단위만 바뀌면 나머지 구성은 그대로 쓸 수 있다.
 let turnsPriced = true;
+// 금액으로 볼지 토큰으로 볼지. 클로드는 둘 다 되지만 코덱스는 단가가 없어 토큰뿐이다.
+let turnsCanPrice = true;
 function turnValue(t) {
-  return turnsPriced ? turnCost(t) : t.input + t.cache_read + t.output;
+  // 토큰으로 볼 때는 캐시로 읽은 양을 빼고 "이번에 새로 처리한 것"만 센다. 캐시 읽기는
+  // 긴 세션에서 턴마다 비슷하게 크기 때문에, 넣으면 막대가 전부 같은 높이가 되고
+  // 캐시가 끊긴 턴이 오히려 움푹 들어간다(금액으로 볼 때와 그림이 뒤집힌다).
+  // 누적 캐시 읽기는 타일에 따로 있다.
+  return turnsPriced ? turnCost(t) : t.input + t.output;
 }
 function fmtVal(v, fine) {
   if (turnsPriced) return `$${v.toFixed(fine ? 3 : 2)}`;
@@ -212,7 +218,8 @@ function firstLine(s, n) {
 
 async function openTurns(s) {
   hidePreview();
-  turnsPriced = (s.agent || "claude") === "claude";
+  turnsCanPrice = (s.agent || "claude") === "claude";
+  turnsPriced = turnsCanPrice && localStorage.getItem("turnsUnit") !== "tokens";
   turnsTitle = sessionTitle(s) || s.session_id.slice(0, 8);
   turnsData = [];
   turnGroups = [];
@@ -237,6 +244,16 @@ async function openTurns(s) {
 
 function renderTurns(s) {
   const ts = turnsData;
+  const unit = $("#turns-unit");
+  unit.classList.toggle("hidden", !turnsCanPrice);
+  unit.textContent = turnsPriced ? "토큰으로" : "금액으로";
+  unit.onclick = () => {
+    turnsPriced = !turnsPriced;
+    localStorage.setItem("turnsUnit", turnsPriced ? "cost" : "tokens");
+    selectedPrompt = null;   // 단위가 바뀌면 순위도 바뀐다 — 목록부터 다시 본다
+    promptLimit = PROMPT_ROWS;
+    renderTurns(s);
+  };
   if (!ts.length) {
     $("#turns-sub").textContent = `${turnsTitle} — 토큰 기록이 있는 응답이 없습니다`;
     return;
@@ -255,13 +272,20 @@ function renderTurns(s) {
     `${turnsTitle} · ${basename(s.cwd)} · ${modelName(ts[ts.length - 1].model) || ts[ts.length - 1].model}`;
 
   const tile = (v, l, cls) => `<div class="tile"><div class="tile-v ${cls || ""}">${v}</div><div class="tile-l">${l}</div></div>`;
-  $("#turns-tiles").innerHTML =
-    tile(fmtVal(total), turnsPriced ? "누적 비용" : "누적 토큰") +
-    tile(turnsPriced ? `$${saved.toFixed(2)}` : fmtTok(readTot), turnsPriced ? "캐시가 아낀 돈" : "캐시로 읽은 토큰") +
-    tile(`${hit}%`, "캐시 적중률") +
-    (turnsPriced
-      ? tile(String(misses.length), "캐시 끊김", misses.length ? "hot" : "")
-      : tile(String(ts.length), "응답 수"));
+  const outTot = ts.reduce((a, t) => a + t.output, 0);
+  $("#turns-tiles").innerHTML = turnsPriced
+    ? tile(fmtVal(total), "누적 비용") +
+      tile(`$${saved.toFixed(2)}`, "캐시가 아낀 돈") +
+      tile(`${hit}%`, "캐시 적중률") +
+      tile(String(misses.length), "캐시 끊김", misses.length ? "hot" : "")
+    : tile(fmtTok(inTot), "입력 토큰") +
+      tile(fmtTok(outTot), "출력 토큰") +
+      tile(fmtTok(readTot), "캐시로 읽은 토큰") +
+      tile(`${hit}%`, "캐시 적중률");
+
+  $("#turns-note").textContent = turnsPriced
+    ? "비용은 API 단가 환산값입니다 — 구독 요금과는 별개"
+    : "토큰은 새로 처리한 입력과 생성한 출력입니다 — 캐시로 읽은 양은 위에 따로 있습니다";
 
   renderCurve(cost, total, misses);
   renderPrompts(cost);

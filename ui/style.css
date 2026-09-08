@@ -898,6 +898,8 @@ kbd {
 /* #modal이 id 선택자라 .dash의 width를 이긴다 — 함께 써야 적용된다 */
 #modal.dash { width: 640px; max-height: 84vh; overflow-y: auto; }
 .dash-head { display: flex; align-items: center; justify-content: space-between; }
+.dash-head-actions { display: flex; gap: 6px; align-items: center; }
+.dash-head-actions .hidden { display: none; }
 #dash-period { display: flex; gap: 4px; }
 .dp {
   padding: 4px 12px;
