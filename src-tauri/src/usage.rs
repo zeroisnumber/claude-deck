@@ -232,13 +232,20 @@ pub(crate) fn codex_turns_from_text(text: &str) -> Vec<TurnRow> {
                         t["cached_input_tokens"].as_u64().unwrap_or(0),
                         t["output_tokens"].as_u64().unwrap_or(0),
                     );
-                    if i < p_in || c < p_cached || o < p_out {
-                        p_in = 0;
-                        p_cached = 0;
-                        p_out = 0;
-                    }
-                    let (d_in, d_c, d_out) =
-                        (i - p_in.min(i), c - p_cached.min(c), o - p_out.min(o));
+                    // 압축·롤백으로 누적값이 되감기면 차분을 낼 수 없다. 0부터 다시 세면
+                    // 그 시점까지를 한 번 더 더하게 되므로, 그 이벤트만은 last_token_usage
+                    // (그 턴 하나의 사용량)를 쓴다.
+                    let rewound = i < p_in || c < p_cached || o < p_out;
+                    let (d_in, d_c, d_out) = if rewound {
+                        let l = &payload["info"]["last_token_usage"];
+                        (
+                            l["input_tokens"].as_u64().unwrap_or(0),
+                            l["cached_input_tokens"].as_u64().unwrap_or(0),
+                            l["output_tokens"].as_u64().unwrap_or(0),
+                        )
+                    } else {
+                        (i - p_in, c - p_cached, o - p_out)
+                    };
                     p_in = i;
                     p_cached = c;
                     p_out = o;
@@ -381,12 +388,20 @@ pub(crate) fn codex_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
                     t["output_tokens"].as_u64().unwrap_or(0),
                 );
                 // 되감김(압축·롤백)이면 그 시점부터 다시 센다
-                if i < p_in || c < p_cached || o < p_out {
-                    p_in = 0;
-                    p_cached = 0;
-                    p_out = 0;
-                }
-                let (d_in, d_c, d_out) = (i - p_in.min(i), c - p_cached.min(c), o - p_out.min(o));
+                // 압축·롤백으로 누적값이 되감기면 차분을 낼 수 없다. 0부터 다시 세면
+                // 그 시점까지를 한 번 더 더하게 되므로, 그 이벤트만은 last_token_usage
+                // (그 턴 하나의 사용량)를 쓴다.
+                let rewound = i < p_in || c < p_cached || o < p_out;
+                let (d_in, d_c, d_out) = if rewound {
+                    let l = &payload["info"]["last_token_usage"];
+                    (
+                        l["input_tokens"].as_u64().unwrap_or(0),
+                        l["cached_input_tokens"].as_u64().unwrap_or(0),
+                        l["output_tokens"].as_u64().unwrap_or(0),
+                    )
+                } else {
+                    (i - p_in, c - p_cached, o - p_out)
+                };
                 p_in = i;
                 p_cached = c;
                 p_out = o;

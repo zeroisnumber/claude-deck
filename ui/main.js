@@ -1554,6 +1554,7 @@ function firstLine(s, n) {
 
 async function openTurns(s) {
   hidePreview();
+  turnsPriced = (s.agent || "claude") === "claude";
   turnsTitle = sessionTitle(s) || s.session_id.slice(0, 8);
   turnsData = [];
   turnGroups = [];
@@ -1580,14 +1581,15 @@ function renderTurns(s) {
     $("#turns-sub").textContent = `${turnsTitle} — 토큰 기록이 있는 응답이 없습니다`;
     return;
   }
-  turnsPriced = /^claude-/.test(ts[ts.length - 1].model || "");
   const cost = ts.map(turnValue);
   const total = cost.reduce((a, b) => a + b, 0);
   const misses = ts.map((t, i) => (isCacheMiss(t, i) ? i : -1)).filter((i) => i >= 0);
   const readTot = ts.reduce((a, t) => a + t.cache_read, 0);
   const writeTot = ts.reduce((a, t) => a + t.cache_5m + t.cache_1h, 0);
   const saved = ts.reduce((a, t) => a + turnSaving(t), 0);
-  const hit = readTot + writeTot > 0 ? Math.round((readTot / (readTot + writeTot)) * 100) : 0;
+  const inTot = ts.reduce((a, t) => a + t.input, 0);
+  const denom = readTot + writeTot + inTot;
+  const hit = denom > 0 ? Math.round((readTot / denom) * 100) : 0;
 
   $("#turns-sub").textContent =
     `${turnsTitle} · ${basename(s.cwd)} · ${modelName(ts[ts.length - 1].model) || ts[ts.length - 1].model}`;
@@ -1597,7 +1599,9 @@ function renderTurns(s) {
     tile(fmtVal(total), turnsPriced ? "누적 비용" : "누적 토큰") +
     tile(turnsPriced ? `$${saved.toFixed(2)}` : fmtTok(readTot), turnsPriced ? "캐시가 아낀 돈" : "캐시로 읽은 토큰") +
     tile(`${hit}%`, "캐시 적중률") +
-    tile(String(misses.length), "캐시 끊김", misses.length ? "hot" : "");
+    (turnsPriced
+      ? tile(String(misses.length), "캐시 끊김", misses.length ? "hot" : "")
+      : tile(String(ts.length), "응답 수"));
 
   renderCurve(cost, total, misses);
   renderPrompts(cost);
