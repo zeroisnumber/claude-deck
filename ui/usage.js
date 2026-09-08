@@ -43,8 +43,9 @@ function fmtTok(n) {
 function syncCtxGauges() {
   let changed = false;
   for (const [id, t] of terms) {
-    if (id.startsWith("new-")) continue;
-    const meta = sessions.find((s) => s.session_id === id);
+    const sid = t.sessionId || id;
+    if (sid.startsWith("new-")) continue;
+    const meta = sessions.find((s) => s.session_id === sid);
     if (!meta || !meta.ctx_tokens) continue;
     const win = meta.ctx_window || ctxWindowFor(meta.model || "");
     const pct = Math.min(100, Math.round((meta.ctx_tokens / win) * 100));

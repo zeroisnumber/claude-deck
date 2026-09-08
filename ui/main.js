@@ -113,16 +113,15 @@ function timeAgo(mtime) {
 // ---------- 사이드바 ----------
 // 폴링이 겹치면 느린 디스크에서 스캔이 쌓여 더 느려진다(학습 중 실측: 한 번에 34초).
 // 진행 중이면 그냥 건너뛴다.
-let refreshing = false;
+let refreshing = null;
 
 async function refreshSessions() {
-  if (refreshing) return;
-  refreshing = true;
-  try {
-    await refreshSessionsInner();
-  } finally {
-    refreshing = false;
-  }
+  // 겹치면 새로 훑지 않고 진행 중인 것에 붙는다. 그냥 무시하면 await한 쪽이
+  // "갱신됐겠지" 하고 낡은 목록으로 판단한다. 붙는 쪽은 그 갱신이 자기 호출보다
+  // 먼저 읽은 데이터를 받을 수 있다 — 방금 만든 세션은 다음 폴링이나 클릭 시점에 잡힌다.
+  if (refreshing) return refreshing;
+  refreshing = refreshSessionsInner().finally(() => { refreshing = null; });
+  return refreshing;
 }
 
 async function refreshSessionsInner() {
@@ -132,6 +131,7 @@ async function refreshSessionsInner() {
   if (document.hidden && restored) return;
   const t0 = performance.now();
   sessions = await invoke("list_sessions");
+  adoptNewTabs();
   const t1 = performance.now();
   if (syncCtxGauges()) renderTabs();
   renderSidebar();
@@ -195,7 +195,7 @@ function sessionRow(s, child) {
   const el = document.createElement("div");
   el.className = "session-item" + (s.session_id === activeId ? " active" : "") + (child ? " child" : "");
   el.dataset.id = s.session_id;
-  const t = terms.get(s.session_id);
+  const [, t] = tabFor(s.session_id);
   const title = sessionTitle(s) || "(내용 없음)";
   // 포크된 세션인데 이름에 표식이 없으면 붙여 준다 (원본이 목록에 없어 들여쓰기가 안 될 때도 보이게)
   const fork = s.parent_id && !title.includes("⑂") ? `<span class="si-fork" title="포크된 세션">⑂</span>` : "";
@@ -274,7 +274,7 @@ function renderSidebar() {
 
   const visible = sessions.filter((s) => {
     if (agentFilter !== "all" && s.agent !== agentFilter) return false;
-    if (statusKey && !STATUS_FILTERS[statusKey](s, terms.get(s.session_id))) return false;
+    if (statusKey && !STATUS_FILTERS[statusKey](s, tabFor(s.session_id)[1])) return false;
     if (!q) return true;
     // 제목·프로젝트에 더해 백그라운드 상태 문구도 검색 대상에 넣는다
     const hay = [
@@ -372,7 +372,8 @@ function showCtxMenu(e, s, itemEl) {
           `이 세션 기록을 영구 삭제할까요?\n\n${sessionTitle(s) || s.session_id}`,
           { title: "세션 삭제", kind: "warning" });
         if (!ok) return;
-        if (terms.has(s.session_id)) await closeTab(s.session_id);
+        const [openTab] = tabFor(s.session_id);
+        if (openTab) await closeTab(openTab);
         await invoke("delete_session", { file: s.file });
         refreshSessions();
       } catch { /* 무시 */ }
@@ -804,7 +805,11 @@ function attachCommand(short) {
 
 async function openSession(meta, focus = true, opts = {}) {
   const id = meta.session_id;
-  if (terms.has(id)) return focus && activate(id);
+  // 방금 시작한 세션이 이미 새 탭으로 떠 있을 수 있다. 폴링이 그 세션을 알기 전이어도
+  // 넘겨받은 meta로 짝을 맞춘다 — 안 맞추면 같은 세션이 두 번 뜬다(같은 기록 파일에
+  // 두 프로세스가 붙는다).
+  const openId = adoptFor(meta);
+  if (openId) return focus && activate(openId);
 
   const name = (sessionTitle(meta) || id.slice(0, 8)).slice(0, 40);
   const title = basename(meta.cwd) + " · " + name.slice(0, 24);
@@ -842,6 +847,13 @@ async function spawnInto(id, t, failLabel) {
   }
 }
 
+function agentOf(prof) {
+  const cmd = (prof && prof.cmd) || "";
+  if (/(^|\s)codex(\s|$)/.test(cmd)) return "codex";
+  if (/(^|\s)gemini(\s|$)/.test(cmd)) return "gemini";
+  return "claude";
+}
+
 async function openNewSession(cwd, prof) {
   const p = prof || currentProfile();
   const id = "new-" + Date.now();
@@ -849,6 +861,11 @@ async function openNewSession(cwd, prof) {
   entry.name = "새 세션";
   entry.proj = basename(cwd);
   entry.profile = p;
+  entry.agent = agentOf(p);
+  entry.startedAt = Date.now() / 1000;
+  // 짝을 맞출 때 "탭이 뜬 뒤에 새로 생긴 세션"만 후보로 둔다. mtime만 보면 다른 데서
+  // 쓰고 있던 옛 세션도 조건을 통과해 엉뚱한 탭에 붙는다.
+  entry.knownAtStart = new Set(sessions.map((s) => s.session_id));
   entry.spawnCommand = composeCommand(null, p);
   activate(id);
   await spawnInto(id, entry, "실행 실패");
@@ -867,8 +884,69 @@ async function restartTab(id) {
 }
 
 // ---------- 탭 복원 ----------
+// 새 세션 탭은 임시 id(new-...)로 산다. 에이전트가 기록 파일을 만들면 그때 진짜 세션
+// id가 생기는데, 그걸 붙여두지 않으면 같은 세션이 사이드바에서 "안 열린 것"으로 보여
+// 누르는 순간 같은 세션이 하나 더 뜬다(같은 기록 파일에 두 프로세스가 붙는다).
+// 탭의 열쇠는 바꾸지 않는다 — PTY 이벤트가 그 id로 오기 때문이다.
+function adoptNewTabs() {
+  for (const meta of sessions) {
+    adoptFor(meta);
+  }
+}
+
+/// 이 세션이 방금 띄운 새 탭의 것이면 그 탭에 붙이고 탭 id를 돌려준다.
+/// 짝은 "같은 폴더 · 같은 에이전트 · 세션보다 먼저 뜬 · 아직 아무 세션도 안 쥔 탭" 중
+/// 가장 먼저 뜬 것. 목록(sessions)이 아니라 넘겨받은 세션 하나만 보므로, 폴링이 아직
+/// 그 세션을 모르는 순간에 사이드바를 눌러도 짝이 맞는다.
+function adoptFor(meta) {
+  const [openId] = tabFor(meta.session_id);
+  if (openId) return openId;
+  const claimed = new Set();
+  for (const t of terms.values()) if (t.sessionId) claimed.add(t.sessionId);
+  if (claimed.has(meta.session_id)) return null;
+  let pick = null;
+  for (const id of tabOrder) {
+    if (!id.startsWith("new-")) continue;
+    const t = terms.get(id);
+    if (!t || t.sessionId || t.exited) continue;
+    if ((t.agent || "claude") !== (meta.agent || "claude")) continue;
+    if (!samePath(meta.cwd, t.cwd)) continue;
+    if (meta.mtime < (t.startedAt || 0) - 5) continue;
+    if (t.knownAtStart && t.knownAtStart.has(meta.session_id)) continue;
+    pick = id;
+    break;
+  }
+  if (!pick) return null;
+  const t = terms.get(pick);
+  t.sessionId = meta.session_id;
+  t.file = meta.file;
+  const name = (sessionTitle(meta) || meta.session_id.slice(0, 8)).slice(0, 40);
+  t.name = name;
+  t.title = basename(meta.cwd) + " · " + name.slice(0, 24);
+  saveOpenTabs();
+  renderTabs();
+  return pick;
+}
+
+function samePath(a, b) {
+  const norm = (x) => String(x || "").replace(/[\\/]+/g, "\\").replace(/\\$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/// 세션 id로 열린 탭 찾기 — 새 세션 탭은 열쇠가 임시 id라 Map 조회만으로는 못 찾는다.
+function tabFor(sessionId) {
+  const direct = terms.get(sessionId);
+  if (direct) return [sessionId, direct];
+  for (const [id, t] of terms) {
+    if (t.sessionId === sessionId) return [id, t];
+  }
+  return [null, null];
+}
+
 function saveOpenTabs() {
-  const tabs = tabOrder.filter((id) => !id.startsWith("new-"));
+  const tabs = tabOrder
+    .map((id) => (terms.get(id) || {}).sessionId || id)
+    .filter((id) => !id.startsWith("new-"));
   localStorage.setItem("openTabs", JSON.stringify(tabs));
 }
 
