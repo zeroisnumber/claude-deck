@@ -425,7 +425,8 @@ function renderPrompts(cost) {
       `<td class="tp-a" title="${escapeHtml(g.answer)}">${escapeHtml(firstLine(mdPlain(g.answer), 60) || "—")}</td>` +
       `<td class="tp-time">${g.ts ? turnTime(g.ts) : "—"}</td>` +
       `<td class="tp-n">${g.idxs.length}</td>` +
-      `<td class="tp-val"><i style="width:${((g.cost / peak) * 100).toFixed(1)}%"></i>` +
+      `<td class="tp-val" title="${breakdownOf(g)}">` +
+      `<i style="width:${((g.cost / peak) * 100).toFixed(1)}%"></i>` +
       `<span>${fmtVal(g.cost)}</span></td></tr>`)
     .join("");
   const rest = promptTotal - turnGroups.length;
@@ -464,6 +465,7 @@ function renderDetail(g, cost) {
     `${g.miss ? " · 캐시 끊김 " + g.miss + "회" : ""}</span>`;
   d.innerHTML =
     `<div class="td-q">${mdInline(g.prompt)}</div>` +
+    `<div class="td-mix">${breakdownOf(g)}</div>` +
     `<div class="td-trail">${trailOf(g, cost)}</div>` +
     `<div class="td-a-head">답변</div>` +
     `<div class="td-a">${mdToHtml(g.answer || "(답변 없음)")}</div>`;
@@ -473,6 +475,20 @@ function renderDetail(g, cost) {
     renderPrompts(cost);
   };
   highlightSpan(g);   // 상세를 보는 동안 차트에 그 구간을 붙여 둔다
+}
+
+// 입력·출력·캐시 구성. 목록의 모든 줄에 적으면 읽을 게 너무 많아지므로,
+// 값 칸의 툴팁과 상세 화면에서만 쓴다 — 궁금할 때만 눈에 들어오게.
+function breakdownOf(g) {
+  let inp = 0, out = 0, read = 0, write = 0;
+  for (const i of g.idxs) {
+    const t = turnsData[i];
+    inp += t.input; out += t.output; read += t.cache_read; write += t.cache_5m + t.cache_1h;
+  }
+  // input_tokens는 "캐시에 없어서 새로 읽힌 입력"이다. 긴 세션에서는 26처럼 작게
+  // 나오는데, 그냥 "입력"이라고 쓰면 값이 깨진 것처럼 보인다.
+  const parts = [["새 입력", inp], ["출력", out], ["캐시 읽기", read], ["캐시 쓰기", write]];
+  return parts.filter(([, v]) => v > 0).map(([k, v]) => `${k} ${fmtTok(v)}`).join(" · ");
 }
 
 // 그 질문에 얼마나 매달렸나. 1분 미만은 표시할 값이 아니다.

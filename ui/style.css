@@ -1159,6 +1159,13 @@ kbd {
   line-height: 1.5;
 }
 .td-q { padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+/* 질문 아래 한 줄로만 — 무엇으로 이루어진 값인지 궁금할 때 눈에 들어오면 된다 */
+.td-mix {
+  margin-top: 5px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
 .td-a-head {
   margin: 12px 0 4px;
   padding-top: 8px;
