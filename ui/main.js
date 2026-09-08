@@ -805,27 +805,47 @@ function attachCommand(short) {
 
 async function openSession(meta, focus = true, opts = {}) {
   const id = meta.session_id;
-  // 방금 시작한 세션이 이미 새 탭으로 떠 있을 수 있다. 폴링이 그 세션을 알기 전이어도
-  // 넘겨받은 meta로 짝을 맞춘다 — 안 맞추면 같은 세션이 두 번 뜬다(같은 기록 파일에
-  // 두 프로세스가 붙는다).
-  const openId = adoptFor(meta);
-  if (openId) return focus && activate(openId);
+  // 복사본은 원본과 다른 세션이 된다. 원본이 이미 열려 있어도 새 탭이어야 하고,
+  // 원본 id로 탭을 만들면 안 된다 — 그러면 재시작·복원이 원본을 건드린다.
+  const forking = !!opts.fork;
+  if (!forking) {
+    // 방금 시작한 세션이 이미 새 탭으로 떠 있을 수 있다. 폴링이 그 세션을 알기 전이어도
+    // 넘겨받은 meta로 짝을 맞춘다 — 안 맞추면 같은 세션이 두 번 뜬다(같은 기록 파일에
+    // 두 프로세스가 붙는다).
+    const openId = adoptFor(meta);
+    if (openId) return focus && activate(openId);
+  }
 
   const name = (sessionTitle(meta) || id.slice(0, 8)).slice(0, 40);
-  const title = basename(meta.cwd) + " · " + name.slice(0, 24);
-  const entry = makeTerm(id, title, meta.cwd);
-  entry.name = name;
+  const shown = forking ? `${name} (복사본)`.slice(0, 40) : name;
+  const title = basename(meta.cwd) + " · " + shown.slice(0, 24);
+  // 복사본은 아직 자기 세션 id가 없다. 새 세션과 같은 임시 id로 띄우고, 자기 기록
+  // 파일이 생기면 adoptFor가 붙여 준다.
+  const tabId = forking ? "new-" + Date.now() : id;
+  const entry = makeTerm(tabId, title, meta.cwd);
+  entry.name = shown;
   entry.proj = basename(meta.cwd);
   const spec = commandFor(meta);
   entry.profile = spec.profile;
-  const attach = !opts.fork && meta.agent === "claude" && meta.bg_running && meta.bg_short;
+  if (forking) {
+    entry.agent = meta.agent || "claude";
+    entry.startedAt = Date.now() / 1000;
+    entry.knownAtStart = new Set(sessions.map((x) => x.session_id));
+    // 복사본의 기록 파일은 원본을 그대로 옮겨 적고 시작한다 — 첫 질문이 원본과 같다.
+    // 같은 폴더에서 새 세션 탭과 복사본 탭이 함께 떠 있을 때 둘을 가르는 근거다.
+    entry.forkOf = { id, firstPrompt: meta.first_prompt || "" };
+  }
+  const attach = !forking && meta.agent === "claude" && meta.bg_running && meta.bg_short;
   entry.spawnCommand = attach
     ? attachCommand(meta.bg_short)
-    : opts.fork ? `${spec.cmd} --fork-session` : spec.cmd;
-  entry.file = meta.file;
-  if (focus) activate(id);
+    // --fork-session은 --resume과 짝이다. 프로필에서 재개를 꺼 놨으면 그대로는
+    // 아무것도 갈라져 나오지 않으므로 여기서는 강제로 붙인다.
+    : forking ? `${composeCommand(id, spec.profile, true)} --fork-session`
+    : spec.cmd;
+  entry.file = forking ? null : meta.file;
+  if (focus) activate(tabId);
   else renderTabs();
-  await spawnInto(id, entry, "실행 실패");
+  await spawnInto(tabId, entry, "실행 실패");
   saveOpenTabs();
 }
 
@@ -904,7 +924,9 @@ function adoptFor(meta) {
   const claimed = new Set();
   for (const t of terms.values()) if (t.sessionId) claimed.add(t.sessionId);
   if (claimed.has(meta.session_id)) return null;
-  let pick = null;
+  // 후보가 여럿일 수 있다: 같은 폴더에서 새 세션 하나와 복사본 하나를 잇달아 띄우면
+  // 둘 다 임시 id에 같은 에이전트·같은 폴더다. 먼저 뜬 탭에 무조건 주면 서로 바뀐다.
+  const cand = [];
   for (const id of tabOrder) {
     if (!id.startsWith("new-")) continue;
     const t = terms.get(id);
@@ -913,9 +935,20 @@ function adoptFor(meta) {
     if (!samePath(meta.cwd, t.cwd)) continue;
     if (meta.mtime < (t.startedAt || 0) - 5) continue;
     if (t.knownAtStart && t.knownAtStart.has(meta.session_id)) continue;
-    pick = id;
-    break;
+    cand.push([id, t]);
   }
+  if (!cand.length) return null;
+  const copiedFrom = (t) =>
+    t.forkOf && t.forkOf.firstPrompt && t.forkOf.firstPrompt === (meta.first_prompt || "");
+  // 1) 원본과 첫 질문이 같으면 그 원본을 복사한 탭의 것이다
+  let pick = (cand.find(([, t]) => copiedFrom(t)) || [])[0];
+  // 2) 아니면 복사본이 아닌 탭에 준다 — 갓 태어난 세션은 복사본 자리를 차지하면 안 된다
+  if (!pick) pick = (cand.find(([, t]) => !t.forkOf) || [])[0];
+  // 3) 원본에 첫 질문이 없어 비교할 수 없는 복사본 탭에는 붙여 준다 — 근거가 없다고
+  //    영영 임시 id로 두면 재시작·복원이 안 되는 탭이 남는다.
+  if (!pick) pick = (cand.find(([, t]) => t.forkOf && !t.forkOf.firstPrompt) || [])[0];
+  // 4) 첫 질문이 다른 복사본 탭만 남았으면 붙이지 않는다. 그 복사본의 기록은 아직
+  //    안 생겼을 뿐이고, 잘못 붙이면 재시작이 남의 세션을 재개한다.
   if (!pick) return null;
   const t = terms.get(pick);
   t.sessionId = meta.session_id;
