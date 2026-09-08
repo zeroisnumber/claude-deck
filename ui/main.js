@@ -18,19 +18,31 @@ window.addEventListener("unhandledrejection", (e) => {
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
-// 배경·커서·선택색은 앱 팔레트를 따른다 (style.css의 --bg 등과 같은 값). ANSI 16색은
-// 에이전트 출력이 기대하는 색이므로 그대로 둔다.
+// 배경·전경·커서·선택색은 style.css의 팔레트에서 읽는다. 값을 여기에 베껴 두면
+// 팔레트를 바꿀 때 한쪽만 바뀌어 터미널만 옛 색으로 남는다 (실제로 그렇게 됐었다).
+// ANSI 16색은 에이전트 출력이 기대하는 색이라 그대로 둔다.
+function cssVar(name, fallback) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch {
+    return fallback;
+  }
+}
 const TERM_THEME = {
-  background: "#202124",
-  foreground: "#e6e7ea",
-  cursor: "#8b9bf5",
-  cursorAccent: "#202124",
-  selectionBackground: "#3b4050",
-  black: "#2e3035", red: "#e05d5d", green: "#87b387", yellow: "#d9a057",
+  background: cssVar("--bg", "#202124"),
+  foreground: cssVar("--text", "#e6e7ea"),
+  cursor: cssVar("--accent", "#8b9bf5"),
+  cursorAccent: cssVar("--bg", "#202124"),
+  selectionBackground: cssVar("--term-selection", "#3b4050"),
+  black: cssVar("--bg-active", "#33363b"),
+  red: "#e05d5d", green: "#87b387", yellow: "#d9a057",
   blue: "#6a9bcc", magenta: "#b58dae", cyan: "#6aa8a8", white: "#c7c9cd",
-  brightBlack: "#6d7178", brightRed: "#ef8080", brightGreen: "#a3cba3",
+  brightBlack: cssVar("--text-faint", "#6d7178"),
+  brightRed: "#ef8080", brightGreen: "#a3cba3",
   brightYellow: "#e8b878", brightBlue: "#8cb4dd", brightMagenta: "#cba6c4",
-  brightCyan: "#8cc2c2", brightWhite: "#e6e7ea",
+  brightCyan: "#8cc2c2",
+  brightWhite: cssVar("--text", "#e6e7ea"),
 };
 
 // ---------- 상태 ----------
