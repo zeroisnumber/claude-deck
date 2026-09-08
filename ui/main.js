@@ -11,6 +11,15 @@ const reportFatal = (what) => {
 window.addEventListener("error", (e) => {
   reportFatal(`${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`);
 });
+// 결과를 기다리지 않고 띄우는 비동기 호출. 실패하면 어디서 났는지와 함께 남긴다.
+// 이걸 안 붙이면 창구가 "unhandled rejection"뿐이라 호출 지점을 알 수 없다.
+function detach(label, p) {
+  if (p && typeof p.catch === "function") {
+    p.catch((err) => reportFatal(`${label}: ${err && err.stack ? err.stack : err}`));
+  }
+  return p;
+}
+
 window.addEventListener("unhandledrejection", (e) => {
   reportFatal(`unhandled rejection: ${e.reason && e.reason.stack ? e.reason.stack : e.reason}`);
 });
@@ -220,7 +229,7 @@ function sessionRow(s, child) {
   el.querySelector(".si-proj").textContent = basename(s.cwd);
   if (s.bg_detail) el.querySelector(".si-bg-detail").textContent = s.bg_detail;
 
-  el.onclick = () => openSession(s);
+  el.onclick = () => detach("openSession", openSession(s));
   el.oncontextmenu = (e) => { e.preventDefault(); showCtxMenu(e, s, el); };
   el.onmouseenter = () => schedulePreview(el, s);
   el.onmouseleave = hidePreview;
@@ -232,9 +241,9 @@ function sessionRow(s, child) {
 function bgMenuItems(s) {
   const items = [];
   const parent = s.parent_id ? sessions.find((x) => x.session_id === s.parent_id) : null;
-  if (parent) items.push(["↖ 원본 세션 열기", () => openSession(parent)]);
+  if (parent) items.push(["↖ 원본 세션 열기", () => detach("openSession:parent", openSession(parent))]);
   // 복사본은 아무 claude 세션에서나 갈라져 나올 수 있다 (codex/gemini는 --fork-session이 없다)
-  if (s.agent === "claude") items.push(["⑂ 복사본으로 열기", () => openSession(s, true, { fork: true })]);
+  if (s.agent === "claude") items.push(["⑂ 복사본으로 열기", () => detach("openSession:fork", openSession(s, true, { fork: true }))]);
   return items;
 }
 
@@ -870,7 +879,8 @@ function restoreTabs() {
   let saved = [];
   try { saved = JSON.parse(localStorage.getItem("openTabs")) || []; } catch { /* 무시 */ }
   const toOpen = saved.map((sid) => sessions.find((s) => s.session_id === sid)).filter(Boolean);
-  toOpen.forEach((meta, i) => openSession(meta, i === 0));
+  toOpen.forEach((meta, i) =>
+    detach(`restoreTab:${meta.session_id.slice(0, 8)}`, openSession(meta, i === 0)));
 }
 
 function activate(id) {
@@ -948,7 +958,7 @@ function renderTabs() {
       b.title = t.profile.cmd;
     }
     el.onclick = () => { if (!suppressClick) activate(id); };
-    el.querySelector(".tab-close").onclick = (e) => { e.stopPropagation(); closeTab(id); };
+    el.querySelector(".tab-close").onclick = (e) => { e.stopPropagation(); detach("closeTab", closeTab(id)); };
     const rbtn = el.querySelector(".tab-restart");
     if (rbtn) rbtn.onclick = (e) => { e.stopPropagation(); restartTab(id); };
     makeTabDraggable(el);
@@ -1375,7 +1385,7 @@ function openNewModal() {
     chip.onclick = () => { $("#modal-path").value = d; };
     chip.ondblclick = () => {
       $("#modal-backdrop").classList.add("hidden");
-      openNewSession(d, profiles[newProfileIdx]);
+      detach("openNewSession:recent", openNewSession(d, profiles[newProfileIdx]));
     };
     wrap.appendChild(chip);
   }
@@ -1394,7 +1404,7 @@ $("#modal-ok").onclick = () => {
   const p = $("#modal-path").value.trim();
   if (p) {
     $("#modal-backdrop").classList.add("hidden");
-    openNewSession(p, profiles[newProfileIdx]);
+    detach("openNewSession", openNewSession(p, profiles[newProfileIdx]));
   }
 };
 $("#modal-path").addEventListener("keydown", (e) => {
@@ -1420,7 +1430,7 @@ function handleShortcut(e) {
   }
   // 한글 IME에서 e.key가 "ㅈ"/"ㅜ"로 들어오므로 물리 키(e.code) 기준
   if (e.shiftKey && e.code === "KeyW") {
-    if (activeId) closeTab(activeId);
+    if (activeId) detach("closeTab:shortcut", closeTab(activeId));
     return true;
   }
   if (e.shiftKey && e.code === "KeyN") {
@@ -1463,7 +1473,7 @@ $("#search").addEventListener("keydown", (e) => {
     const row = rows[kbIndex] || rows[0];
     if (!row) return;
     const s = sessions.find((x) => x.session_id === row.dataset.id);
-    if (s) openSession(s);
+    if (s) detach("openSession:search", openSession(s));
   } else if (e.key === "Escape") {
     e.preventDefault();
     $("#search").value = "";
@@ -1548,14 +1558,16 @@ setInterval(checkUpdate, 6 * 3600 * 1000); // 6시간마다
 
 // 숨겨져 있는 동안 건너뛴 갱신을 다시 보이는 순간 한 번에 따라잡는다
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshSessions();
+  if (!document.hidden) detach("refresh:visible", refreshSessions());
 });
 
 // 주기적 목록 갱신 (20초). setInterval이 아니라 끝난 뒤에 다시 예약한다 —
 // 스캔이 20초보다 오래 걸려도 큐가 쌓이지 않고, 느린 동안은 저절로 뜸해진다.
 (function pollLoop() {
   setTimeout(async () => {
-    try { await refreshSessions(); } finally { pollLoop(); }
+    try { await refreshSessions(); } catch (err) {
+      reportFatal(`refresh:poll: ${err && err.stack ? err.stack : err}`);
+    } finally { pollLoop(); }
   }, 20000);
 })();
 // 첫 갱신은 usage.js까지 로드된 뒤에 돈다 — refreshSessions가 그 파일의
