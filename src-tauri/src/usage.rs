@@ -28,6 +28,10 @@ pub(crate) fn usage_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
     let Ok(text) = fs::read_to_string(path) else { return vec![] };
     let mut map: HashMap<UsageKey, UsageRow> = HashMap::new();
     let mut cwd = String::new();
+    // 한 응답이 텍스트 블록과 도구 호출 블록으로 나뉘면 Claude Code는 같은 message.id와
+    // 같은 usage를 가진 assistant 줄을 여러 개 쓴다. 줄마다 더하면 같은 토큰을 여러 번
+    // 세게 된다 (실측: 한 세션에서 비용 80% 과다). message.id로 한 번만 센다.
+    let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in text.lines() {
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
         if cwd.is_empty() {
@@ -41,6 +45,11 @@ pub(crate) fn usage_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
         let u = &obj["message"]["usage"];
         if u.is_null() {
             continue;
+        }
+        if let Some(id) = obj["message"]["id"].as_str() {
+            if !counted.insert(id.to_string()) {
+                continue;
+            }
         }
         let ts = obj["timestamp"].as_str().unwrap_or("");
         if ts.len() < 10 {
@@ -87,6 +96,8 @@ pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
     let mut out = Vec::new();
     let mut prompt = String::new();
     let mut prompt_idx: u32 = 0;
+    // usage_rows_of_file과 같은 이유로 message.id 기준 중복 제거 (한 응답 = 한 줄이 아니다)
+    let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in text.lines() {
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
         // 사람이 실제로 친 프롬프트만 센다 — 도구 결과와 시스템 주입은 제외
@@ -110,6 +121,11 @@ pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
         let u = &obj["message"]["usage"];
         if u.is_null() {
             continue;
+        }
+        if let Some(id) = obj["message"]["id"].as_str() {
+            if !counted.insert(id.to_string()) {
+                continue;
+            }
         }
         let Some(ts) = obj["timestamp"].as_str().and_then(parse_iso_ts) else { continue };
         out.push(TurnRow {
