@@ -206,6 +206,7 @@ pub(crate) fn spawn_pty(
     ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).insert(
         id.clone(),
         Activity {
+            session_id: None,
             last_input: None,
             last_out: None,
             burst_start: None,

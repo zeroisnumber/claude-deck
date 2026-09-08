@@ -131,6 +131,7 @@ fn main() {
             statusline::statusline_settings_path,
             diag::trace_ui,
             usage::usage_stats,
+            activity::bind_session,
             usage::session_turns,
             usage::subscription_state,
             usage::codex_state,

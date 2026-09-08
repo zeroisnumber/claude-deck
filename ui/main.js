@@ -923,6 +923,18 @@ function adoptFor(meta) {
   const name = (sessionTitle(meta) || meta.session_id.slice(0, 8)).slice(0, 40);
   t.name = name;
   t.title = basename(meta.cwd) + " · " + name.slice(0, 24);
+  // 재시작은 이제 "새 세션 시작"이 아니라 "이 세션 재개"여야 한다. 안 바꾸면 탭 이름은
+  // 그대로인데 다른 세션이 뜬다.
+  // 재시작은 이제 이 세션의 재개다. 프로필의 "재개" 설정이 꺼져 있어도 붙인다 —
+  // 안 그러면 탭 이름은 그대로인데 다른 세션이 뜬다.
+  // (스폰 자체가 실패해 exited가 된 탭은 여기까지 오지 않으므로 원래 명령으로 재시도한다.)
+  t.spawnCommand = (meta.agent || "claude") === "claude"
+    ? composeCommand(meta.session_id, t.profile, true)
+    : commandFor(meta).cmd;
+  // 완료 판정을 이 세션의 상태·기록 파일로 하게 한다 (그전에는 출력 밀도 추정뿐이다)
+  detach("bindSession", invoke("bind_session", {
+    id: pick, sessionId: meta.session_id, file: meta.file || "",
+  }));
   saveOpenTabs();
   renderTabs();
   return pick;
@@ -1280,9 +1292,11 @@ function pushKeepAlive() {
 pushKeepAlive();
 
 // 최종 실행 명령: 전역 env + 프로필 명령 + (재개 시) --resume <세션ID>
-function composeCommand(resumeId, prof) {
+// force=true면 프로필의 "재개" 설정과 무관하게 --resume을 붙인다. 그 설정은 사이드바에서
+// 세션을 여는 방식에 대한 것이고, 이미 그 세션이 된 탭을 다시 띄우는 것과는 다르다.
+function composeCommand(resumeId, prof, force) {
   const p = prof || currentProfile();
-  let cmd = resumeId && p.resume !== false ? `${p.cmd} --resume ${resumeId}` : p.cmd;
+  let cmd = resumeId && (force || p.resume !== false) ? `${p.cmd} --resume ${resumeId}` : p.cmd;
   if (statusLineOn && statusLinePath) cmd += ` --settings "${statusLinePath}"`;
   return envPrefix(globalEnv) + cmd;
 }

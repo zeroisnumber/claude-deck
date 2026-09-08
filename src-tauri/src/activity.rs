@@ -72,6 +72,10 @@ pub(crate) fn set_keepalive(enabled: bool, threshold_secs: u64, message: String)
 }
 
 pub(crate) struct Activity {
+    /// ＋ 새 세션으로 띄운 탭은 세션 id를 나중에 안다. 알게 되면 여기에 적어 두고
+    /// 상태 파일(~/.claude/sessions/<pid>.json)을 그 id로 찾는다 — 없으면 그 세션만
+    /// 출력 밀도 추정으로 남아 완료 판정이 둔해진다.
+    pub(crate) session_id: Option<String>,
     pub(crate) last_input: Option<std::time::Instant>,
     pub(crate) last_out: Option<std::time::Instant>,
     pub(crate) burst_start: Option<std::time::Instant>,
@@ -282,6 +286,19 @@ pub(crate) fn note_draft(a: &mut Activity, bytes: &[u8]) {
 }
 
 /// 출력 청크 도착 — 타이핑 에코가 아니면 버스트를 잇는다
+/// 임시 id로 뜬 탭이 어떤 세션이 됐는지 알려준다. 상태 파일과 기록 파일을 그때부터
+/// 그 세션 것으로 읽는다.
+#[tauri::command(async)]
+pub(crate) fn bind_session(id: String, session_id: String, file: String) {
+    let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(a) = act.get_mut(&id) else { return };
+    a.session_id = Some(session_id);
+    let f = file.trim();
+    if !f.is_empty() {
+        a.file = Some(PathBuf::from(f));
+    }
+}
+
 pub(crate) fn note_output(id: &str) {
     let now = std::time::Instant::now();
     let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
@@ -376,7 +393,8 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
         {
             let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
             for (id, a) in act.iter_mut() {
-                if let Some(&(w, wt)) = file_status.get(id) {
+                let key = a.session_id.as_deref().unwrap_or(id.as_str());
+                if let Some(&(w, wt)) = file_status.get(key) {
                     let first = !a.file_backed;
                     a.file_backed = true;
                     if wt != a.waiting {
@@ -567,6 +585,24 @@ pub(crate) fn keepalive_pass(app: &AppHandle, now: std::time::Instant) {
 mod tests {
     /// codex는 턴의 시작·끝을 이벤트로 남긴다. token_count가 뒤에 더 붙어도
     /// 끝난 턴을 진행 중으로 보면 탭이 영영 작업중으로 남는다.
+    /// 임시 id로 뜬 탭이 세션을 알게 되면, 상태 파일을 그 세션 id로 찾아야 한다.
+    #[test]
+    fn a_bound_tab_is_looked_up_by_its_session() {
+        let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        act.insert("new-1".to_string(), Activity { agent: "claude".into(), ..blank_activity() });
+        drop(act);
+
+        bind_session("new-1".into(), "sess-9".into(), "C:/tmp/sess-9.jsonl".into());
+
+        let act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        let a = act.get("new-1").expect("항목이 남아 있어야 한다");
+        assert_eq!(a.session_id.as_deref(), Some("sess-9"));
+        assert_eq!(a.file.as_deref(), Some(std::path::Path::new("C:/tmp/sess-9.jsonl")));
+        // 감시 루프가 쓰는 열쇠
+        let key = a.session_id.as_deref().unwrap_or("new-1");
+        assert_eq!(key, "sess-9", "상태 파일은 세션 id로 찾는다");
+    }
+
     #[test]
     fn codex_task_events_decide_the_turn() {
         let dir = std::env::temp_dir().join(format!("deck-codex-{}", std::process::id()));
@@ -696,6 +732,7 @@ mod tests {
 
     fn blank_activity() -> Activity {
         Activity {
+            session_id: None,
             last_input: None,
             last_out: None,
             burst_start: None,
