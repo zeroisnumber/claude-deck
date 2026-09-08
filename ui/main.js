@@ -1488,7 +1488,9 @@ let dashDays = 7;
 let dashRows = [];
 
 function renderDash() {
-  const cutoff = new Date(Date.now() - (dashDays - 1) * 86400_000).toISOString().slice(0, 10);
+  const cutoff = dashDays
+    ? new Date(Date.now() - (dashDays - 1) * 86400_000).toISOString().slice(0, 10)
+    : "";
   const rows = dashRows.filter(
     (r) => r.date >= cutoff && r.model && r.input + r.output + r.cache_read + r.cache_5m + r.cache_1h > 0,
   );
@@ -1556,15 +1558,21 @@ function renderDash() {
   );
 }
 
-async function openDash() {
-  $("#dash-backdrop").classList.remove("hidden");
+async function loadDash() {
   $("#dash-tiles").innerHTML = `<div class="tile"><div class="tile-v">…</div><div class="tile-l">집계 중</div></div>`;
   try {
-    dashRows = await invoke("usage_stats", { days: 30 });
+    // dashDays가 0이면 전체 기간. Rust는 파일 mtime으로 먼저 거르므로
+    // 넓은 범위를 고르면 다시 불러와야 오래된 파일이 들어온다.
+    dashRows = await invoke("usage_stats", { days: dashDays || 0 });
   } catch {
     dashRows = [];
   }
   renderDash();
+}
+
+async function openDash() {
+  $("#dash-backdrop").classList.remove("hidden");
+  await loadDash();
   // headroom 설치 시 절감 통계 표시 (없으면 섹션 숨김)
   try {
     const hr = await invoke("headroom_stats");
@@ -1586,7 +1594,7 @@ for (const b of document.querySelectorAll("#dash-period .dp")) {
   b.onclick = () => {
     dashDays = parseInt(b.dataset.days, 10);
     document.querySelectorAll("#dash-period .dp").forEach((x) => x.classList.toggle("on", x === b));
-    renderDash();
+    loadDash();
   };
 }
 

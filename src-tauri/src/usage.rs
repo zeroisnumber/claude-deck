@@ -531,8 +531,15 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
     let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
     let Some(home) = dirs::home_dir() else { return vec![] };
     let projects = home.join(".claude").join("projects");
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(days as u64 * 86400 + 86400);
+    // days=0은 전체 기간 — 파일을 mtime으로 거르지 않는다
+    let cutoff = if days == 0 {
+        None
+    } else {
+        Some(
+            std::time::SystemTime::now()
+                - std::time::Duration::from_secs(days as u64 * 86400 + 86400),
+        )
+    };
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // 클로드 세션 + 코덱스 rollout. 저장소 구조가 달라서 목록을 먼저 모으고
@@ -555,12 +562,14 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
                 continue;
             }
             // 추가 기록은 mtime을 갱신하므로 오래된 파일은 통째로 건너뜀
-            if fs::metadata(&p)
-                .and_then(|m| m.modified())
-                .map(|t| t < cutoff)
-                .unwrap_or(true)
-            {
-                continue;
+            if let Some(cutoff) = cutoff {
+                if fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .map(|t| t < cutoff)
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
             }
             let key = p.to_string_lossy().to_string();
             let mtime = file_mtime(&p);
@@ -931,7 +940,7 @@ mod codex_tests {
     #[test]
     #[ignore]
     fn dash_rows() {
-        let rows = usage_stats(30);
+        let rows = usage_stats(std::env::var("DECK_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(30));
         let cx: Vec<_> = rows.iter().filter(|r| r.agent == "codex").collect();
         eprintln!("total rows={} codex rows={}", rows.len(), cx.len());
         for r in &cx {
