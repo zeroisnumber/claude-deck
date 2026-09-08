@@ -93,6 +93,11 @@ pub(crate) struct TurnRow {
 pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
     let path = session_file_in_store(&file)?;
     let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    Ok(turns_from_text(&text))
+}
+
+/// session_turns의 본체 — 저장소 경로 검사 없이 텍스트만 파싱해 테스트할 수 있게 분리
+pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
     let mut out = Vec::new();
     let mut prompt = String::new();
     let mut prompt_idx: u32 = 0;
@@ -142,7 +147,7 @@ pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
     }
     // 파일은 이미 시간순이지만 재개·포크로 뒤섞인 경우가 있어 안정 정렬로 맞춘다
     out.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(out)
+    out
 }
 
 /// 파일별 집계 캐시 — 대시보드를 열 때마다 최근 N일치 jsonl을 전량 다시 읽지 않도록
@@ -408,3 +413,38 @@ pub(crate) fn headroom_stats() -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 응답 하나가 텍스트 블록과 도구 호출 블록으로 쪼개져 여러 줄로 기록될 때,
+    /// 같은 usage를 여러 번 세면 안 된다 (실측 세션에서 비용이 80%까지 부풀었던 버그).
+    #[test]
+    fn one_response_split_across_lines_counts_once() {
+        let usage = r#"{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":5}}"#;
+        let text = format!(
+            "{}\n{}\n{}\n",
+            r#"{"type":"user","message":{"content":"안녕"},"timestamp":"2026-09-08T01:00:00.000Z"}"#,
+            format!(r#"{{"type":"assistant","timestamp":"2026-09-08T01:00:01.000Z","message":{{"id":"msg_A","model":"claude-opus-5","usage":{usage},"content":[{{"type":"text","text":"응답"}}]}}}}"#),
+            format!(r#"{{"type":"assistant","timestamp":"2026-09-08T01:00:02.000Z","message":{{"id":"msg_A","model":"claude-opus-5","usage":{usage},"content":[{{"type":"tool_use","name":"Read"}}]}}}}"#),
+        );
+        let turns = turns_from_text(&text);
+        assert_eq!(turns.len(), 1, "같은 message.id는 한 턴");
+        assert_eq!(turns[0].output, 20);
+        assert_eq!(turns[0].cache_read, 100);
+        assert_eq!(turns[0].prompt, "안녕");
+        assert_eq!(turns[0].prompt_idx, 1);
+
+        // 대시보드 집계도 같은 규칙이어야 한다
+        let dir = std::env::temp_dir().join(format!("deck-usage-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let f = dir.join("s.jsonl");
+        fs::write(&f, &text).unwrap();
+        let rows = usage_rows_of_file(&f);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].requests, 1, "한 응답 = 요청 1회");
+        assert_eq!(rows[0].output, 20);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
