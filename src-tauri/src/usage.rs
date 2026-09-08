@@ -833,6 +833,21 @@ mod codex_tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// 대시보드가 실제로 코덱스 줄을 내보내는지 — `cargo test -- --ignored dash_rows`
+    #[test]
+    #[ignore]
+    fn dash_rows() {
+        let rows = usage_stats(30);
+        let cx: Vec<_> = rows.iter().filter(|r| r.agent == "codex").collect();
+        eprintln!("total rows={} codex rows={}", rows.len(), cx.len());
+        for r in &cx {
+            eprintln!(
+                "  {} {} {} in={} cache={} out={} req={}",
+                r.date, r.model, r.cwd, r.input, r.cache_read, r.output, r.requests
+            );
+        }
+    }
+
     /// 실제 rollout 전체 집계 — `cargo test -- --ignored codex_totals`
     #[test]
     #[ignore]
