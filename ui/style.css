@@ -1,15 +1,21 @@
 /* ─── CLI Deck — 다크 테마 ─────────────────────────────── */
 :root {
-  --bg:        #262624;
-  --bg-deep:   #1e1d1b;
-  --bg-hover:  #32302c;
-  --bg-active: #3a3733;
-  --border:    #3a3833;
-  --text:      #e8e6e3;
-  --text-dim:  #9a958c;
-  --text-faint:#6e6a63;
-  --accent:    #d97757;
-  --accent-soft: rgba(217, 119, 87, 0.14);
+  /* 세 에이전트를 나란히 다루는 도구라 어느 하나의 브랜드 색을 화면 전체에 쓰지
+     않는다. 강조색은 클로드의 주황, 코덱스의 청록, 제미나이의 파랑, 그리고 상태의
+     빨강·초록·호박 어디와도 겹치지 않는 인디고다. 에이전트 색은 그 에이전트를
+     가리키는 자리(글리프·탭 라벨)에만 쓴다. */
+  --bg:        #202124;
+  --bg-deep:   #191a1c;
+  --bg-hover:  #2a2c30;
+  --bg-active: #33363b;
+  --border:    #34373c;
+  --border-strong: #4a4e55;
+  --bg-elev:   #26282c;
+  --text:      #e6e7ea;
+  --text-dim:  #9a9ea6;
+  --text-faint:#6d7178;
+  --accent:    #8b9bf5;
+  --accent-soft: rgba(139, 155, 245, 0.15);
   --green:     #87b387;
   --red:       #e05d5d;
   --radius:    10px;
@@ -686,7 +692,7 @@ kbd {
   line-height: 1;
   cursor: pointer;
 }
-.tab-restart:hover { background: var(--green); color: #1e1d1b; }
+.tab-restart:hover { background: var(--green); color: var(--bg-deep); }
 
 /* ─── 새 세션 모달: 찾아보기 + 최근 폴더 ───────────────── */
 .modal-row { display: flex; gap: 8px; }
@@ -935,7 +941,7 @@ kbd {
 /* 백그라운드 에이전트: 원본 아래로 들여쓰고, 상태를 배지로 */
 .session-item.child {
   margin-left: 14px;
-  border-left: 2px solid #3a3733;
+  border-left: 2px solid var(--bg-active);
   padding-left: 8px;
 }
 .si-bg {
@@ -949,7 +955,7 @@ kbd {
 .si-bg.run  { color: #a3cba3; border-color: #3f5a3f; background: #26311f; }
 .si-bg.wait { color: #e8b878; border-color: #5c4a2c; background: #302819; }
 .si-bg.fail { color: #ef8080; border-color: #5c3333; background: #301f1f; }
-.si-bg.done { color: var(--text-dim); border-color: #3a3733; }
+.si-bg.done { color: var(--text-dim); border-color: var(--bg-active); }
 .si-bg-detail {
   font-size: 11px;
   color: var(--text-dim);

@@ -1912,11 +1912,12 @@ async function updateLimits(force = false) {
   try {
     const s = await invoke("subscription_state", { force });
     if (s && s.five_hour) {
-      html += limitRow("✻ 5시간", s.five_hour) + limitRow("✻ 주간", s.seven_day || {});
+      const cg = AGENT_GLYPH.claude;
+      html += limitRow(`${cg} 5시간`, s.five_hour) + limitRow(`${cg} 주간`, s.seven_day || {});
       // 모델별 주간 한도 (Fable 등) — 전체 주간과 별도로 소진된다
       for (const w of s.scoped || []) {
         if (w.utilization_pct == null) continue;
-        html += limitRow(`✻ 주간 ${w.label}`, w);
+        html += limitRow(`${AGENT_GLYPH.claude} 주간 ${w.label}`, w);
       }
     }
   } catch { /* 무시 */ }
@@ -1929,7 +1930,7 @@ async function updateLimits(force = false) {
       if (!w || w.used_percent == null) continue;
       // 리셋 시각이 이미 지난(만료된) 윈도우는 의미 없는 옛 데이터 → 숨김
       if (!w.resets_at || w.resets_at * 1000 < Date.now()) continue;
-      html += limitRow(`❖ ${codexWinLabel(w.window_minutes)}`, {
+      html += limitRow(`${AGENT_GLYPH.codex} ${codexWinLabel(w.window_minutes)}`, {
         utilization_pct: w.used_percent,
         resets_at: new Date(w.resets_at * 1000).toISOString(),
       });
