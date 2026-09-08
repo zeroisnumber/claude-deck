@@ -1000,12 +1000,25 @@ kbd {
   height: 100%;
   display: block;
 }
+/* 막대 = 그 턴의 비용, 선 = 누적. 선은 배경 삼아 얇고 흐리게 둔다 */
 #turns-chart polyline {
   fill: none;
-  stroke: var(--accent);
-  stroke-width: 1.6;
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  opacity: 0.55;
   vector-effect: non-scaling-stroke;
   stroke-linejoin: round;
+}
+#turns-chart .tc-b { fill: var(--accent); opacity: 0.8; }
+#turns-chart .tc-b.miss { fill: var(--red); opacity: 1; }
+.tc-span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.1);
+  border-left: 1px solid var(--border-strong, #666);
+  border-right: 1px solid var(--border-strong, #666);
+  pointer-events: none;
 }
 .tc-dot {
   position: absolute;

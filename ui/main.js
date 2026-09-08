@@ -1581,11 +1581,14 @@ function renderTurns(s) {
   $("#turns-all").innerHTML = turnTable(ts.map((_, i) => i), cost);
 }
 
-// 누적 곡선. 막대는 한 턴이 유독 비싸면 상한에 걸려 다 같은 높이가 되는데, 누적은
-// 계단 높이가 곧 그 턴의 비용이라 잘리는 값이 없고 턴이 몇백 개든 가로에 다 들어간다.
+// 차트는 두 겹이다. 막대는 그 턴 하나가 쓴 돈, 얇은 선은 거기까지의 누적.
+// 막대만 두면 전체가 어디까지 갔는지 모르고, 누적선만 두면 어느 구간이 비쌌는지
+// 기울기로 읽어야 해서 눈에 안 들어온다. 막대 높이는 제곱근 축이다 — 상한을 두면
+// 비싼 턴들이 전부 같은 높이로 뭉개지고, 선형이면 작은 턴이 전부 바닥에 깔린다.
 function renderCurve(cost, total, misses) {
   const n = cost.length;
   const denom = total || 1;
+  const peak = Math.max(...cost) || 1;
   const acc = [];
   let run = 0;
   for (const c of cost) {
@@ -1594,16 +1597,23 @@ function renderCurve(cost, total, misses) {
   }
   const x = (i) => (n > 1 ? (i / (n - 1)) * 100 : 0);
   const y = (i) => 100 - (acc[i] / denom) * 100;
-  const pts = cost.map((_, i) => `${x(i).toFixed(3)},${y(i).toFixed(3)}`).join(" ");
-  const dots = misses
-    .map((i) => `<i class="tc-dot" style="left:${x(i)}%;top:${y(i)}%" data-i="${i}"></i>`)
+  const bw = n > 1 ? 100 / n : 100;
+  const missSet = new Set(misses);
+  const bars = cost
+    .map((c, i) => {
+      const h = Math.max(0.8, Math.sqrt(c / peak) * 100);
+      return `<rect class="tc-b${missSet.has(i) ? " miss" : ""}" x="${(i * bw).toFixed(3)}" ` +
+        `y="${(100 - h).toFixed(3)}" width="${Math.max(bw * 0.9, 0.12).toFixed(3)}" height="${h.toFixed(3)}" />`;
+    })
     .join("");
+  const pts = cost.map((_, i) => `${x(i).toFixed(3)},${y(i).toFixed(3)}`).join(" ");
   $("#turns-chart").innerHTML =
-    `<svg viewBox="0 0 100 100" preserveAspectRatio="none">` +
+    `<svg viewBox="0 0 100 100" preserveAspectRatio="none">${bars}` +
     `<polyline points="${pts}" /></svg>` +
-    `<i class="tc-cursor" hidden></i>${dots}<div class="tc-tip" hidden></div>`;
+    `<i class="tc-cursor" hidden></i><i class="tc-span" hidden></i><div class="tc-tip" hidden></div>`;
   $("#turns-curve-head").textContent =
-    `누적 비용 — 응답 ${n}개, 가파른 구간이 비싼 구간` + (misses.length ? `, 빨간 점은 캐시가 끊긴 턴` : "");
+    `비용 — 막대는 응답 하나(${n}개), 얇은 선은 누적` +
+    (misses.length ? `, 빨간 막대는 캐시가 끊긴 턴` : "");
 
   // 마우스 x를 턴 번호로 바꿔 그 지점의 값을 띄운다 (막대마다 title을 다는 것보다 가볍다)
   const box = $("#turns-chart");
@@ -1612,13 +1622,13 @@ function renderCurve(cost, total, misses) {
   box.onmousemove = (e) => {
     const r = box.getBoundingClientRect();
     const f = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
-    const i = Math.round(f * (n - 1));
+    const i = Math.min(n - 1, Math.floor(f * n));
     const t = turnsData[i];
     cur.hidden = false;
-    cur.style.left = `${x(i)}%`;
+    cur.style.left = `${(i + 0.5) * bw}%`;
     tip.hidden = false;
     tip.innerHTML =
-      `<b>${turnTime(t.ts)}</b> · 여기까지 $${acc[i].toFixed(2)} / 이 턴 $${cost[i].toFixed(3)}<br>` +
+      `<b>${turnTime(t.ts)}</b> · 이 턴 $${cost[i].toFixed(3)} / 여기까지 $${acc[i].toFixed(2)}<br>` +
       `${escapeHtml(firstLine(t.text, 60) || (t.tools[0] ? t.tools[0] : "도구 호출"))}`;
     const w = tip.offsetWidth || 220;
     tip.style.left = `${Math.min(Math.max(e.clientX - r.left - w / 2, 0), r.width - w)}px`;
@@ -1627,6 +1637,24 @@ function renderCurve(cost, total, misses) {
     tip.hidden = true;
     cur.hidden = true;
   };
+}
+
+// 질문 줄에 마우스를 올리면 그 질문이 차지한 구간을 차트에 칠해 준다 —
+// 표의 한 줄과 차트의 봉우리를 눈으로 잇는 유일한 연결이다.
+function highlightSpan(g) {
+  const span = $("#turns-chart").querySelector(".tc-span");
+  if (!span) return;
+  if (!g) {
+    span.hidden = true;
+    return;
+  }
+  const n = turnsData.length;
+  const bw = n > 1 ? 100 / n : 100;
+  const lo = Math.min(...g.idxs);
+  const hi = Math.max(...g.idxs);
+  span.hidden = false;
+  span.style.left = `${lo * bw}%`;
+  span.style.width = `${Math.max((hi - lo + 1) * bw, 0.4)}%`;
 }
 
 // 도구 호출 루프 때문에 한 질문이 턴 여러 개를 만든다. 그걸 다시 묶어야
@@ -1663,6 +1691,8 @@ function renderPrompts(cost) {
   $("#turns-prompts").innerHTML =
     `<table><thead><tr><th>질문</th><th>답변</th><th>턴</th><th>비용</th></tr></thead><tbody>${rows}</tbody></table>`;
   $("#turns-prompts").querySelectorAll(".tp-row").forEach((tr) => {
+    tr.onmouseenter = () => highlightSpan(turnGroups[tr.dataset.g]);
+    tr.onmouseleave = () => highlightSpan(null);
     tr.onclick = () => {
       const d = $("#turns-prompts").querySelector(`.tp-detail[data-d="${tr.dataset.g}"]`);
       if (d) d.classList.toggle("hidden");
