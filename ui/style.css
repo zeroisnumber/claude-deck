@@ -959,30 +959,8 @@ kbd {
 }
 
 /* ─── 토큰 상세 팝업 ───────────────────────────────────── */
-/* 턴이 100개가 넘는 세션이 흔해서 표를 그대로 쏟으면 못 본다. 기본은 막대 타임라인 +
-   눈에 띄는 턴 몇 줄이고, 전체 표는 접어 둔다. */
-#turns-chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 1px;
-  height: 84px;
-  padding: 0 2px;
-  background: var(--bg-deep);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow-x: auto;
-  scrollbar-width: thin;
-}
-.tc-bar {
-  flex: 1 0 3px;
-  min-width: 3px;
-  background: var(--accent);
-  opacity: 0.75;
-  border-radius: 1px 1px 0 0;
-  cursor: default;
-}
-.tc-bar:hover { opacity: 1; }
-.tc-bar.miss { background: var(--red); opacity: 0.9; }
+/* 턴이 수백 개인 세션이 흔해서 표를 그대로 쏟으면 못 본다. 기본은 누적 곡선 +
+   질문별 표뿐이고, 질문을 누르면 흔적이 펼쳐진다. 전체 표는 접어 둔다. */
 #turns-tiles {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -993,7 +971,7 @@ kbd {
 .turn-miss td { color: #ef8080; }
 
 /* 질문 열이 붙어 열이 8개가 되므로 이 팝업만 넓게 */
-#modal.turns { width: 860px; }
+#modal.turns { width: min(860px, 92vw); }
 #turns-all .tp-q { max-width: 190px; }
 
 /* 질문 열: 길어도 한 줄로 자르고 전체는 툴팁으로 */
@@ -1003,4 +981,100 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text) !important;
+}
+
+/* ─── 토큰 상세: 누적 곡선 ───────────────────────────────
+   막대 하나당 한 턴이던 방식은 턴이 수백 개면 가로로 넘치고, 비싼 턴 하나 때문에
+   높이 상한에 걸려 큰 값들이 전부 같은 높이로 뭉갰다. 누적 곡선은 계단 높이가
+   곧 그 턴의 비용이라 잘리는 값이 없고 몇백 개든 한 화면에 들어간다. */
+#turns-chart {
+  position: relative;
+  height: 96px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+#turns-chart svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+#turns-chart polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+}
+.tc-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 0 2px var(--bg-deep);
+}
+.tc-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-strong, #555);
+}
+.tc-tip {
+  position: absolute;
+  top: 4px;
+  max-width: 320px;
+  padding: 4px 7px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg-elev, #1c1c1c);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ─── 질문별 표와 펼침 ─────────────────────────────────── */
+.tp-row { cursor: pointer; }
+.tp-row:hover td { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
+.tp-row.open td { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
+.tp-a {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim) !important;
+}
+.tp-detail td { padding: 6px 8px 10px; }
+.tr-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px;
+  padding: 2px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.tr-line.miss { color: #ef8080; }
+.tr-cost {
+  flex: 0 0 52px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.tr-say { color: var(--text); }
+.tr-tool {
+  padding: 0 5px;
+  color: var(--text-dim);
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 10.5px;
+  white-space: nowrap;
 }

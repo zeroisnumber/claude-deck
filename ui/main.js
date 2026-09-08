@@ -1500,10 +1500,12 @@ for (const b of document.querySelectorAll("#dash-period .dp")) {
 }
 
 // ---------- 토큰 상세 (세션 하나의 턴별 사용량) ----------
-// 긴 세션은 응답이 100개를 넘는다. 표를 그대로 쏟으면 아무것도 안 보이므로 기본 화면은
-// 막대 타임라인과 "눈에 띄는 턴"뿐이고, 전체 표는 버튼으로 펼친다.
+// 긴 세션은 응답이 수백 개다. 턴을 그대로 나열하면 아무것도 안 보이므로 기본 화면은
+// 누적 곡선 + 질문별 표뿐이고, 질문을 누르면 그 질문이 만든 턴의 흔적이 펼쳐진다.
+// 전체 턴 표는 원자료로 접어 둔다.
 let turnsData = [];
 let turnsTitle = "";
+let turnGroups = [];
 
 function turnCost(t) {
   const [i, o] = priceFor(t.model || "");
@@ -1513,20 +1515,30 @@ function turnCost(t) {
 function isCacheMiss(t, idx) {
   return idx > 0 && t.cache_read === 0 && t.cache_5m + t.cache_1h > 5000;
 }
+// 캐시로 읽은 토큰을 정가로 냈다면 얼마였을지와 실제 낸 값의 차이 — 캐시가 벌어준 돈
+function turnSaving(t) {
+  const [i] = priceFor(t.model || "");
+  return (t.cache_read * i * 0.9) / 1e6;
+}
 function turnTime(ts) {
   const d = new Date(ts * 1000);
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ` +
     `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function firstLine(s, n) {
+  const line = String(s || "").split("\n").find((x) => x.trim()) || "";
+  return line.length > n ? line.slice(0, n) + "…" : line;
 }
 
 async function openTurns(s) {
   hidePreview();
   turnsTitle = sessionTitle(s) || s.session_id.slice(0, 8);
   turnsData = [];
+  turnGroups = [];
   $("#turns-sub").textContent = "읽는 중…";
   $("#turns-tiles").innerHTML = "";
   $("#turns-chart").innerHTML = "";
-  $("#turns-notable").innerHTML = "";
+  $("#turns-prompts").innerHTML = "";
   $("#turns-all").innerHTML = "";
   $("#turns-all").classList.add("hidden");
   $("#turns-toggle-all").textContent = "전체 턴 표 보기";
@@ -1551,7 +1563,7 @@ function renderTurns(s) {
   const misses = ts.map((t, i) => (isCacheMiss(t, i) ? i : -1)).filter((i) => i >= 0);
   const readTot = ts.reduce((a, t) => a + t.cache_read, 0);
   const writeTot = ts.reduce((a, t) => a + t.cache_5m + t.cache_1h, 0);
-  const outTot = ts.reduce((a, t) => a + t.output, 0);
+  const saved = ts.reduce((a, t) => a + turnSaving(t), 0);
   const hit = readTot + writeTot > 0 ? Math.round((readTot / (readTot + writeTot)) * 100) : 0;
 
   $("#turns-sub").textContent =
@@ -1560,63 +1572,124 @@ function renderTurns(s) {
   const tile = (v, l, cls) => `<div class="tile"><div class="tile-v ${cls || ""}">${v}</div><div class="tile-l">${l}</div></div>`;
   $("#turns-tiles").innerHTML =
     tile(`$${total.toFixed(2)}`, "누적 비용") +
-    tile(String(ts.length), "응답 수") +
+    tile(`$${saved.toFixed(2)}`, "캐시가 아낀 돈") +
     tile(`${hit}%`, "캐시 적중률") +
     tile(String(misses.length), "캐시 끊김", misses.length ? "hot" : "");
 
-  // 막대 높이는 비용 비례. 한 턴이 유독 비싸면 나머지가 다 눌리므로 상위 5%를 상한으로 쓴다.
-  const sorted = [...cost].sort((a, b) => a - b);
-  const cap = sorted[Math.floor(sorted.length * 0.95)] || sorted[sorted.length - 1] || 1;
-  $("#turns-chart").innerHTML = ts
-    .map((t, i) => {
-      const h = Math.max(2, Math.min(100, (cost[i] / cap) * 100));
-      const miss = isCacheMiss(t, i);
-      const title = `${turnTime(t.ts)} · $${cost[i].toFixed(3)}\n입력 ${fmtTok(t.input)} · 캐시읽기 ${fmtTok(t.cache_read)}` +
-        ` · 캐시쓰기 ${fmtTok(t.cache_5m + t.cache_1h)} · 출력 ${fmtTok(t.output)}${miss ? "\n캐시 끊김" : ""}` +
-        (t.prompt ? `\n\n${t.prompt.slice(0, 160)}` : "");
-      return `<div class="tc-bar${miss ? " miss" : ""}" style="height:${h}%" title="${title}"></div>`;
+  renderCurve(cost, total, misses);
+  renderPrompts(cost);
+  $("#turns-all").innerHTML = turnTable(ts.map((_, i) => i), cost);
+}
+
+// 누적 곡선. 막대는 한 턴이 유독 비싸면 상한에 걸려 다 같은 높이가 되는데, 누적은
+// 계단 높이가 곧 그 턴의 비용이라 잘리는 값이 없고 턴이 몇백 개든 가로에 다 들어간다.
+function renderCurve(cost, total, misses) {
+  const n = cost.length;
+  const denom = total || 1;
+  const acc = [];
+  let run = 0;
+  for (const c of cost) {
+    run += c;
+    acc.push(run);
+  }
+  const x = (i) => (n > 1 ? (i / (n - 1)) * 100 : 0);
+  const y = (i) => 100 - (acc[i] / denom) * 100;
+  const pts = cost.map((_, i) => `${x(i).toFixed(3)},${y(i).toFixed(3)}`).join(" ");
+  const dots = misses
+    .map((i) => `<i class="tc-dot" style="left:${x(i)}%;top:${y(i)}%" data-i="${i}"></i>`)
+    .join("");
+  $("#turns-chart").innerHTML =
+    `<svg viewBox="0 0 100 100" preserveAspectRatio="none">` +
+    `<polyline points="${pts}" /></svg>` +
+    `<i class="tc-cursor" hidden></i>${dots}<div class="tc-tip" hidden></div>`;
+  $("#turns-curve-head").textContent =
+    `누적 비용 — 응답 ${n}개, 가파른 구간이 비싼 구간` + (misses.length ? `, 빨간 점은 캐시가 끊긴 턴` : "");
+
+  // 마우스 x를 턴 번호로 바꿔 그 지점의 값을 띄운다 (막대마다 title을 다는 것보다 가볍다)
+  const box = $("#turns-chart");
+  const tip = box.querySelector(".tc-tip");
+  const cur = box.querySelector(".tc-cursor");
+  box.onmousemove = (e) => {
+    const r = box.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const i = Math.round(f * (n - 1));
+    const t = turnsData[i];
+    cur.hidden = false;
+    cur.style.left = `${x(i)}%`;
+    tip.hidden = false;
+    tip.innerHTML =
+      `<b>${turnTime(t.ts)}</b> · 여기까지 $${acc[i].toFixed(2)} / 이 턴 $${cost[i].toFixed(3)}<br>` +
+      `${escapeHtml(firstLine(t.text, 60) || (t.tools[0] ? t.tools[0] : "도구 호출"))}`;
+    const w = tip.offsetWidth || 220;
+    tip.style.left = `${Math.min(Math.max(e.clientX - r.left - w / 2, 0), r.width - w)}px`;
+  };
+  box.onmouseleave = () => {
+    tip.hidden = true;
+    cur.hidden = true;
+  };
+}
+
+// 도구 호출 루프 때문에 한 질문이 턴 여러 개를 만든다. 그걸 다시 묶어야
+// "어떤 질문이 비쌌나"가 보이고, 답변까지 붙여야 그게 무슨 질문이었는지 안다.
+function renderPrompts(cost) {
+  const by = new Map();
+  turnsData.forEach((t, i) => {
+    const g = by.get(t.prompt_idx) || { prompt: t.prompt, cost: 0, idxs: [], miss: 0, answer: "" };
+    g.cost += cost[i];
+    g.idxs.push(i);
+    if (isCacheMiss(t, i)) g.miss += 1;
+    if (t.text && t.text.trim()) g.answer = t.text; // 마지막 말이 그 질문의 답
+    by.set(t.prompt_idx, g);
+  });
+  turnGroups = [...by.values()].filter((g) => g.prompt).sort((a, b) => b.cost - a.cost).slice(0, 12);
+  $("#turns-prompts-head").textContent =
+    `질문별 비용 — 비싼 순 상위 ${turnGroups.length}개 (질문 ${by.size}개, 줄을 누르면 무슨 일을 했는지 펼쳐집니다)`;
+  if (!turnGroups.length) {
+    $("#turns-prompts").innerHTML = `<div class="dash-note">질문 기록이 없습니다</div>`;
+    return;
+  }
+  const rows = turnGroups
+    .map((g, gi) => {
+      const head =
+        `<tr class="tp-row${g.miss ? " turn-miss" : ""}" data-g="${gi}">` +
+        `<td class="tp-q" title="${escapeHtml(g.prompt)}">${escapeHtml(firstLine(g.prompt, 70))}</td>` +
+        `<td class="tp-a" title="${escapeHtml(g.answer)}">${escapeHtml(firstLine(g.answer, 70) || "—")}</td>` +
+        `<td>${g.idxs.length}</td><td>$${g.cost.toFixed(2)}</td></tr>`;
+      const trail =
+        `<tr class="tp-detail hidden" data-d="${gi}"><td colspan="4">${trailOf(g, cost)}</td></tr>`;
+      return head + trail;
     })
     .join("");
-
-  // 질문별: 도구 호출 루프 때문에 한 질문이 여러 턴을 만든다. 그걸 다시 묶어야
-  // "어떤 질문이 비쌌나"가 보인다.
-  const byPrompt = new Map();
-  ts.forEach((t, i) => {
-    const key = t.prompt_idx;
-    const g = byPrompt.get(key) || { prompt: t.prompt, cost: 0, turns: 0, out: 0, cw: 0, ts: t.ts, miss: 0 };
-    g.cost += cost[i];
-    g.turns += 1;
-    g.out += t.output;
-    g.cw += t.cache_5m + t.cache_1h;
-    if (isCacheMiss(t, i)) g.miss += 1;
-    byPrompt.set(key, g);
+  $("#turns-prompts").innerHTML =
+    `<table><thead><tr><th>질문</th><th>답변</th><th>턴</th><th>비용</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $("#turns-prompts").querySelectorAll(".tp-row").forEach((tr) => {
+    tr.onclick = () => {
+      const d = $("#turns-prompts").querySelector(`.tp-detail[data-d="${tr.dataset.g}"]`);
+      if (d) d.classList.toggle("hidden");
+      tr.classList.toggle("open");
+    };
   });
-  const groups = [...byPrompt.values()].filter((g) => g.prompt).sort((a, b) => b.cost - a.cost).slice(0, 10);
-  $("#turns-prompts-head").textContent = `질문별 비용 — 비싼 순 상위 ${groups.length}개 (질문 ${byPrompt.size}개)`;
-  $("#turns-prompts").innerHTML = groups.length
-    ? `<table><thead><tr><th>질문</th><th>턴</th><th>출력</th><th>캐시 쓰기</th><th>비용</th></tr></thead><tbody>` +
-      groups
-        .map((g) => `<tr class="${g.miss ? "turn-miss" : ""}"><td class="tp-q" title="${escapeHtml(g.prompt)}">` +
-          `${escapeHtml(g.prompt)}</td><td>${g.turns}</td><td>${fmtTok(g.out)}</td>` +
-          `<td>${fmtTok(g.cw)}</td><td>$${g.cost.toFixed(2)}</td></tr>`)
-        .join("") +
-      `</tbody></table>`
-    : `<div class="dash-note">질문 기록이 없습니다</div>`;
+}
 
-  // 눈에 띄는 턴: 캐시가 끊긴 턴 전부 + 비싼 상위 5개
-  const top = cost.map((c, i) => [c, i]).sort((a, b) => b[0] - a[0]).slice(0, 5).map(([, i]) => i);
-  // 끊김이 수십 번인 세션도 있어 상한을 둔다 — 비싼 순으로 자르고 다시 시간순으로 보여준다
-  const NOTABLE_MAX = 20;
-  let idxs = [...new Set([...misses, ...top])];
-  const cut = idxs.length > NOTABLE_MAX;
-  if (cut) idxs = idxs.sort((a, b) => cost[b] - cost[a]).slice(0, NOTABLE_MAX);
-  idxs.sort((a, b) => a - b);
-  $("#turns-notable").innerHTML = turnTable(idxs, cost);
-  $("#turns-notable-head").textContent =
-    `눈에 띄는 턴 — 캐시 끊김 ${misses.length}개, 비싼 응답 상위 5개` +
-    (cut ? ` (비싼 ${NOTABLE_MAX}개만 표시)` : "");
-  $("#turns-all").innerHTML = turnTable(ts.map((_, i) => i), cost);
-  $("#turns-all").dataset.built = "1";
+// 한 질문이 만든 턴들의 흔적 — 무슨 말을 했고 어떤 도구를 몇 번 불렀는지.
+// "Read 40번"만으로는 알 수 없으니 도구 이름에 인자 앞부분을 붙여 둔다.
+function trailOf(g, cost) {
+  const lines = g.idxs
+    .map((i) => {
+      const t = turnsData[i];
+      const what = t.text && t.text.trim()
+        ? `<span class="tr-say">${escapeHtml(firstLine(t.text, 90))}</span>`
+        : "";
+      const tools = (t.tools || [])
+        .map((x) => `<code class="tr-tool">${escapeHtml(x)}</code>`)
+        .join(" ");
+      if (!what && !tools) return "";
+      return `<div class="tr-line${isCacheMiss(t, i) ? " miss" : ""}">` +
+        `<span class="tr-cost">$${cost[i].toFixed(3)}</span>${what}${what && tools ? " " : ""}${tools}</div>`;
+    })
+    .filter(Boolean)
+    .join("");
+  return lines || `<div class="dash-note">기록된 내용이 없습니다</div>`;
 }
 
 function turnTable(idxs, cost) {
@@ -1625,14 +1698,17 @@ function turnTable(idxs, cost) {
     .map((i) => {
       const t = turnsData[i];
       const miss = isCacheMiss(t, i);
+      const what = firstLine(t.text, 40) || (t.tools || []).slice(0, 2).join(", ");
       return `<tr class="${miss ? "turn-miss" : ""}"><td>${turnTime(t.ts)}</td>` +
-        `<td class="tp-q" title="${escapeHtml(t.prompt || "")}">${escapeHtml(t.prompt || "")}</td>` +
+        `<td class="tp-q" title="${escapeHtml(t.prompt || "")}">${escapeHtml(firstLine(t.prompt, 40))}</td>` +
+        `<td class="tp-q" title="${escapeHtml(what)}">${escapeHtml(what)}</td>` +
         `<td>${fmtTok(t.input)}</td>` +
         `<td>${fmtTok(t.cache_read)}</td><td>${fmtTok(t.cache_5m + t.cache_1h)}</td>` +
         `<td>${fmtTok(t.output)}</td><td>$${cost[i].toFixed(3)}</td><td>${miss ? "캐시 끊김" : ""}</td></tr>`;
     })
     .join("");
-  return `<table><thead><tr><th>시각</th><th>질문</th><th>입력</th><th>캐시 읽기</th><th>캐시 쓰기</th><th>출력</th><th>비용</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  return `<table><thead><tr><th>시각</th><th>질문</th><th>한 일</th><th>입력</th><th>캐시 읽기</th>` +
+    `<th>캐시 쓰기</th><th>출력</th><th>비용</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 $("#turns-close").onclick = () => closeModal($("#turns-backdrop"));

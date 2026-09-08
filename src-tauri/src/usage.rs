@@ -86,6 +86,51 @@ pub(crate) struct TurnRow {
     pub(crate) prompt: String,
     /// 같은 프롬프트에 속한 턴을 묶기 위한 번호
     pub(crate) prompt_idx: u32,
+    /// 이 응답이 실제로 쓴 말 (앞부분만). 도구만 부른 턴은 비어 있다.
+    pub(crate) text: String,
+    /// 이 응답이 부른 도구들 — "Read src/usage.rs" 형태
+    pub(crate) tools: Vec<String>,
+}
+
+/// assistant content 배열에서 사람이 읽을 것만 뽑는다.
+/// thinking 블록은 화면에 낼 것이 아니므로 버리고, tool_use는 이름과 핵심 인자만 남긴다.
+fn assistant_blocks(content: &serde_json::Value) -> (String, Vec<String>) {
+    let mut text = String::new();
+    let mut tools = Vec::new();
+    match content {
+        serde_json::Value::String(s) => text.push_str(s),
+        serde_json::Value::Array(parts) => {
+            for p in parts {
+                match p["type"].as_str() {
+                    Some("text") => {
+                        if let Some(t) = p["text"].as_str() {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(t);
+                        }
+                    }
+                    Some("tool_use") => {
+                        let name = p["name"].as_str().unwrap_or("tool");
+                        // 인자는 도구마다 이름이 달라서(file_path, command, pattern…) 첫 문자열 값을 쓴다
+                        let arg = p["input"]
+                            .as_object()
+                            .and_then(|o| o.values().find_map(|v| v.as_str()))
+                            .unwrap_or("");
+                        let arg: String = arg.split('\n').next().unwrap_or("").chars().take(48).collect();
+                        tools.push(if arg.is_empty() {
+                            name.to_string()
+                        } else {
+                            format!("{name} {arg}")
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    (text, tools)
 }
 
 /// 세션 파일의 모든 assistant 응답을 시간순으로. 알려진 세션 저장소 안의 파일만 읽는다.
@@ -98,7 +143,7 @@ pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
 
 /// session_turns의 본체 — 저장소 경로 검사 없이 텍스트만 파싱해 테스트할 수 있게 분리
 pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
-    let mut out = Vec::new();
+    let mut out: Vec<TurnRow> = Vec::new();
     let mut prompt = String::new();
     let mut prompt_idx: u32 = 0;
     // usage_rows_of_file과 같은 이유로 message.id 기준 중복 제거 (한 응답 = 한 줄이 아니다)
@@ -127,8 +172,21 @@ pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
         if u.is_null() {
             continue;
         }
+        let (text, tools) = assistant_blocks(&obj["message"]["content"]);
+        // 같은 message.id의 뒷줄들은 같은 응답의 나머지 블록이다. 사용량은 이미 셌으니
+        // 더하지 말고 내용만 앞 턴에 합친다.
         if let Some(id) = obj["message"]["id"].as_str() {
             if !counted.insert(id.to_string()) {
+                if let Some(prev) = out.last_mut() {
+                    if !text.is_empty() && prev.text.chars().count() < 400 {
+                        if !prev.text.is_empty() {
+                            prev.text.push('\n');
+                        }
+                        prev.text.push_str(&text);
+                        prev.text = prev.text.chars().take(400).collect();
+                    }
+                    prev.tools.extend(tools);
+                }
                 continue;
             }
         }
@@ -143,6 +201,8 @@ pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
             cache_1h: u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0),
             prompt: prompt.clone(),
             prompt_idx,
+            text: text.chars().take(400).collect(),
+            tools,
         });
     }
     // 파일은 이미 시간순이지만 재개·포크로 뒤섞인 경우가 있어 안정 정렬로 맞춘다
@@ -427,7 +487,7 @@ mod tests {
             "{}\n{}\n{}\n",
             r#"{"type":"user","message":{"content":"안녕"},"timestamp":"2026-09-08T01:00:00.000Z"}"#,
             format!(r#"{{"type":"assistant","timestamp":"2026-09-08T01:00:01.000Z","message":{{"id":"msg_A","model":"claude-opus-5","usage":{usage},"content":[{{"type":"text","text":"응답"}}]}}}}"#),
-            format!(r#"{{"type":"assistant","timestamp":"2026-09-08T01:00:02.000Z","message":{{"id":"msg_A","model":"claude-opus-5","usage":{usage},"content":[{{"type":"tool_use","name":"Read"}}]}}}}"#),
+            format!(r#"{{"type":"assistant","timestamp":"2026-09-08T01:00:02.000Z","message":{{"id":"msg_A","model":"claude-opus-5","usage":{usage},"content":[{{"type":"tool_use","name":"Read","input":{{"file_path":"src/usage.rs"}}}}]}}}}"#),
         );
         let turns = turns_from_text(&text);
         assert_eq!(turns.len(), 1, "같은 message.id는 한 턴");
@@ -435,6 +495,9 @@ mod tests {
         assert_eq!(turns[0].cache_read, 100);
         assert_eq!(turns[0].prompt, "안녕");
         assert_eq!(turns[0].prompt_idx, 1);
+        // 뒷줄의 내용은 버리지 않고 같은 턴에 합쳐진다 — 답변과 도구 흔적이 둘 다 남아야 한다
+        assert_eq!(turns[0].text, "응답");
+        assert_eq!(turns[0].tools, vec!["Read src/usage.rs".to_string()]);
 
         // 대시보드 집계도 같은 규칙이어야 한다
         let dir = std::env::temp_dir().join(format!("deck-usage-{}", std::process::id()));
