@@ -388,6 +388,12 @@ function escapeHtml(s) {
 // 세션 파일에서 온 문자열이 태그로 되살아나지 않는다.
 // 링크는 글자만 남긴다 — 이걸 쓰는 화면(호버 카드, 토큰 팝업)은 마우스를 떼면
 // 사라지거나 클릭을 받지 않는 자리라 앵커를 만들 이유가 없다.
+function mdPlain(src) {
+  return String(src || "")
+    .replace(/`{1,3}/g, "")
+    .replace(/\*\*/g, "")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1");
+}
 function mdInline(src) {
   return escapeHtml(String(src || ""))
     .replace(/`([^`]+)`/g, "<code>$1</code>")
@@ -1731,7 +1737,7 @@ function renderCurve(cost, total, misses) {
     tip.hidden = false;
     tip.innerHTML =
       `<b>${turnTime(t.ts)}</b> · 이 턴 ${fmtVal(cost[i], true)} / 여기까지 ${fmtVal(acc[i])}<br>` +
-      `${mdInline(firstLine(t.text, 60) || (t.tools[0] ? t.tools[0] : "도구 호출"))}`;
+      `${escapeHtml(firstLine(mdPlain(t.text), 60) || (t.tools[0] ? t.tools[0] : "도구 호출"))}`;
     const w = tip.offsetWidth || 220;
     tip.style.left = `${Math.min(Math.max(e.clientX - r.left - w / 2, 0), r.width - w)}px`;
   };
@@ -1783,8 +1789,8 @@ function renderPrompts(cost) {
     .map((g, gi) => {
       const head =
         `<tr class="tp-row${g.miss ? " turn-miss" : ""}" data-g="${gi}">` +
-        `<td class="tp-q" title="${escapeHtml(g.prompt)}">${escapeHtml(firstLine(g.prompt, 70))}</td>` +
-        `<td class="tp-a" title="${escapeHtml(g.answer)}">${mdInline(firstLine(g.answer, 70) || "—")}</td>` +
+        `<td class="tp-q" title="${escapeHtml(g.prompt)}">${escapeHtml(firstLine(mdPlain(g.prompt), 70))}</td>` +
+        `<td class="tp-a" title="${escapeHtml(g.answer)}">${escapeHtml(firstLine(mdPlain(g.answer), 70) || "—")}</td>` +
         `<td>${g.idxs.length}</td><td>${fmtVal(g.cost)}</td></tr>`;
       const trail =
         `<tr class="tp-detail hidden" data-d="${gi}"><td colspan="4">${trailOf(g, cost)}</td></tr>`;
@@ -1811,7 +1817,7 @@ function trailOf(g, cost) {
     .map((i) => {
       const t = turnsData[i];
       const what = t.text && t.text.trim()
-        ? `<span class="tr-say">${mdInline(firstLine(t.text, 90))}</span>`
+        ? `<span class="tr-say">${escapeHtml(firstLine(mdPlain(t.text), 90))}</span>`
         : "";
       const tools = (t.tools || [])
         .map((x) => `<code class="tr-tool">${escapeHtml(x)}</code>`)
@@ -1831,7 +1837,7 @@ function turnTable(idxs, cost) {
     .map((i) => {
       const t = turnsData[i];
       const miss = isCacheMiss(t, i);
-      const what = firstLine(t.text, 40) || (t.tools || []).slice(0, 2).join(", ");
+      const what = firstLine(mdPlain(t.text), 40) || (t.tools || []).slice(0, 2).join(", ");
       return `<tr class="${miss ? "turn-miss" : ""}"><td>${turnTime(t.ts)}</td>` +
         `<td class="tp-q" title="${escapeHtml(t.prompt || "")}">${escapeHtml(firstLine(t.prompt, 40))}</td>` +
         `<td class="tp-q" title="${escapeHtml(what)}">${escapeHtml(what)}</td>` +
