@@ -86,7 +86,7 @@ pub(crate) fn parser_for(path: &std::path::Path) -> fn(&PathBuf) -> Option<Sessi
 }
 
 /// 호버 시점에만 호출 — 대개 목록 스캔이 이미 채워둔 캐시에서 바로 나온다.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn session_preview(file: String) -> Option<SessionPreview> {
     let p = PathBuf::from(&file);
     let m = cached_meta(&p, parser_for(&p))?;
@@ -567,7 +567,7 @@ pub(crate) fn scan_bg_jobs() -> HashMap<String, BgInfo> {
 }
 
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn list_sessions() -> Vec<SessionMeta> {
     evict_stale_cache();
     let mut out = Vec::new();
@@ -636,6 +636,17 @@ pub(crate) fn list_sessions() -> Vec<SessionMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 실제 홈 디렉터리를 훑어 폴링 한 번의 비용을 잰다 (`cargo test -- --ignored scan_cost --nocapture`)
+    #[test]
+    #[ignore]
+    fn scan_cost() {
+        for round in 0..3 {
+            let t0 = std::time::Instant::now();
+            let v = list_sessions();
+            eprintln!("round {round}: {} sessions in {:?}", v.len(), t0.elapsed());
+        }
+    }
 
     #[test]
     fn iso_ts_matches_known_epoch() {

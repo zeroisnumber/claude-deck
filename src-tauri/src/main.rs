@@ -32,7 +32,7 @@ use sessions::*;
 use usage::*;
 
 /// 세션 프로젝트 폴더를 탐색기로 연다
-#[tauri::command]
+#[tauri::command(async)]
 fn open_path(path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     if !p.is_dir() {
@@ -48,7 +48,7 @@ fn open_path(path: String) -> Result<(), String> {
 /// 세션 로그 파일(JSONL)을 기본 연결 프로그램으로 연다.
 /// 연결 프로그램이 없으면 Windows가 "연결 프로그램 선택" 창을 띄운다 —
 /// spawn 자체는 성공하므로 프런트의 catch로는 그 경우를 알 수 없다.
-#[tauri::command]
+#[tauri::command(async)]
 fn open_log_file(file: String) -> Result<(), String> {
     let p = session_file_in_store(&file)?;
     std::process::Command::new("explorer.exe")
@@ -82,7 +82,7 @@ fn session_file_in_store(file: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_session(file: String) -> Result<(), String> {
     // 알려진 세션 저장소 안의 세션 파일만 삭제 허용
     let p = session_file_in_store(&file)?;

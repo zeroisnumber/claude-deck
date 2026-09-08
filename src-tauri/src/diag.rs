@@ -76,7 +76,7 @@ pub(crate) fn init_trace() {
 /// 진단 파일 정리. 지울 파일을 이름으로 명시한다 — 이 폴더에는 WebView2 프로필
 /// (EBWebView, 앱 설정이 들어 있는 localStorage)이 같이 있어서 폴더째 지우면
 /// 사용자 설정이 통째로 날아간다.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn clear_diagnostics() -> Result<String, String> {
     // 기록 스레드는 파일이 사라지면 다음 배치에서 스스로 다시 연다.
     let dir = dirs::data_local_dir()
@@ -121,7 +121,7 @@ pub(crate) fn trace_enabled() -> bool {
 
 /// 설정에서 켜고 끄기. 마커 파일로 상태를 남겨 재시작 후에도 유지된다.
 /// 반환값은 로그 파일 경로 (설정 창에 표시).
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn set_trace(enabled: bool) -> Result<String, String> {
     PTY_TRACE.store(enabled, Ordering::Relaxed);
     if let Some(p) = trace_marker_path() {

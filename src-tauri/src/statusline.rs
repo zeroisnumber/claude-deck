@@ -133,7 +133,7 @@ pub(crate) fn statusline_rate_limits() -> Option<serde_json::Value> {
 
 /// CLI Deck 전용 설정 파일을 만들고 경로를 돌려준다. 이 경로를 spawn 시
 /// --settings 로 넘기면 사용자 settings.json을 건드리지 않고 상태줄만 얹는다.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn statusline_settings_path() -> Result<String, String> {
     let dir = dirs::data_local_dir()
         .map(|d| d.join("com.user.cli-deck"))

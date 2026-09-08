@@ -102,7 +102,21 @@ function timeAgo(mtime) {
 }
 
 // ---------- 사이드바 ----------
+// 폴링이 겹치면 느린 디스크에서 스캔이 쌓여 더 느려진다(학습 중 실측: 한 번에 34초).
+// 진행 중이면 그냥 건너뛴다.
+let refreshing = false;
+
 async function refreshSessions() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    await refreshSessionsInner();
+  } finally {
+    refreshing = false;
+  }
+}
+
+async function refreshSessionsInner() {
   // 창이 안 보이면 목록을 새로 읽지 않는다 — 전 프로젝트 폴더를 훑고 사이드바를
   // 통째로 다시 만드는 작업이라, 보이지도 않는 동안 20초마다 할 이유가 없다.
   // 다시 보이는 순간 아래 visibilitychange가 한 번 당겨 실행한다.
@@ -857,6 +871,9 @@ function activate(id) {
   emptyState.classList.add("hidden");
   const t = terms.get(id);
   requestAnimationFrame(() => {
+    // 이 프레임 사이에 탭이 닫혔을 수 있다. 버려진 터미널에 fit()을 걸면 xterm이
+    // _isDisposed를 읽다 던진다(트레이스에 20건 남아 있던 예외).
+    if (terms.get(id) !== t || t.disposed) return;
     t.fit.fit();
     invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
     t.term.focus();
@@ -872,6 +889,7 @@ async function closeTab(id) {
   // WebGL 애드온이 dispose 도중 던진 적이 있다(트레이스의 _isDisposed). 여기서 멈추면
   // terms에 죽은 항목이 남아 그 세션은 사이드바에서 눌러도 "이미 열려 있음"으로
   // 처리돼 아무 일도 안 일어난다. 정리는 무조건 끝까지 간다.
+  t.disposed = true;
   try { t.term.dispose(); } catch (err) { reportFatal(`term.dispose: ${err && err.stack || err}`); }
   t.container.remove();
   terms.delete(id);
@@ -1513,8 +1531,13 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refreshSessions();
 });
 
-// 주기적 목록 갱신 (20초)
-setInterval(refreshSessions, 20000);
+// 주기적 목록 갱신 (20초). setInterval이 아니라 끝난 뒤에 다시 예약한다 —
+// 스캔이 20초보다 오래 걸려도 큐가 쌓이지 않고, 느린 동안은 저절로 뜸해진다.
+(function pollLoop() {
+  setTimeout(async () => {
+    try { await refreshSessions(); } finally { pollLoop(); }
+  }, 20000);
+})();
 // 첫 갱신은 usage.js까지 로드된 뒤에 돈다 — refreshSessions가 그 파일의
 // syncCtxGauges와 fmtTok을 부르는데, 여기서 바로 부르면 아직 정의 전이다.
 // 이미 로드가 끝난 뒤라면 DOMContentLoaded는 다시 오지 않으므로 바로 부른다.

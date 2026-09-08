@@ -240,7 +240,7 @@ fn assistant_blocks(content: &serde_json::Value) -> (String, Vec<String>) {
 }
 
 /// 세션 파일의 모든 assistant 응답을 시간순으로. 알려진 세션 저장소 안의 파일만 읽는다.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
     let path = session_file_in_store(&file)?;
     let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -548,7 +548,7 @@ pub(crate) static USAGE_FILE_CACHE: LazyLock<Mutex<HashMap<String, (f64, Vec<Usa
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 대시보드용: 최근 N일간 (날짜, 모델, 프로젝트)별 토큰 집계
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
     let mut all_entries: Vec<UsageEntry> = Vec::new();
     // 파일 사이 중복 제거용 — 포크가 복사해 온 응답을 두 번 세지 않기 위해
@@ -745,7 +745,7 @@ pub(crate) fn codex_rollouts_by_mtime() -> Vec<PathBuf> {
 }
 
 /// 가장 최근 codex 세션의 마지막 token_count 이벤트에서 rate limit 추출
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn codex_state() -> Option<serde_json::Value> {
     for p in codex_rollouts_by_mtime().into_iter().take(3) {
         let Some(text) = read_head_tail(&p, 256 * 1024) else { continue };
@@ -774,7 +774,7 @@ pub(crate) fn codex_state() -> Option<serde_json::Value> {
 /// 짧은 간격으로 두드리면 429가 나기 쉬움).
 pub(crate) static USAGE_CACHE: Mutex<Option<(std::time::Instant, serde_json::Value)>> = Mutex::new(None);
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn subscription_state(force: bool) -> Option<serde_json::Value> {
     if !force {
         let cache = USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
