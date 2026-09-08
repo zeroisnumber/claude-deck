@@ -384,8 +384,13 @@ pub(crate) fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
                 }
                 "token_count" => {
                     let info = &obj["payload"]["info"];
-                    if let Some(tot) = info["total_token_usage"]["total_tokens"].as_u64() {
-                        meta.ctx_tokens = Some(tot);
+                    // 컨텍스트 게이지는 "지금 창을 얼마나 차지했나"이므로 마지막 요청의
+                    // 입력 토큰을 쓴다. total_token_usage는 세션 전체 누적이라 창 크기를
+                    // 훌쩍 넘는다 (실측: 25.8만 창에 누적 1215만 → 게이지 4702%).
+                    if let Some(used) = info["last_token_usage"]["input_tokens"].as_u64() {
+                        if used > 0 {
+                            meta.ctx_tokens = Some(used);
+                        }
                     }
                     if let Some(w) = info["model_context_window"].as_u64() {
                         meta.ctx_window = Some(w);
@@ -671,5 +676,27 @@ mod codex_dump {
             }
         }
         eprintln!("{with}/{} rollouts carry a model", files.len());
+    }
+}
+
+#[cfg(test)]
+mod codex_ctx_tests {
+    /// 컨텍스트 게이지는 창 점유율이다. codex의 total_token_usage는 세션 누적이라
+    /// 그대로 쓰면 게이지가 100%를 한참 넘는다 (실측 4702%).
+    #[test]
+    fn codex_ctx_uses_the_last_request_not_the_running_total() {
+        let dir = std::env::temp_dir().join(format!("deck-cctx-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("rollout.jsonl");
+        let text = [
+            r#"{"type":"session_meta","payload":{"id":"s1","cwd":"C:/w"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"model_context_window":258400,"total_token_usage":{"total_tokens":12150416},"last_token_usage":{"input_tokens":138146}}}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&f, text).unwrap();
+        let m = super::read_codex_meta(&f).expect("meta");
+        assert_eq!(m.ctx_window, Some(258400));
+        assert_eq!(m.ctx_tokens, Some(138146), "누적이 아니라 마지막 요청의 입력");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
