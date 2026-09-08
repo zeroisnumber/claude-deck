@@ -807,13 +807,14 @@ async function spawnInto(id, t, failLabel) {
   }
 }
 
-async function openNewSession(cwd) {
+async function openNewSession(cwd, prof) {
+  const p = prof || currentProfile();
   const id = "new-" + Date.now();
   const entry = makeTerm(id, basename(cwd) + " · 새 세션", cwd);
   entry.name = "새 세션";
   entry.proj = basename(cwd);
-  entry.profile = currentProfile();
-  entry.spawnCommand = composeCommand(null);
+  entry.profile = p;
+  entry.spawnCommand = composeCommand(null, p);
   activate(id);
   await spawnInto(id, entry, "실행 실패");
   addRecentDir(cwd);
@@ -1062,14 +1063,35 @@ ro.observe(termArea);
 const DEFAULT_PROFILES = [
   { name: "Claude", cmd: "claude", resume: true },
   { name: "Headroom", cmd: "headroom wrap claude", resume: true },
+  // codex/gemini는 각자 CLI의 재개 방식이 달라 --resume을 붙이지 않는다.
+  { name: "Codex", cmd: "codex", resume: false },
+  { name: "Gemini", cmd: "gemini", resume: false },
 ];
 
 function loadProfiles() {
   try {
     const v = JSON.parse(localStorage.getItem("profiles"));
-    if (Array.isArray(v) && v.length) return v;
+    if (Array.isArray(v) && v.length) return seedAgents(v);
   } catch { /* 무시 */ }
+  // 새 설치는 기본 프로필에 이미 들어 있으니 채운 것으로 친다. 표시를 남기지 않으면
+  // 나중에 지운 프로필이 다음 실행에서 한 번 되살아난다.
+  localStorage.setItem("agentProfilesSeeded", "1");
   return DEFAULT_PROFILES.map((x) => ({ ...x }));
+}
+
+// 코덱스·제미나이 프로필을 늦게 추가했다. 이미 프로필을 저장해 둔 설치본에도 한 번은
+// 넣어 준다 — 없으면 새 세션을 그 에이전트로 시작할 방법이 아예 없다. 지운 사람에게
+// 다시 강요하지 않도록 딱 한 번만 한다.
+function seedAgents(list) {
+  if (localStorage.getItem("agentProfilesSeeded")) return list;
+  localStorage.setItem("agentProfilesSeeded", "1");
+  const add = DEFAULT_PROFILES.filter(
+    (d) => (d.name === "Codex" || d.name === "Gemini") &&
+      !list.some((p) => (p.cmd || "").trim() === d.cmd));
+  if (!add.length) return list;
+  const merged = [...list, ...add.map((x) => ({ ...x }))];
+  localStorage.setItem("profiles", JSON.stringify(merged));
+  return merged;
 }
 let profiles = loadProfiles();
 let activeProfile = parseInt(localStorage.getItem("profileSel") || "0", 10);
@@ -1122,8 +1144,8 @@ function pushKeepAlive() {
 pushKeepAlive();
 
 // 최종 실행 명령: 전역 env + 프로필 명령 + (재개 시) --resume <세션ID>
-function composeCommand(resumeId) {
-  const p = currentProfile();
+function composeCommand(resumeId, prof) {
+  const p = prof || currentProfile();
   let cmd = resumeId && p.resume !== false ? `${p.cmd} --resume ${resumeId}` : p.cmd;
   if (statusLineOn && statusLinePath) cmd += ` --settings "${statusLinePath}"`;
   return envPrefix(globalEnv) + cmd;
@@ -1270,7 +1292,26 @@ function addRecentDir(dir) {
   const list = [dir, ...getRecentDirs().filter((d) => d !== dir)].slice(0, 8);
   localStorage.setItem("recentDirs", JSON.stringify(list));
 }
+// 어떤 에이전트로 시작할지는 세션마다 다르다. 설정을 열어 기본 프로필을 바꾸게 하는 대신
+// 모달에서 고르게 한다 — 기본값은 설정에서 고른 프로필.
+let newProfileIdx = 0;
+
+function renderNewProfiles() {
+  const wrap = $("#new-profiles");
+  wrap.innerHTML = "";
+  profiles.forEach((p, i) => {
+    const chip = document.createElement("button");
+    chip.className = "dir-chip" + (i === newProfileIdx ? " on" : "");
+    chip.textContent = p.name || p.cmd;
+    chip.title = p.cmd;
+    chip.onclick = () => { newProfileIdx = i; renderNewProfiles(); };
+    wrap.appendChild(chip);
+  });
+}
+
 function openNewModal() {
+  newProfileIdx = activeProfile;
+  renderNewProfiles();
   const wrap = $("#recent-dirs");
   wrap.innerHTML = "";
   for (const d of getRecentDirs()) {
@@ -1279,7 +1320,10 @@ function openNewModal() {
     chip.textContent = basename(d);
     chip.title = d;
     chip.onclick = () => { $("#modal-path").value = d; };
-    chip.ondblclick = () => { $("#modal-backdrop").classList.add("hidden"); openNewSession(d); };
+    chip.ondblclick = () => {
+      $("#modal-backdrop").classList.add("hidden");
+      openNewSession(d, profiles[newProfileIdx]);
+    };
     wrap.appendChild(chip);
   }
   $("#modal-backdrop").classList.remove("hidden");
@@ -1297,7 +1341,7 @@ $("#modal-ok").onclick = () => {
   const p = $("#modal-path").value.trim();
   if (p) {
     $("#modal-backdrop").classList.add("hidden");
-    openNewSession(p);
+    openNewSession(p, profiles[newProfileIdx]);
   }
 };
 $("#modal-path").addEventListener("keydown", (e) => {

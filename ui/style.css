@@ -726,6 +726,12 @@ kbd {
   transition: border-color 0.1s, color 0.1s;
 }
 .dir-chip:hover { border-color: var(--accent); color: var(--text); }
+.dir-chip.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+}
+#new-profiles { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
 
 /* ─── 우클릭 메뉴 ─────────────────────────────────────── */
 #ctx-menu {
