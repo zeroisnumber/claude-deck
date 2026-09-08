@@ -1389,11 +1389,26 @@ function addProfileRow(name = "", cmd = "", resume = true, checked = false) {
   $("#profile-list").appendChild(row);
 }
 
+// 자동 확인은 6시간마다다. 그 사이에 새 버전이 나왔는지 지금 보고 싶을 때 쓴다.
+$("#btn-check-update").onclick = async (e) => {
+  const btn = e.currentTarget;
+  const el = $("#update-state");
+  btn.disabled = true;            // 연타로 두드리지 않게
+  el.textContent = "확인 중…";
+  try {
+    const found = await checkUpdate();
+    el.textContent = found ? `v${found} 있음 — 창 위 버튼으로 설치` : "최신 버전입니다";
+  } finally {
+    btn.disabled = false;
+  }
+};
+
 $("#btn-settings").onclick = () => {
   $("#profile-list").innerHTML = "";
   profiles.forEach((p, i) => addProfileRow(p.name, p.cmd, p.resume !== false, i === activeProfile));
   $("#global-env").value = globalEnv;
   invoke("trace_enabled").then((on) => { $("#opt-trace").checked = !!on; }).catch(() => {});
+  $("#update-state").textContent = "";
   $("#opt-webgl").checked = webglOn;
   $("#opt-statusline").checked = statusLineOn;
   $("#opt-keepalive").checked = !!keepAlive.enabled;
@@ -1680,12 +1695,20 @@ window.addEventListener("keyup", (e) => { if (!e.ctrlKey) setZoomWheel(false); }
 window.addEventListener("blur", () => setZoomWheel(false));
 
 // ---------- 자동 업데이트 ----------
+// 확인 경로는 둘뿐이다: 시작 직후와 6시간 주기, 그리고 설정의 "업데이트 확인".
+// 세션 갱신(20초)에 얹지 않는다 — 사무실처럼 여러 대가 같은 IP를 쓰면 그 IP의 호출만
+// 쌓이고, 얻는 것은 "몇 시간 일찍 안다" 정도다.
 async function checkUpdate() {
+  // 이미 버튼이 떠 있으면 더 물어볼 게 없다
+  const btn = $("#btn-update");
+  if (btn && !btn.classList.contains("hidden")) {
+    return btn.textContent.replace(/[^0-9.]/g, "") || "";
+  }
   try {
     const updater = window.__TAURI__ && window.__TAURI__.updater;
     if (!updater) return;
     const update = await updater.check();
-    if (!update) return;
+    if (!update) return null;
     const btn = $("#btn-update");
     btn.textContent = `⬆ v${update.version} 업데이트`;
     btn.classList.remove("hidden");
@@ -1700,10 +1723,14 @@ async function checkUpdate() {
         btn.disabled = false;
       }
     };
+    return update.version;
   } catch { /* 오프라인 등 — 조용히 무시 */ }
+  return null;
 }
 setTimeout(checkUpdate, 5000);
 setInterval(checkUpdate, 6 * 3600 * 1000); // 6시간마다
+// 그 사이에 확인하고 싶으면 설정의 "지금 확인"을 누른다 — 폴링에 얹어 자동으로 두드리지
+// 않는다. 확인은 GitHub 릴리스의 latest.json을 받아오는 네트워크 호출이다.
 
 // 창 표시: WebView 로드 완료 후에 보여주고 포커스 (첫 실행 한글 IME 미연결 버그 회피)
 // 여기서 조용히 실패하면 앱이 트레이에서만 열린다. 실패는 반드시 남긴다 —

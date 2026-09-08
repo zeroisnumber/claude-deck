@@ -899,6 +899,8 @@ kbd {
 #modal.dash { width: 640px; max-height: 84vh; overflow-y: auto; }
 .dash-head { display: flex; align-items: center; justify-content: space-between; }
 .dash-head-actions { display: flex; gap: 6px; align-items: center; }
+.foot-gap { flex: 1; }
+#update-state { white-space: nowrap; }
 .dash-head-actions .hidden { display: none; }
 #dash-period { display: flex; gap: 4px; }
 .dp {
