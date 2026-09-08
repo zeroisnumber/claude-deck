@@ -759,7 +759,7 @@ function commandFor(meta) {
 }
 
 // 데몬이 잡고 있는 백그라운드 세션은 --resume이 거절된다("claude attach <id>를 쓰라"고
-// 안내하고 종료). 그 세션을 이 탭에 그대로 붙인다. 래퍼 프로필(예: headroom wrap claude)은
+// 안내하고 종료). 그 세션을 이 탭에 그대로 붙인다. 래퍼 프로필(예: my-proxy run claude)은
 // 인자를 그대로 넘기므로 뒤에 attach를 붙이면 되고, claude가 아닌 명령이면 claude를 직접 부른다.
 function attachCommand(short) {
   const p = currentProfile();
@@ -1062,7 +1062,6 @@ ro.observe(termArea);
 // ---------- 실행 프로필 (설정 창에서 관리) ----------
 const DEFAULT_PROFILES = [
   { name: "Claude", cmd: "claude", resume: true },
-  { name: "Headroom", cmd: "headroom wrap claude", resume: true },
   // codex/gemini는 각자 CLI의 재개 방식이 달라 --resume을 붙이지 않는다.
   { name: "Codex", cmd: "codex", resume: false },
   { name: "Gemini", cmd: "gemini", resume: false },
@@ -1071,12 +1070,28 @@ const DEFAULT_PROFILES = [
 function loadProfiles() {
   try {
     const v = JSON.parse(localStorage.getItem("profiles"));
-    if (Array.isArray(v) && v.length) return seedAgents(v);
+    if (Array.isArray(v) && v.length) return dropHeadroom(seedAgents(v));
   } catch { /* 무시 */ }
   // 새 설치는 기본 프로필에 이미 들어 있으니 채운 것으로 친다. 표시를 남기지 않으면
   // 나중에 지운 프로필이 다음 실행에서 한 번 되살아난다.
   localStorage.setItem("agentProfilesSeeded", "1");
+  localStorage.setItem("headroomProfileRemoved", "1");
   return DEFAULT_PROFILES.map((x) => ({ ...x }));
+}
+
+// 헤드룸 연동을 걷어내면서 기본 프로필에서도 뺐다. 예전에 기본값으로 깔려 저장된
+// 프로필도 한 번 지운다 — 직접 만든 래퍼는 명령이 다르므로 그대로 둔다.
+function dropHeadroom(list) {
+  if (localStorage.getItem("headroomProfileRemoved")) return list;
+  localStorage.setItem("headroomProfileRemoved", "1");
+  const keep = list.filter((p) => (p.cmd || "").trim() !== "headroom wrap claude");
+  if (keep.length === list.length || !keep.length) return list;
+  // 고른 프로필이 밀리지 않게 위치를 다시 잡는다
+  const sel = parseInt(localStorage.getItem("profileSel") || "0", 10);
+  const idx = keep.indexOf(list[sel]);
+  localStorage.setItem("profileSel", String(idx >= 0 ? idx : 0));
+  localStorage.setItem("profiles", JSON.stringify(keep));
+  return keep;
 }
 
 // 코덱스·제미나이 프로필을 늦게 추가했다. 이미 프로필을 저장해 둔 설치본에도 한 번은
@@ -1158,7 +1173,7 @@ function addProfileRow(name = "", cmd = "", resume = true, checked = false) {
   row.innerHTML = `
     <label class="l-active" title="이 프로필 사용"><input type="radio" name="active-profile" /></label>
     <input class="set-input l-name" placeholder="이름" spellcheck="false" />
-    <input class="set-input mono l-cmd" placeholder="실행 명령 (예: headroom wrap claude)" spellcheck="false" />
+    <input class="set-input mono l-cmd" placeholder="실행 명령 (예: my-proxy run claude)" spellcheck="false" />
     <label class="l-resume" title="세션 재개 시 --resume <세션ID> 인자를 붙일지"><input type="checkbox" />재개</label>
     <button class="l-del" title="삭제">✕</button>`;
   row.querySelector(".l-active input").checked = checked;

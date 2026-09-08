@@ -132,7 +132,6 @@ fn main() {
             diag::trace_ui,
             usage::usage_stats,
             usage::session_turns,
-            usage::headroom_stats,
             usage::subscription_state,
             usage::codex_state,
             open_log_file,

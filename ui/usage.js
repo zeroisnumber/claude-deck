@@ -147,19 +147,6 @@ async function loadDash() {
 async function openDash() {
   $("#dash-backdrop").classList.remove("hidden");
   await loadDash();
-  // headroom 설치 시 절감 통계 표시 (없으면 섹션 숨김)
-  try {
-    const hr = await invoke("headroom_stats");
-    if (hr && hr.lifetime) {
-      $("#dash-hr-wrap").classList.remove("hidden");
-      $("#dash-hr").innerHTML = `
-        <div id="dash-hr-tiles">
-          <div class="tile"><div class="tile-v">${fmtTok(hr.lifetime.tokens_saved || 0)}</div><div class="tile-l">절감 토큰 (누적)</div></div>
-          <div class="tile"><div class="tile-v">$${(hr.lifetime.compression_savings_usd || 0).toFixed(2)}</div><div class="tile-l">절감 비용 (누적)</div></div>
-          <div class="tile"><div class="tile-v">${(hr.lifetime.requests || 0).toLocaleString()}</div><div class="tile-l">프록시 경유 요청</div></div>
-        </div>`;
-    }
-  } catch { /* headroom 없음 */ }
 }
 
 $("#btn-dash").onclick = openDash;
@@ -491,7 +478,7 @@ function fmtRemain(iso) {
 
 function limitRow(label, w) {
   // 리셋 시각을 지나면 API가 다음 폴링까지 리셋 전 utilization을 그대로 캐시해
-  // 내려주는 경우가 있음(headroom도 동일 현상을 관측해 표시 시점에 0으로 보정함) —
+  // 내려주는 경우가 있어 —
   // "85% · 리셋됨" 같은 모순 표시를 막기 위해 리셋 경과 시 0%로 취급한다.
   const resetPassed = w.resets_at && new Date(w.resets_at) - Date.now() <= 0;
   const pct = resetPassed ? 0 : Math.round(w.utilization_pct ?? 0);
@@ -516,7 +503,7 @@ async function updateLimits(force = false) {
   const wrap = $("#foot-limits");
   const rowsEl = $("#foot-limits-rows");
   let html = "";
-  // Claude (OAuth 사용량 API / headroom 폴백)
+  // Claude (상태줄 페이로드 또는 OAuth 사용량 API)
   try {
     const s = await invoke("subscription_state", { force });
     if (s && s.five_hour) {

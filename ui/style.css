@@ -911,7 +911,7 @@ kbd {
 }
 .dp.on { background: var(--accent-soft); border-color: rgba(var(--accent-rgb), 0.4); color: var(--accent); font-weight: 600; }
 
-#dash-tiles, #dash-hr-tiles {
+#dash-tiles {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
   gap: 8px;

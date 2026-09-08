@@ -637,8 +637,7 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
 }
 
 // ---------- 요금제 한도 (5시간/주간 사용률 + 리셋 시각) ----------
-// 기본: Claude Code OAuth 토큰으로 사용량 API 직접 조회 (headroom 불필요)
-// 폴백: headroom이 폴링해둔 subscription_state.json
+// 상태줄 페이로드가 있으면 그걸 쓰고, 없으면 Claude Code OAuth 토큰으로 사용량 API를 부른다.
 
 pub(crate) fn oauth_token() -> Option<String> {
     if let Ok(t) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
@@ -724,17 +723,6 @@ pub(crate) fn chrono_now_iso() -> String {
     format!("@{}", secs)
 }
 
-pub(crate) fn usage_from_headroom() -> Option<serde_json::Value> {
-    let p = dirs::home_dir()?.join(".headroom").join("subscription_state.json");
-    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
-    if v["latest"].is_null() {
-        return None;
-    }
-    let mut latest = v["latest"].clone();
-    latest["source"] = serde_json::json!("headroom");
-    Some(latest)
-}
-
 // ---------- Codex 상태 (rollout 파일의 token_count 이벤트에서 로컬로 추출) ----------
 
 pub(crate) fn codex_rollouts_by_mtime() -> Vec<PathBuf> {
@@ -804,24 +792,10 @@ pub(crate) fn subscription_state(force: bool) -> Option<serde_json::Value> {
         *USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), direct.clone()));
         return Some(direct);
     }
-    // direct 호출 실패(429 등) 시, headroom의 오래됐을 수 있는 파일보다는
-    // 직전에 성공했던 direct 응답(캐시 TTL을 넘겼더라도)을 우선한다 —
-    // headroom 프로세스가 꺼져 있으면 그 파일이 며칠씩 묵어 있을 수 있음.
-    {
-        let cache = USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, v)) = cache.as_ref() {
-            return Some(v.clone());
-        }
-    }
-    usage_from_headroom()
-}
-
-/// headroom이 설치되어 있으면 절감 통계 반환 (없으면 None — 대시보드에서 섹션 생략)
-#[tauri::command]
-pub(crate) fn headroom_stats() -> Option<serde_json::Value> {
-    let p = dirs::home_dir()?.join(".headroom").join("proxy_savings.json");
-    let text = fs::read_to_string(p).ok()?;
-    serde_json::from_str(&text).ok()
+    // direct 호출이 실패하면(429 등) 캐시 TTL을 넘겼더라도 직전에 성공한 응답을 쓴다 —
+    // 조금 묵은 숫자가 빈 게이지보다 낫다.
+    let cache = USAGE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.as_ref().map(|(_, v)| v.clone())
 }
 
 
