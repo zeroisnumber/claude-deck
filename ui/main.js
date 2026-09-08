@@ -1365,9 +1365,15 @@ function priceFor(model) {
 function ctxWindowFor(model) {
   return model.includes("haiku") ? 200_000 : 1_000_000;
 }
+// 코덱스는 구독제로 쓰고 토큰 단가표가 없다. 클로드 단가를 대신 먹이면 그럴듯한
+// 가짜 금액이 나오므로, 값을 계산하지 않고 없음으로 둔다 (표에는 "—"로 나간다).
 function rowCost(r) {
+  if (r.agent && r.agent !== "claude") return null;
   const [i, o] = priceFor(r.model);
   return (r.input * i + r.cache_read * i * 0.1 + r.cache_5m * i * 1.25 + r.cache_1h * i * 2 + r.output * o) / 1e6;
+}
+function fmtCost(v) {
+  return v === null ? "—" : `$${v.toFixed(2)}`;
 }
 function fmtTok(n) {
   if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
@@ -1409,32 +1415,36 @@ function renderDash() {
   const tot = { input: 0, output: 0, cache_read: 0, cache_w: 0, requests: 0, cost: 0 };
   const byModel = new Map();
   const byProj = new Map();
+  let unpriced = 0;
   for (const r of rows) {
     const cost = rowCost(r);
+    if (cost === null) unpriced += 1;
     tot.input += r.input;
     tot.output += r.output;
     tot.cache_read += r.cache_read;
     tot.cache_w += r.cache_5m + r.cache_1h;
     tot.requests += r.requests;
-    tot.cost += cost;
-    const m = byModel.get(r.model) || { tok: 0, out: 0, cost: 0, req: 0, cacheRead: 0, cacheW: 0, input: 0 };
+    tot.cost += cost || 0;
+    const m = byModel.get(r.model) || { tok: 0, out: 0, cost: 0, req: 0, cacheRead: 0, cacheW: 0, input: 0, unpriced: false };
     m.tok += r.input + r.cache_read + r.cache_5m + r.cache_1h;
     m.out += r.output;
-    m.cost += cost;
+    if (cost === null) m.unpriced = true;
+    m.cost += cost || 0;
     m.req += r.requests;
     m.cacheRead += r.cache_read;
     m.cacheW += r.cache_5m + r.cache_1h;
     m.input += r.input;
     byModel.set(r.model, m);
     const pName = basename(r.cwd) || r.cwd;
-    const p = byProj.get(pName) || { cost: 0, req: 0 };
-    p.cost += cost;
+    const p = byProj.get(pName) || { cost: 0, req: 0, unpriced: false };
+    if (cost === null) p.unpriced = true;
+    p.cost += cost || 0;
     p.req += r.requests;
     byProj.set(pName, p);
   }
 
   $("#dash-tiles").innerHTML = `
-    <div class="tile"><div class="tile-v">$${tot.cost.toFixed(2)}</div><div class="tile-l">추정 비용</div></div>
+    <div class="tile"><div class="tile-v">$${tot.cost.toFixed(2)}</div><div class="tile-l">추정 비용${unpriced ? " (클로드만)" : ""}</div></div>
     <div class="tile"><div class="tile-v">${tot.requests.toLocaleString()}</div><div class="tile-l">요청</div></div>
     <div class="tile"><div class="tile-v">${fmtTok(tot.input + tot.cache_read + tot.cache_w)}</div><div class="tile-l">입력 토큰 (캐시 포함)</div></div>
     <div class="tile"><div class="tile-v">${fmtTok(tot.output)}</div><div class="tile-l">출력 토큰</div></div>
@@ -1446,11 +1456,11 @@ function renderDash() {
   $("#dash-models").innerHTML = mkTable(
     ["모델", "요청", "입력", "출력", "캐시 적중률", "비용"],
     [...byModel.entries()]
-      .sort((a, b) => b[1].cost - a[1].cost)
+      .sort((a, b) => b[1].cost - a[1].cost || b[1].tok - a[1].tok)
       .map(([m, v]) => {
         const denom = v.cacheRead + v.cacheW + v.input;
         const hit = denom > 0 ? Math.round((v.cacheRead / denom) * 100) : 0;
-        return `<tr><td>${m}</td><td>${v.req.toLocaleString()}</td><td>${fmtTok(v.tok)}</td><td>${fmtTok(v.out)}</td><td>${hit}%</td><td>$${v.cost.toFixed(2)}</td></tr>`;
+        return `<tr><td>${m}</td><td>${v.req.toLocaleString()}</td><td>${fmtTok(v.tok)}</td><td>${fmtTok(v.out)}</td><td>${hit}%</td><td>${v.unpriced ? "—" : fmtCost(v.cost)}</td></tr>`;
       })
       .join("") || `<tr><td colspan="6">데이터 없음</td></tr>`,
   );
@@ -1460,7 +1470,7 @@ function renderDash() {
     [...byProj.entries()]
       .sort((a, b) => b[1].cost - a[1].cost)
       .slice(0, 12)
-      .map(([p, v]) => `<tr><td>${p}</td><td>${v.req.toLocaleString()}</td><td>$${v.cost.toFixed(2)}</td></tr>`)
+      .map(([p, v]) => `<tr><td>${p}</td><td>${v.req.toLocaleString()}</td><td>${v.unpriced ? "—" : fmtCost(v.cost)}</td></tr>`)
       .join("") || `<tr><td colspan="3">데이터 없음</td></tr>`,
   );
 }
@@ -1506,8 +1516,19 @@ for (const b of document.querySelectorAll("#dash-period .dp")) {
 let turnsData = [];
 let turnsTitle = "";
 let turnGroups = [];
+// 코덱스는 구독제라 토큰 단가가 없다. 금액을 지어내는 대신 같은 자리에 토큰을 쓴다 —
+// 어느 질문이 비쌌나를 묻는 화면이므로 단위만 바뀌면 나머지 구성은 그대로 쓸 수 있다.
+let turnsPriced = true;
+function turnValue(t) {
+  return turnsPriced ? turnCost(t) : t.input + t.cache_read + t.output;
+}
+function fmtVal(v, fine) {
+  if (turnsPriced) return `$${v.toFixed(fine ? 3 : 2)}`;
+  return fmtTok(v);
+}
 
 function turnCost(t) {
+  if (!/^claude-/.test(t.model || "")) return 0; // 코덱스 등 단가표가 없는 모델
   const [i, o] = priceFor(t.model || "");
   return (t.input * i + t.cache_read * i * 0.1 + t.cache_5m * i * 1.25 + t.cache_1h * i * 2 + t.output * o) / 1e6;
 }
@@ -1517,6 +1538,7 @@ function isCacheMiss(t, idx) {
 }
 // 캐시로 읽은 토큰을 정가로 냈다면 얼마였을지와 실제 낸 값의 차이 — 캐시가 벌어준 돈
 function turnSaving(t) {
+  if (!/^claude-/.test(t.model || "")) return 0;
   const [i] = priceFor(t.model || "");
   return (t.cache_read * i * 0.9) / 1e6;
 }
@@ -1558,7 +1580,8 @@ function renderTurns(s) {
     $("#turns-sub").textContent = `${turnsTitle} — 토큰 기록이 있는 응답이 없습니다`;
     return;
   }
-  const cost = ts.map(turnCost);
+  turnsPriced = /^claude-/.test(ts[ts.length - 1].model || "");
+  const cost = ts.map(turnValue);
   const total = cost.reduce((a, b) => a + b, 0);
   const misses = ts.map((t, i) => (isCacheMiss(t, i) ? i : -1)).filter((i) => i >= 0);
   const readTot = ts.reduce((a, t) => a + t.cache_read, 0);
@@ -1571,8 +1594,8 @@ function renderTurns(s) {
 
   const tile = (v, l, cls) => `<div class="tile"><div class="tile-v ${cls || ""}">${v}</div><div class="tile-l">${l}</div></div>`;
   $("#turns-tiles").innerHTML =
-    tile(`$${total.toFixed(2)}`, "누적 비용") +
-    tile(`$${saved.toFixed(2)}`, "캐시가 아낀 돈") +
+    tile(fmtVal(total), turnsPriced ? "누적 비용" : "누적 토큰") +
+    tile(turnsPriced ? `$${saved.toFixed(2)}` : fmtTok(readTot), turnsPriced ? "캐시가 아낀 돈" : "캐시로 읽은 토큰") +
     tile(`${hit}%`, "캐시 적중률") +
     tile(String(misses.length), "캐시 끊김", misses.length ? "hot" : "");
 
@@ -1612,7 +1635,7 @@ function renderCurve(cost, total, misses) {
     `<polyline points="${pts}" /></svg>` +
     `<i class="tc-cursor" hidden></i><i class="tc-span" hidden></i><div class="tc-tip" hidden></div>`;
   $("#turns-curve-head").textContent =
-    `비용 — 막대는 응답 하나(${n}개), 얇은 선은 누적` +
+    `${turnsPriced ? "비용" : "토큰"} — 막대는 응답 하나(${n}개), 얇은 선은 누적` +
     (misses.length ? `, 빨간 막대는 캐시가 끊긴 턴` : "");
 
   // 마우스 x를 턴 번호로 바꿔 그 지점의 값을 띄운다 (막대마다 title을 다는 것보다 가볍다)
@@ -1628,7 +1651,7 @@ function renderCurve(cost, total, misses) {
     cur.style.left = `${(i + 0.5) * bw}%`;
     tip.hidden = false;
     tip.innerHTML =
-      `<b>${turnTime(t.ts)}</b> · 이 턴 $${cost[i].toFixed(3)} / 여기까지 $${acc[i].toFixed(2)}<br>` +
+      `<b>${turnTime(t.ts)}</b> · 이 턴 ${fmtVal(cost[i], true)} / 여기까지 ${fmtVal(acc[i])}<br>` +
       `${escapeHtml(firstLine(t.text, 60) || (t.tools[0] ? t.tools[0] : "도구 호출"))}`;
     const w = tip.offsetWidth || 220;
     tip.style.left = `${Math.min(Math.max(e.clientX - r.left - w / 2, 0), r.width - w)}px`;
@@ -1671,7 +1694,8 @@ function renderPrompts(cost) {
   });
   turnGroups = [...by.values()].filter((g) => g.prompt).sort((a, b) => b.cost - a.cost).slice(0, 12);
   $("#turns-prompts-head").textContent =
-    `질문별 비용 — 비싼 순 상위 ${turnGroups.length}개 (질문 ${by.size}개, 줄을 누르면 무슨 일을 했는지 펼쳐집니다)`;
+    `질문별 ${turnsPriced ? "비용" : "토큰"} — 많이 쓴 순 상위 ${turnGroups.length}개 ` +
+    `(질문 ${by.size}개, 줄을 누르면 무슨 일을 했는지 펼쳐집니다)`;
   if (!turnGroups.length) {
     $("#turns-prompts").innerHTML = `<div class="dash-note">질문 기록이 없습니다</div>`;
     return;
@@ -1682,14 +1706,14 @@ function renderPrompts(cost) {
         `<tr class="tp-row${g.miss ? " turn-miss" : ""}" data-g="${gi}">` +
         `<td class="tp-q" title="${escapeHtml(g.prompt)}">${escapeHtml(firstLine(g.prompt, 70))}</td>` +
         `<td class="tp-a" title="${escapeHtml(g.answer)}">${escapeHtml(firstLine(g.answer, 70) || "—")}</td>` +
-        `<td>${g.idxs.length}</td><td>$${g.cost.toFixed(2)}</td></tr>`;
+        `<td>${g.idxs.length}</td><td>${fmtVal(g.cost)}</td></tr>`;
       const trail =
         `<tr class="tp-detail hidden" data-d="${gi}"><td colspan="4">${trailOf(g, cost)}</td></tr>`;
       return head + trail;
     })
     .join("");
   $("#turns-prompts").innerHTML =
-    `<table><thead><tr><th>질문</th><th>답변</th><th>턴</th><th>비용</th></tr></thead><tbody>${rows}</tbody></table>`;
+    `<table><thead><tr><th>질문</th><th>답변</th><th>턴</th><th>${turnsPriced ? "비용" : "토큰"}</th></tr></thead><tbody>${rows}</tbody></table>`;
   $("#turns-prompts").querySelectorAll(".tp-row").forEach((tr) => {
     tr.onmouseenter = () => highlightSpan(turnGroups[tr.dataset.g]);
     tr.onmouseleave = () => highlightSpan(null);
@@ -1715,7 +1739,7 @@ function trailOf(g, cost) {
         .join(" ");
       if (!what && !tools) return "";
       return `<div class="tr-line${isCacheMiss(t, i) ? " miss" : ""}">` +
-        `<span class="tr-cost">$${cost[i].toFixed(3)}</span>${what}${what && tools ? " " : ""}${tools}</div>`;
+        `<span class="tr-cost">${fmtVal(cost[i], true)}</span>${what}${what && tools ? " " : ""}${tools}</div>`;
     })
     .filter(Boolean)
     .join("");
@@ -1734,11 +1758,11 @@ function turnTable(idxs, cost) {
         `<td class="tp-q" title="${escapeHtml(what)}">${escapeHtml(what)}</td>` +
         `<td>${fmtTok(t.input)}</td>` +
         `<td>${fmtTok(t.cache_read)}</td><td>${fmtTok(t.cache_5m + t.cache_1h)}</td>` +
-        `<td>${fmtTok(t.output)}</td><td>$${cost[i].toFixed(3)}</td><td>${miss ? "캐시 끊김" : ""}</td></tr>`;
+        `<td>${fmtTok(t.output)}</td><td>${fmtVal(cost[i], true)}</td><td>${miss ? "캐시 끊김" : ""}</td></tr>`;
     })
     .join("");
   return `<table><thead><tr><th>시각</th><th>질문</th><th>한 일</th><th>입력</th><th>캐시 읽기</th>` +
-    `<th>캐시 쓰기</th><th>출력</th><th>비용</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+    `<th>캐시 쓰기</th><th>출력</th><th>${turnsPriced ? "비용" : "토큰"}</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 $("#turns-close").onclick = () => closeModal($("#turns-backdrop"));

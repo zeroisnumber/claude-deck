@@ -19,6 +19,8 @@ pub(crate) struct UsageRow {
     pub(crate) cache_5m: u64,
     pub(crate) cache_1h: u64,
     pub(crate) requests: u64,
+    /// "claude" | "codex" — 프런트가 요금 표시 여부를 가른다
+    pub(crate) agent: String,
 }
 
 pub(crate) type UsageKey = (String, String, String); // (날짜, 모델, 프로젝트)
@@ -59,7 +61,13 @@ pub(crate) fn usage_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
         let model = obj["message"]["model"].as_str().unwrap_or("?").to_string();
         let row = map
             .entry((date.clone(), model.clone(), cwd.clone()))
-            .or_insert_with(|| UsageRow { date, model, cwd: cwd.clone(), ..Default::default() });
+            .or_insert_with(|| UsageRow {
+                date,
+                model,
+                cwd: cwd.clone(),
+                agent: "claude".into(),
+                ..Default::default()
+            });
         row.input += u["input_tokens"].as_u64().unwrap_or(0);
         row.output += u["output_tokens"].as_u64().unwrap_or(0);
         row.cache_read += u["cache_read_input_tokens"].as_u64().unwrap_or(0);
@@ -157,7 +165,107 @@ fn assistant_blocks(content: &serde_json::Value) -> (String, Vec<String>) {
 pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
     let path = session_file_in_store(&file)?;
     let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    if path.components().any(|c| c.as_os_str() == ".codex") {
+        return Ok(codex_turns_from_text(&text));
+    }
     Ok(turns_from_text(&text))
+}
+
+/// Codex rollout을 클로드와 같은 모양의 턴 목록으로. 스키마가 전혀 달라서 별도 파서다.
+///
+/// - 토큰은 total_token_usage의 차분 (중복 이벤트가 있어 last_token_usage 합산은 부정확)
+/// - 한 턴의 경계는 token_count 이벤트다. 그 사이에 쌓인 말과 도구 호출을 그 턴에 붙인다.
+/// - Codex에는 캐시 쓰기 개념이 따로 없어 cache_5m/1h는 항상 0이다.
+pub(crate) fn codex_turns_from_text(text: &str) -> Vec<TurnRow> {
+    let mut out: Vec<TurnRow> = Vec::new();
+    let mut model = String::from("?");
+    let mut prompt = String::new();
+    let mut prompt_idx: u32 = 0;
+    let (mut p_in, mut p_cached, mut p_out) = (0u64, 0u64, 0u64);
+    let mut said = String::new();
+    let mut tools: Vec<String> = Vec::new();
+
+    for line in text.lines() {
+        let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        let payload = &obj["payload"];
+        match obj["type"].as_str().unwrap_or("") {
+            "turn_context" => {
+                if let Some(m) = payload["model"].as_str() {
+                    model = m.to_string();
+                }
+            }
+            // 도구 호출은 response_item으로 따로 기록된다 (arguments는 JSON 문자열)
+            "response_item" if payload["type"] == "function_call" => {
+                let name = payload["name"].as_str().unwrap_or("tool");
+                let args = payload["arguments"].as_str().unwrap_or("");
+                let arg = serde_json::from_str::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|v| {
+                        v.as_object()
+                            .and_then(|o| o.values().find_map(|x| x.as_str()).map(str::to_string))
+                    })
+                    .unwrap_or_default();
+                let arg: String = arg.split('\n').next().unwrap_or("").chars().take(48).collect();
+                tools.push(if arg.is_empty() { name.to_string() } else { format!("{name} {arg}") });
+            }
+            "event_msg" => match payload["type"].as_str().unwrap_or("") {
+                "user_message" => {
+                    if let Some(m) = payload["message"].as_str() {
+                        let m = m.trim();
+                        if !m.is_empty() && !m.starts_with('<') {
+                            prompt = m.chars().take(300).collect();
+                            prompt_idx += 1;
+                        }
+                    }
+                }
+                "agent_message" => {
+                    if let Some(m) = payload["message"].as_str() {
+                        if said.is_empty() {
+                            said = m.chars().take(400).collect();
+                        }
+                    }
+                }
+                "token_count" => {
+                    let t = &payload["info"]["total_token_usage"];
+                    let (i, c, o) = (
+                        t["input_tokens"].as_u64().unwrap_or(0),
+                        t["cached_input_tokens"].as_u64().unwrap_or(0),
+                        t["output_tokens"].as_u64().unwrap_or(0),
+                    );
+                    if i < p_in || c < p_cached || o < p_out {
+                        p_in = 0;
+                        p_cached = 0;
+                        p_out = 0;
+                    }
+                    let (d_in, d_c, d_out) =
+                        (i - p_in.min(i), c - p_cached.min(c), o - p_out.min(o));
+                    p_in = i;
+                    p_cached = c;
+                    p_out = o;
+                    if d_in == 0 && d_c == 0 && d_out == 0 {
+                        continue; // 같은 값을 다시 낸 중복 이벤트
+                    }
+                    let Some(ts) = obj["timestamp"].as_str().and_then(parse_iso_ts) else { continue };
+                    out.push(TurnRow {
+                        ts,
+                        model: model.clone(),
+                        input: d_in - d_c.min(d_in),
+                        output: d_out,
+                        cache_read: d_c,
+                        cache_5m: 0,
+                        cache_1h: 0,
+                        prompt: prompt.clone(),
+                        prompt_idx,
+                        text: std::mem::take(&mut said),
+                        tools: std::mem::take(&mut tools),
+                    });
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    out
 }
 
 /// session_turns의 본체 — 저장소 경로 검사 없이 텍스트만 파싱해 테스트할 수 있게 분리
@@ -235,6 +343,105 @@ pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
     out
 }
 
+/// Codex rollout 하나를 (날짜, 모델, 프로젝트)별로 집계.
+///
+/// Codex는 turn마다 token_count 이벤트를 남기는데 거기 담긴 last_token_usage를 그냥
+/// 더하면 안 된다 — 같은 값을 다시 내보내는 중복 이벤트가 있어서 실측 세션에서 2.3%
+/// 넘게 부풀었다. total_token_usage는 18개 세션 전부에서 단조 증가했고 그 차분을 더하면
+/// 마지막 total과 정확히 일치하므로, 차분을 쓴다.
+///
+/// input_tokens는 cached_input_tokens를 포함한다. 대시보드의 input은 캐시가 아닌
+/// 입력이므로 둘의 차이를 넣는다.
+pub(crate) fn codex_rows_of_file(path: &PathBuf) -> Vec<UsageRow> {
+    let Ok(text) = fs::read_to_string(path) else { return vec![] };
+    let mut map: HashMap<UsageKey, UsageRow> = HashMap::new();
+    let mut cwd = String::new();
+    let mut model = String::from("?");
+    let (mut p_in, mut p_cached, mut p_out) = (0u64, 0u64, 0u64);
+
+    for line in text.lines() {
+        let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        let payload = &obj["payload"];
+        match obj["type"].as_str().unwrap_or("") {
+            "session_meta" => {
+                if let Some(c) = payload["cwd"].as_str() {
+                    cwd = strip_verbatim(c);
+                }
+            }
+            "turn_context" => {
+                if let Some(m) = payload["model"].as_str() {
+                    model = m.to_string();
+                }
+            }
+            "event_msg" if payload["type"] == "token_count" => {
+                let t = &payload["info"]["total_token_usage"];
+                let (i, c, o) = (
+                    t["input_tokens"].as_u64().unwrap_or(0),
+                    t["cached_input_tokens"].as_u64().unwrap_or(0),
+                    t["output_tokens"].as_u64().unwrap_or(0),
+                );
+                // 되감김(압축·롤백)이면 그 시점부터 다시 센다
+                if i < p_in || c < p_cached || o < p_out {
+                    p_in = 0;
+                    p_cached = 0;
+                    p_out = 0;
+                }
+                let (d_in, d_c, d_out) = (i - p_in.min(i), c - p_cached.min(c), o - p_out.min(o));
+                p_in = i;
+                p_cached = c;
+                p_out = o;
+                if d_in == 0 && d_c == 0 && d_out == 0 {
+                    continue; // 같은 값을 다시 낸 중복 이벤트
+                }
+                let ts = obj["timestamp"].as_str().unwrap_or("");
+                if ts.len() < 10 {
+                    continue;
+                }
+                let date = ts[..10].to_string();
+                let row = map
+                    .entry((date.clone(), model.clone(), cwd.clone()))
+                    .or_insert_with(|| UsageRow {
+                        date,
+                        model: model.clone(),
+                        cwd: cwd.clone(),
+                        agent: "codex".into(),
+                        ..Default::default()
+                    });
+                row.input += d_in - d_c.min(d_in);
+                row.cache_read += d_c;
+                row.output += d_out;
+                row.requests += 1;
+            }
+            _ => {}
+        }
+    }
+    map.into_values().collect()
+}
+
+/// Windows의 `\\?\` 접두사를 떼어 탭의 cwd와 같은 모양으로 맞춘다
+pub(crate) fn strip_verbatim(p: &str) -> String {
+    p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
+}
+
+/// ~/.codex/sessions 아래의 rollout 파일 전부
+pub(crate) fn codex_rollout_files() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else { return vec![] };
+    let mut out = Vec::new();
+    let mut stack = vec![home.join(".codex").join("sessions")];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
 /// 파일별 집계 캐시 — 대시보드를 열 때마다 최근 N일치 jsonl을 전량 다시 읽지 않도록
 /// mtime이 그대로면 재사용한다 (세션 목록의 META_CACHE와 같은 전략).
 pub(crate) static USAGE_FILE_CACHE: LazyLock<Mutex<HashMap<String, (f64, Vec<UsageRow>)>>> =
@@ -248,13 +455,22 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
     let projects = home.join(".claude").join("projects");
     let cutoff = std::time::SystemTime::now()
         - std::time::Duration::from_secs(days as u64 * 86400 + 86400);
-    let Ok(dirs_iter) = fs::read_dir(&projects) else { return vec![] };
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for proj in dirs_iter.flatten() {
-        let Ok(files) = fs::read_dir(proj.path()) else { continue };
-        for f in files.flatten() {
-            let p = f.path();
+    // 클로드 세션 + 코덱스 rollout. 저장소 구조가 달라서 목록을 먼저 모으고
+    // 파일 위치로 파서를 고른다.
+    let mut all: Vec<PathBuf> = Vec::new();
+    if let Ok(dirs_iter) = fs::read_dir(&projects) {
+        for proj in dirs_iter.flatten() {
+            if let Ok(files) = fs::read_dir(proj.path()) {
+                all.extend(files.flatten().map(|f| f.path()));
+            }
+        }
+    }
+    all.extend(codex_rollout_files());
+
+    {
+        for p in all {
             if !p.extension().map(|e| e == "jsonl").unwrap_or(false) {
                 continue;
             }
@@ -277,7 +493,8 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
                 }
             };
             let rows = cached.unwrap_or_else(|| {
-                let rows = usage_rows_of_file(&p);
+                let is_codex = p.components().any(|c| c.as_os_str() == ".codex");
+                let rows = if is_codex { codex_rows_of_file(&p) } else { usage_rows_of_file(&p) };
                 USAGE_FILE_CACHE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -291,6 +508,7 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
                         date: r.date.clone(),
                         model: r.model.clone(),
                         cwd: r.cwd.clone(),
+                        agent: r.agent.clone(),
                         ..Default::default()
                     });
                 entry.input += r.input;
@@ -552,8 +770,72 @@ mod tests {
         let src = std::env::var("DECK_DUMP_IN").expect("DECK_DUMP_IN");
         let dst = std::env::var("DECK_DUMP_OUT").expect("DECK_DUMP_OUT");
         let text = fs::read_to_string(&src).unwrap();
-        let turns = turns_from_text(&text);
+        let turns = if src.contains(".codex") {
+            codex_turns_from_text(&text)
+        } else {
+            turns_from_text(&text)
+        };
         fs::write(&dst, serde_json::to_string(&turns).unwrap()).unwrap();
         eprintln!("{} turns -> {dst}", turns.len());
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    /// 중복 token_count 이벤트를 그냥 더하면 토큰이 부풀어 오른다 (실측 2.3%).
+    /// 누적값의 차분을 써야 마지막 total과 정확히 맞는다.
+    #[test]
+    fn duplicate_token_events_are_not_double_counted() {
+        let ev = |ts: &str, i: u64, c: u64, o: u64| {
+            format!(
+                r#"{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{i},"cached_input_tokens":{c},"output_tokens":{o}}}}}}}}}"#
+            )
+        };
+        let text = format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"session_meta","payload":{"cwd":"\\\\?\\C:\\work"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            ev("2026-05-25T03:10:36Z", 100, 40, 10),
+            // 같은 값을 다시 낸 중복 이벤트 — 무시돼야 한다
+            ev("2026-05-25T03:10:37Z", 100, 40, 10),
+        );
+        let dir = std::env::temp_dir().join(format!("deck-cxu-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let f = dir.join("rollout.jsonl");
+        fs::write(&f, text).unwrap();
+        let rows = codex_rows_of_file(&f);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.requests, 1, "중복 이벤트는 요청으로 세지 않는다");
+        assert_eq!(r.cache_read, 40);
+        assert_eq!(r.input, 60, "input_tokens는 캐시를 포함하므로 빼고 넣는다");
+        assert_eq!(r.output, 10);
+        assert_eq!(r.model, "gpt-5.5");
+        assert_eq!(r.agent, "codex");
+        assert_eq!(r.cwd, r"C:\work", r"\?\ 접두사는 떼어낸다");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 실제 rollout 전체 집계 — `cargo test -- --ignored codex_totals`
+    #[test]
+    #[ignore]
+    fn codex_totals() {
+        let (mut i, mut c, mut o, mut req) = (0u64, 0u64, 0u64, 0u64);
+        let files = codex_rollout_files();
+        for p in &files {
+            for r in codex_rows_of_file(p) {
+                i += r.input;
+                c += r.cache_read;
+                o += r.output;
+                req += r.requests;
+            }
+        }
+        eprintln!(
+            "{} rollouts: uncached_in={i} cached_in={c} out={o} total={} requests={req}",
+            files.len(),
+            i + c + o
+        );
     }
 }
