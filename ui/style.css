@@ -23,6 +23,13 @@
   /* 터미널 선택 영역 — xterm이 CSS를 못 쓰므로 여기서 읽어 간다 */
   --term-selection: #3b4050;
   --green:     #87b387;
+  /* 에이전트를 가리키는 자리(글리프·탭 라벨)에만 쓴다. 강조색과 달리 화면 전체에
+     퍼지지 않는다. 터미널 테마도 이 값을 읽어 간다. */
+  --agent-claude: #d97757;
+  --agent-codex:  #6aa8a8;
+  --agent-gemini: #8cb4dd;
+  /* 실패·캐시 끊김처럼 본문 글자에 얹는 옅은 빨강 (--red는 점·막대용) */
+  --red-soft:  #ef8080;
   /* 경고 단계 — 게이지가 초록에서 붉은색으로 가는 중간이자, 입력 대기 상태의 색 */
   --amber:     #e8b878;
   --red:       #e05d5d;
@@ -309,9 +316,9 @@ html, body {
 
 /* 에이전트 글리프 */
 .si-agent { flex: none; font-size: 11px; }
-.si-agent.claude { color: var(--accent); }
-.si-agent.codex  { color: #6aa8a8; }
-.si-agent.gemini { color: #8cb4dd; }
+.si-agent.claude { color: var(--agent-claude); }
+.si-agent.codex  { color: var(--agent-codex); }
+.si-agent.gemini { color: var(--agent-gemini); }
 
 #session-list {
   flex: 1;
@@ -343,7 +350,7 @@ html, body {
 .si-status.bg-run  { background: var(--green); }
 .si-status.bg-wait { background: var(--amber); }
 .si-status.bg-done { border: 1.5px solid var(--text-faint); }
-.si-status.bg-fail { border: 1.5px solid #ef8080; }
+.si-status.bg-fail { border: 1.5px solid var(--red-soft); }
 /* 읽지 않은 완료: 탭의 attention 글로우와 같은 뜻을 사이드바에도 */
 .si-status.unread { box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.28); }
 .session-item.kb { outline: 1px solid rgba(var(--accent-rgb), 0.6); outline-offset: -1px; }
@@ -962,7 +969,7 @@ kbd {
 }
 .si-bg.run  { color: #a3cba3; border-color: #3f5a3f; background: #26311f; }
 .si-bg.wait { color: var(--amber); border-color: #5c4a2c; background: #302819; }
-.si-bg.fail { color: #ef8080; border-color: #5c3333; background: #301f1f; }
+.si-bg.fail { color: var(--red-soft); border-color: #5c3333; background: #301f1f; }
 .si-bg.done { color: var(--text-dim); border-color: var(--bg-active); }
 .si-bg-detail {
   font-size: 11px;
@@ -982,7 +989,7 @@ kbd {
   margin: 10px 0 4px;
 }
 #turns-sub { margin-bottom: 2px; }
-.turn-miss td { color: #ef8080; }
+.turn-miss td { color: var(--red-soft); }
 
 /* 질문 열이 붙어 열이 8개가 되므로 이 팝업만 넓게 */
 #modal.turns { width: min(860px, 92vw); }
@@ -1088,7 +1095,7 @@ kbd {
   font-size: 11.5px;
   line-height: 1.5;
 }
-.tr-line.miss { color: #ef8080; }
+.tr-line.miss { color: var(--red-soft); }
 .tr-cost {
   flex: 0 0 52px;
   color: var(--text-dim);
