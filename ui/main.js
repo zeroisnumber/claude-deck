@@ -1572,10 +1572,36 @@ function renderTurns(s) {
       const h = Math.max(2, Math.min(100, (cost[i] / cap) * 100));
       const miss = isCacheMiss(t, i);
       const title = `${turnTime(t.ts)} · $${cost[i].toFixed(3)}\n입력 ${fmtTok(t.input)} · 캐시읽기 ${fmtTok(t.cache_read)}` +
-        ` · 캐시쓰기 ${fmtTok(t.cache_5m + t.cache_1h)} · 출력 ${fmtTok(t.output)}${miss ? "\n캐시 끊김" : ""}`;
+        ` · 캐시쓰기 ${fmtTok(t.cache_5m + t.cache_1h)} · 출력 ${fmtTok(t.output)}${miss ? "\n캐시 끊김" : ""}` +
+        (t.prompt ? `\n\n${t.prompt.slice(0, 160)}` : "");
       return `<div class="tc-bar${miss ? " miss" : ""}" style="height:${h}%" title="${title}"></div>`;
     })
     .join("");
+
+  // 질문별: 도구 호출 루프 때문에 한 질문이 여러 턴을 만든다. 그걸 다시 묶어야
+  // "어떤 질문이 비쌌나"가 보인다.
+  const byPrompt = new Map();
+  ts.forEach((t, i) => {
+    const key = t.prompt_idx;
+    const g = byPrompt.get(key) || { prompt: t.prompt, cost: 0, turns: 0, out: 0, cw: 0, ts: t.ts, miss: 0 };
+    g.cost += cost[i];
+    g.turns += 1;
+    g.out += t.output;
+    g.cw += t.cache_5m + t.cache_1h;
+    if (isCacheMiss(t, i)) g.miss += 1;
+    byPrompt.set(key, g);
+  });
+  const groups = [...byPrompt.values()].filter((g) => g.prompt).sort((a, b) => b.cost - a.cost).slice(0, 10);
+  $("#turns-prompts-head").textContent = `질문별 비용 — 비싼 순 상위 ${groups.length}개 (질문 ${byPrompt.size}개)`;
+  $("#turns-prompts").innerHTML = groups.length
+    ? `<table><thead><tr><th>질문</th><th>턴</th><th>출력</th><th>캐시 쓰기</th><th>비용</th></tr></thead><tbody>` +
+      groups
+        .map((g) => `<tr class="${g.miss ? "turn-miss" : ""}"><td class="tp-q" title="${escapeHtml(g.prompt)}">` +
+          `${escapeHtml(g.prompt)}</td><td>${g.turns}</td><td>${fmtTok(g.out)}</td>` +
+          `<td>${fmtTok(g.cw)}</td><td>$${g.cost.toFixed(2)}</td></tr>`)
+        .join("") +
+      `</tbody></table>`
+    : `<div class="dash-note">질문 기록이 없습니다</div>`;
 
   // 눈에 띄는 턴: 캐시가 끊긴 턴 전부 + 비싼 상위 5개
   const top = cost.map((c, i) => [c, i]).sort((a, b) => b[0] - a[0]).slice(0, 5).map(([, i]) => i);
@@ -1599,12 +1625,14 @@ function turnTable(idxs, cost) {
     .map((i) => {
       const t = turnsData[i];
       const miss = isCacheMiss(t, i);
-      return `<tr class="${miss ? "turn-miss" : ""}"><td>${turnTime(t.ts)}</td><td>${fmtTok(t.input)}</td>` +
+      return `<tr class="${miss ? "turn-miss" : ""}"><td>${turnTime(t.ts)}</td>` +
+        `<td class="tp-q" title="${escapeHtml(t.prompt || "")}">${escapeHtml(t.prompt || "")}</td>` +
+        `<td>${fmtTok(t.input)}</td>` +
         `<td>${fmtTok(t.cache_read)}</td><td>${fmtTok(t.cache_5m + t.cache_1h)}</td>` +
         `<td>${fmtTok(t.output)}</td><td>$${cost[i].toFixed(3)}</td><td>${miss ? "캐시 끊김" : ""}</td></tr>`;
     })
     .join("");
-  return `<table><thead><tr><th>시각</th><th>입력</th><th>캐시 읽기</th><th>캐시 쓰기</th><th>출력</th><th>비용</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  return `<table><thead><tr><th>시각</th><th>질문</th><th>입력</th><th>캐시 읽기</th><th>캐시 쓰기</th><th>출력</th><th>비용</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 $("#turns-close").onclick = () => closeModal($("#turns-backdrop"));

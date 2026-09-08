@@ -902,6 +902,7 @@ kbd {
 
 .dash-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .dash-table th {
+  white-space: nowrap;
   text-align: left;
   color: var(--text-faint);
   font-weight: 500;
@@ -990,3 +991,16 @@ kbd {
 }
 #turns-sub { margin-bottom: 2px; }
 .turn-miss td { color: #ef8080; }
+
+/* 질문 열이 붙어 열이 8개가 되므로 이 팝업만 넓게 */
+#modal.turns { width: 860px; }
+#turns-all .tp-q { max-width: 190px; }
+
+/* 질문 열: 길어도 한 줄로 자르고 전체는 툴팁으로 */
+.tp-q {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text) !important;
+}

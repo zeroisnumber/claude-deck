@@ -73,6 +73,10 @@ pub(crate) struct TurnRow {
     pub(crate) cache_read: u64,
     pub(crate) cache_5m: u64,
     pub(crate) cache_1h: u64,
+    /// 이 응답을 낳은 사용자 프롬프트 (도구 호출 루프에서는 여러 턴이 같은 값을 공유한다)
+    pub(crate) prompt: String,
+    /// 같은 프롬프트에 속한 턴을 묶기 위한 번호
+    pub(crate) prompt_idx: u32,
 }
 
 /// 세션 파일의 모든 assistant 응답을 시간순으로. 알려진 세션 저장소 안의 파일만 읽는다.
@@ -81,8 +85,25 @@ pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
     let path = session_file_in_store(&file)?;
     let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
+    let mut prompt = String::new();
+    let mut prompt_idx: u32 = 0;
     for line in text.lines() {
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        // 사람이 실제로 친 프롬프트만 센다 — 도구 결과와 시스템 주입은 제외
+        // (read_meta의 first_prompt 판정과 같은 규칙).
+        if obj["type"] == "user" && obj["isMeta"] != true {
+            let txt = extract_text(&obj["message"]["content"]);
+            let txt = txt.trim();
+            if !txt.is_empty()
+                && !txt.starts_with('<')
+                && !txt.starts_with("Caveat:")
+                && !txt.starts_with("[Request interrupted")
+            {
+                prompt = txt.chars().take(300).collect();
+                prompt_idx += 1;
+            }
+            continue;
+        }
         if obj["type"] != "assistant" {
             continue;
         }
@@ -99,8 +120,11 @@ pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
             cache_read: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
             cache_5m: u["cache_creation"]["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0),
             cache_1h: u["cache_creation"]["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0),
+            prompt: prompt.clone(),
+            prompt_idx,
         });
     }
+    // 파일은 이미 시간순이지만 재개·포크로 뒤섞인 경우가 있어 안정 정렬로 맞춘다
     out.sort_by(|a, b| a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal));
     Ok(out)
 }
