@@ -94,6 +94,29 @@ pub(crate) struct TurnRow {
 
 /// assistant content 배열에서 사람이 읽을 것만 뽑는다.
 /// thinking 블록은 화면에 낼 것이 아니므로 버리고, tool_use는 이름과 핵심 인자만 남긴다.
+/// 도구 호출 옆에 붙일 한 조각. 인자 이름이 도구마다 달라서 순서에 기대면
+/// (serde_json의 Map은 알파벳순이다) Write가 file_path 대신 content를 보여주는 식이 된다.
+/// 사람이 보고 싶은 인자를 도구별로 골라 준다.
+fn tool_arg<'a>(name: &str, input: &'a serde_json::Value) -> &'a str {
+    // Bash는 명령줄보다 description이 훨씬 읽기 쉽다 (Claude Code 자신도 그걸 보여준다)
+    let keys: &[&str] = if name == "Bash" {
+        &["description", "command"]
+    } else {
+        &["file_path", "pattern", "path", "query", "url", "prompt", "command", "description"]
+    };
+    for k in keys {
+        if let Some(v) = input[*k].as_str() {
+            if !v.is_empty() {
+                return v;
+            }
+        }
+    }
+    input
+        .as_object()
+        .and_then(|o| o.values().find_map(|v| v.as_str()))
+        .unwrap_or("")
+}
+
 fn assistant_blocks(content: &serde_json::Value) -> (String, Vec<String>) {
     let mut text = String::new();
     let mut tools = Vec::new();
@@ -112,11 +135,7 @@ fn assistant_blocks(content: &serde_json::Value) -> (String, Vec<String>) {
                     }
                     Some("tool_use") => {
                         let name = p["name"].as_str().unwrap_or("tool");
-                        // 인자는 도구마다 이름이 달라서(file_path, command, pattern…) 첫 문자열 값을 쓴다
-                        let arg = p["input"]
-                            .as_object()
-                            .and_then(|o| o.values().find_map(|v| v.as_str()))
-                            .unwrap_or("");
+                        let arg = tool_arg(name, &p["input"]);
                         let arg: String = arg.split('\n').next().unwrap_or("").chars().take(48).collect();
                         tools.push(if arg.is_empty() {
                             name.to_string()
@@ -148,6 +167,8 @@ pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
     let mut prompt_idx: u32 = 0;
     // usage_rows_of_file과 같은 이유로 message.id 기준 중복 제거 (한 응답 = 한 줄이 아니다)
     let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 방금 만든 턴의 id — 뒷줄을 합칠 때 위치가 아니라 id로 확인한다
+    let mut last_id = String::new();
     for line in text.lines() {
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
         // 사람이 실제로 친 프롬프트만 센다 — 도구 결과와 시스템 주입은 제외
@@ -177,6 +198,9 @@ pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
         // 더하지 말고 내용만 앞 턴에 합친다.
         if let Some(id) = obj["message"]["id"].as_str() {
             if !counted.insert(id.to_string()) {
+                if id != last_id {
+                    continue; // 사이에 다른 응답이 끼어든 경우 — 엉뚱한 턴에 붙이지 않는다
+                }
                 if let Some(prev) = out.last_mut() {
                     if !text.is_empty() && prev.text.chars().count() < 400 {
                         if !prev.text.is_empty() {
@@ -191,6 +215,7 @@ pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
             }
         }
         let Some(ts) = obj["timestamp"].as_str().and_then(parse_iso_ts) else { continue };
+        last_id = obj["message"]["id"].as_str().unwrap_or("").to_string();
         out.push(TurnRow {
             ts,
             model: obj["message"]["model"].as_str().unwrap_or("?").to_string(),
@@ -509,5 +534,26 @@ mod tests {
         assert_eq!(rows[0].requests, 1, "한 응답 = 요청 1회");
         assert_eq!(rows[0].output, 20);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tool_arg_picks_the_readable_field() {
+        let write = serde_json::json!({"content": "<!doctype html>", "file_path": "ui/index.html"});
+        assert_eq!(tool_arg("Write", &write), "ui/index.html");
+        let bash = serde_json::json!({"command": "cd /x && python - <<EOF", "description": "Run tests"});
+        assert_eq!(tool_arg("Bash", &bash), "Run tests");
+    }
+
+    /// UI 하네스용 덤프 — 실제 세션 파일을 Rust 경로로 파싱해 JSON으로 떨군다.
+    /// `cargo test -- --ignored dump_turns` 로 실행. 경로는 DECK_DUMP_IN/OUT.
+    #[test]
+    #[ignore]
+    fn dump_turns() {
+        let src = std::env::var("DECK_DUMP_IN").expect("DECK_DUMP_IN");
+        let dst = std::env::var("DECK_DUMP_OUT").expect("DECK_DUMP_OUT");
+        let text = fs::read_to_string(&src).unwrap();
+        let turns = turns_from_text(&text);
+        fs::write(&dst, serde_json::to_string(&turns).unwrap()).unwrap();
+        eprintln!("{} turns -> {dst}", turns.len());
     }
 }
