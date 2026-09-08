@@ -184,6 +184,8 @@ let turnGroups = [];
 // 선택은 목록 순서가 아니라 질문 번호로 기억한다 (정렬을 바꾸면 순서가 흔들린다).
 let selectedPrompt = null;
 let promptsByTime = false;
+// 기본은 8줄만. 전체 표를 되살리면 다시 빽빽해지므로 필요할 때만 8줄씩 늘린다.
+let promptLimit = 0;
 // 코덱스는 구독제라 토큰 단가가 없다. 금액을 지어내는 대신 같은 자리에 토큰을 쓴다 —
 // 어느 질문이 비쌌나를 묻는 화면이므로 단위만 바뀌면 나머지 구성은 그대로 쓸 수 있다.
 let turnsPriced = true;
@@ -228,6 +230,7 @@ async function openTurns(s) {
   turnGroups = [];
   selectedPrompt = null;
   promptsByTime = false;
+  promptLimit = PROMPT_ROWS;
   $("#turns-sub").textContent = "읽는 중…";
   $("#turns-tiles").innerHTML = "";
   $("#turns-chart").innerHTML = "";
@@ -379,7 +382,7 @@ function renderPrompts(cost) {
   turnGroups = (promptsByTime
     ? [...all].sort((a, b) => a.idxs[0] - b.idxs[0])
     : [...all].sort((a, b) => b.cost - a.cost)
-  ).slice(0, PROMPT_ROWS);
+  ).slice(0, promptLimit || PROMPT_ROWS);
   promptTotal = all.length;
   $("#turns-prompts-head").innerHTML =
     `질문별 ${turnsPriced ? "비용" : "토큰"} — ${promptsByTime ? "시간순" : "많이 쓴 순"} ` +
@@ -400,8 +403,20 @@ function renderPrompts(cost) {
       `<td class="tp-a" title="${escapeHtml(g.answer)}">${escapeHtml(firstLine(mdPlain(g.answer), 60) || "—")}</td>` +
       `<td>${g.idxs.length}</td><td>${fmtVal(g.cost)}</td></tr>`)
     .join("");
+  const rest = promptTotal - turnGroups.length;
+  // 표만 스크롤한다 — "더 보기"가 스크롤 안에 있으면 기본 상태에서도 밀려 잘린다.
   $("#turns-prompts").innerHTML =
-    `<table><thead><tr><th>질문</th><th>답변</th><th>턴</th><th>${turnsPriced ? "비용" : "토큰"}</th></tr></thead><tbody>${rows}</tbody></table>`;
+    `<div class="tp-scroll"><table><thead><tr><th>질문</th><th>답변</th><th>턴</th>` +
+    `<th>${turnsPriced ? "비용" : "토큰"}</th></tr></thead><tbody>${rows}</tbody></table></div>` +
+    (rest > 0
+      ? `<button id="turns-more" class="btn-ghost tp-more">더 보기 (남은 ${rest}개)</button>`
+      : "");
+  if (rest > 0) {
+    $("#turns-more").onclick = () => {
+      promptLimit = turnGroups.length + PROMPT_ROWS;
+      renderPrompts(cost);
+    };
+  }
   $("#turns-prompts").querySelectorAll(".tp-row").forEach((tr) => {
     tr.onmouseenter = () => highlightSpan(turnGroups[tr.dataset.g]);
     tr.onmouseleave = () => highlightSpan(null);

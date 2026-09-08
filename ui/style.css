@@ -1102,6 +1102,11 @@ kbd {
 }
 #turns-detail.hidden { display: none; }
 #turns-prompts.hidden { display: none; }
+.tp-scroll { max-height: 264px; overflow-y: auto; scrollbar-width: thin; }
+/* 목록이 스크롤되면 열 이름이 위로 사라진다 — 숫자 두 칸이 무엇인지 알 수 없어진다.
+   배경은 모달과 같은 --bg-deep이라야 줄이 밑으로 지나갈 때 띠처럼 보이지 않는다. */
+.tp-scroll thead th { position: sticky; top: 0; background: var(--bg-deep); z-index: 1; }
+.tp-more { display: block; width: 100%; margin-top: 6px; }
 .td-q {
   color: var(--text);
   font-weight: 600;
