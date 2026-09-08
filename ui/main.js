@@ -505,6 +505,34 @@ listen("pty-state", (ev) => {
 });
 
 // ---------- 터미널 ----------
+function loadWebgl(entry) {
+  try {
+    const webgl = new WebglAddon.WebglAddon();
+    // 복구 없이 3초가 지나면 애드온이 이걸 쏜다 (GPU를 아예 못 쓰게 된 경우). 재생성을
+    // 시도하고 실패하면 DOM 렌더러로 남는다.
+    webgl.onContextLoss(() => scheduleWebglRebuild("context lost"));
+    entry.term.loadAddon(webgl);
+    entry.webgl = webgl;
+  } catch { entry.webgl = null; /* GPU를 못 쓰면 DOM 렌더러 그대로 */ }
+}
+
+let webglRebuildTimer = null;
+function scheduleWebglRebuild(why) {
+  if (webglRebuildTimer) return; // 탭마다 이벤트가 오므로 한 번에 모은다
+  reportFatal(`webgl ${why} — 모든 탭의 렌더러 재생성`);
+  webglRebuildTimer = setTimeout(() => {
+    webglRebuildTimer = null;
+    for (const t of terms.values()) {
+      try { t.webgl && t.webgl.dispose(); } catch { /* 죽은 컨텍스트 위의 dispose는 던질 수 있다 */ }
+      t.webgl = null;
+    }
+    for (const t of terms.values()) {
+      loadWebgl(t);
+      try { t.term.refresh(0, t.term.rows - 1); } catch { /* 닫히는 중인 탭 */ }
+    }
+  }, 100);
+}
+
 function makeTerm(id, title, cwd) {
   const container = document.createElement("div");
   container.className = "term-container";
@@ -531,21 +559,15 @@ function makeTerm(id, title, cwd) {
   } catch { /* 애드온 없으면 기본 동작 유지 */ }
   term.open(container);
   // 기본 DOM 렌더러는 스크롤·출력마다 행을 메인 스레드에서 다시 만든다. WebGL은
-  // 글리프를 셀 단위로 GPU에서 그려서 그 비용이 사라진다. 컨텍스트를 잃으면
-  // (드라이버 리셋, GPU 전환) 애드온을 버리고 DOM 렌더러로 되돌아간다.
-  // 2026-09-07 실측: NVIDIA 드라이버 리셋 → WebView2 GPU 프로세스 재시작 → 모든 탭의
-  // 컨텍스트가 동시에 사라지고 화면에 글자 몇 개만 남았다. 애드온을 버린 뒤 화면을
-  // 통째로 한 번 다시 그려야 DOM 렌더러가 현재 버퍼를 그린다. 손실 이벤트 때만 도는
-  // 코드라 평소 비용은 없다.
-  try {
-    const webgl = new WebglAddon.WebglAddon();
-    webgl.onContextLoss(() => {
-      try { webgl.dispose(); } catch { /* DOM 렌더러로 돌아가는 건 xterm이 한다 */ }
-      reportFatal("webgl context lost — DOM 렌더러로 전환");
-      setTimeout(() => { try { term.refresh(0, term.rows - 1); } catch { /* 이미 닫힌 탭 */ } }, 0);
-    });
-    term.loadAddon(webgl);
-  } catch { /* GPU를 못 쓰면 DOM 렌더러 그대로 */ }
+  // 글리프를 셀 단위로 GPU에서 그려서 그 비용이 사라진다.
+  // GPU 프로세스가 죽었다 살아나면(드라이버 리셋 — 2026-09-07/08 두 번 실측) 모든 탭의
+  // 컨텍스트가 한꺼번에 사라졌다 "복구"되는데, 애드온의 자체 복구 경로는 이 경우 화면을
+  // 비운 채 아무 이벤트도 내지 않는다(헤드리스 크롬에서 GPU 크래시로 재현). 복구 이벤트를
+  // 우리가 직접 받아 모든 탭의 애드온을 버리고 다시 만들면 정상으로 돌아온다 — 탭들이
+  // 글리프 아틀라스를 공유하므로 전부 함께 버려야 한다. 손실·복구 이벤트 때만 도는 코드다.
+  const entry = { term, fit, container, title, cwd, exited: false, busy: false, profile: null, webgl: null };
+  loadWebgl(entry);
+  term.element.addEventListener("webglcontextrestored", () => scheduleWebglRebuild("context restored"), true);
 
   term.onData((d) => invoke("write_pty", { id, data: d }));
 
@@ -597,7 +619,6 @@ function makeTerm(id, title, cwd) {
     }
   });
 
-  const entry = { term, fit, container, title, cwd, exited: false, busy: false, profile: null };
   terms.set(id, entry);
   tabOrder.push(id);
   return entry;

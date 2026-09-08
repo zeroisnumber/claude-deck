@@ -1,0 +1,60 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../ui/vendor/xterm.css">
+<style>body{margin:0;background:#262624;display:flex;gap:4px} .t{width:480px;height:300px}</style>
+</head><body>
+<div class="t" id="t0"></div><div class="t" id="t1"></div><div class="t" id="t2"></div>
+<script src="../../ui/vendor/xterm.js"></script>
+<script src="../../ui/vendor/addon-webgl.js"></script>
+<script>
+// 앱처럼 같은 설정의 터미널 여러 개(글리프 아틀라스를 공유) + GPU 프로세스 재시작처럼 모든 컨텍스트가
+// 한꺼번에 사라졌다 돌아오는 상황. mode=old: 앱 0.4.0 처리. mode=new: 전체 재생성.
+const mode = new URLSearchParams(location.search).get('mode') || 'old';
+window.__log = []; const log = (m) => { window.__log.push(m); };
+const OPTS = { cols: 60, rows: 16, fontFamily: 'Consolas, monospace', fontSize: 14, allowProposedApi: true };
+const terms = [];
+function loadWebgl(t) {
+  try { const w = new WebglAddon.WebglAddon(true); w.onContextLoss(() => onLoss(t)); t.term.loadAddon(w); t.webgl = w; log(`t${t.i} webgl loaded`); return true; }
+  catch (e) { t.webgl = null; log(`t${t.i} webgl load failed: ${e.message}`); return false; }
+}
+function onLoss(t) {
+  if (mode === 'old') { try { t.webgl.dispose(); } catch (e) { log(`t${t.i} dispose threw: ${e.message}`); } setTimeout(() => t.term.refresh(0, t.term.rows - 1), 0); log(`t${t.i} old handler`); }
+  else scheduleRebuild('loss');
+}
+let pending = null;
+function scheduleRebuild(why) {
+  // 여러 탭의 컨텍스트가 동시에 오므로 한 번에 모아 전부 버리고 전부 다시 만든다 (공유 아틀라스가 완전히 풀리게)
+  log('schedule rebuild: ' + why);
+  if (pending) return;
+  pending = setTimeout(() => {
+    pending = null;
+    for (const t of terms) { try { t.webgl && t.webgl.dispose(); } catch (e) { log(`t${t.i} dispose threw: ${e.message}`); } t.webgl = null; }
+    for (const t of terms) { loadWebgl(t); try { t.term.refresh(0, t.term.rows - 1); } catch {} }
+    log('rebuild done');
+  }, 100);
+}
+for (let i = 0; i < 3; i++) {
+  const term = new Terminal(OPTS); term.open(document.getElementById('t' + i));
+  const t = { i, term, webgl: null }; terms.push(t); loadWebgl(t);
+  if (mode === 'new') term.element.addEventListener('webglcontextrestored', () => scheduleRebuild(`t${i} restored`), true);
+  for (let k = 1; k <= 12; k++) term.write(`T${i} line ${k} quick brown fox 한글 ${'#'.repeat(k)}\r\n`);
+  term.write('PROMPT> ');
+}
+window.__loseAll = (restoreMs) => terms.map((t) => {
+  const gl = t.webgl && t.webgl._renderer && t.webgl._renderer._gl; if (!gl) return 'no gl';
+  const ext = gl.getExtension('WEBGL_lose_context'); if (!ext) return 'no ext';
+  ext.loseContext();
+  if (restoreMs) setTimeout(() => { try { ext.restoreContext(); log(`t${t.i} restoreContext`); } catch (e) { log(`t${t.i} restore threw ${e.message}`); } }, restoreMs);
+  return 'ok';
+});
+window.__write = (s) => terms.forEach((t) => t.term.write(s));
+window.__pixels = () => terms.map((t) => {
+  const rows = t.term.element.querySelectorAll('.xterm-rows > div');
+  const domText = [...rows].map(r => r.textContent).join('').trim().length;
+  let px = -1;
+  const gl = t.webgl && t.webgl._renderer && t.webgl._renderer._gl, c = t.webgl && t.webgl._renderer && t.webgl._renderer._canvas;
+  if (gl && c) { try { if (gl.isContextLost()) px = -2; else { const buf = new Uint8Array(4 * c.width * 40); gl.readPixels(0, c.height - 60, c.width, 40, gl.RGBA, gl.UNSIGNED_BYTE, buf); let n = 0; for (let i = 0; i < buf.length; i += 4) if (buf[i] > 80 || buf[i+1] > 80 || buf[i+2] > 80) n++; px = n; } } catch (e) { px = -3; } }
+  return { t: t.i, px, domText };
+});
+</script>
+</body></html>
