@@ -161,6 +161,11 @@ pub(crate) struct TurnRow {
 /// (serde_json의 Map은 알파벳순이다) Write가 file_path 대신 content를 보여주는 식이 된다.
 /// 사람이 보고 싶은 인자를 도구별로 골라 준다.
 fn tool_arg<'a>(name: &str, input: &'a serde_json::Value) -> &'a str {
+    // 경로는 앞이 아니라 뒤가 정보다. "C:\\workspace\\git\\claude-deck\\src-tauri\\src"까지
+    // 보여주고 잘리면 어느 파일인지 알 수 없다.
+    fn is_pathish(k: &str) -> bool {
+        k == "file_path" || k == "path" || k == "notebook_path"
+    }
     // Bash는 명령줄보다 description이 훨씬 읽기 쉽다 (Claude Code 자신도 그걸 보여준다)
     let keys: &[&str] = if name == "Bash" {
         &["description", "command"]
@@ -170,6 +175,9 @@ fn tool_arg<'a>(name: &str, input: &'a serde_json::Value) -> &'a str {
     for k in keys {
         if let Some(v) = input[*k].as_str() {
             if !v.is_empty() {
+                if is_pathish(k) {
+                    return path_tail(v);
+                }
                 return v;
             }
         }
@@ -178,6 +186,22 @@ fn tool_arg<'a>(name: &str, input: &'a serde_json::Value) -> &'a str {
         .as_object()
         .and_then(|o| o.values().find_map(|v| v.as_str()))
         .unwrap_or("")
+}
+
+/// 긴 경로는 마지막 세 조각만 남긴다 — 어느 파일인지는 뒤에 있다.
+fn path_tail(p: &str) -> &str {
+    if p.chars().count() <= 40 {
+        return p;
+    }
+    let sep = |c: char| c == '/' || c == '\\';
+    let mut cut = None;
+    for (i, _) in p.rmatch_indices(sep).take(3) {
+        cut = Some(i + 1);
+    }
+    match cut {
+        Some(i) if i < p.len() => &p[i..],
+        _ => p,
+    }
 }
 
 fn assistant_blocks(content: &serde_json::Value) -> (String, Vec<String>) {
@@ -836,6 +860,15 @@ mod tests {
         assert_eq!(rows[0].requests, 1, "한 응답 = 요청 1회");
         assert_eq!(rows[0].output, 20);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_paths_keep_their_tail() {
+        let long = r"C:\workspace\git\claude-deck\src-tauri\src\usage.rs";
+        let v = serde_json::json!({ "file_path": long });
+        assert_eq!(tool_arg("Read", &v), r"src-tauri\src\usage.rs", "마지막 세 조각");
+        let short = serde_json::json!({ "file_path": "ui/main.js" });
+        assert_eq!(tool_arg("Read", &short), "ui/main.js", "짧으면 그대로 둔다");
     }
 
     #[test]
