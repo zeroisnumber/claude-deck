@@ -161,8 +161,12 @@ pub(crate) fn turn_in_progress(file: &std::path::Path) -> bool {
                 // 프롬프트 제출 또는 tool_result → 에이전트 차례
                 return true;
             }
-            // codex: 마지막 이벤트가 에이전트 응답이면 끝난 것으로 본다
+            // codex는 턴의 시작과 끝을 직접 기록한다 — 화면 출력을 눈치로 읽을 필요가 없다.
+            // task_complete / turn_aborted 뒤에 token_count가 더 붙으므로 그건 건너뛴다.
             "event_msg" => match o["payload"]["type"].as_str().unwrap_or("") {
+                "task_started" => return true,
+                "task_complete" | "turn_aborted" | "error" => return false,
+                // 예전 rollout에는 task_* 이벤트가 없어 메시지로 판단한다
                 "agent_message" => return false,
                 "user_message" => return true,
                 _ => continue,
@@ -561,6 +565,36 @@ pub(crate) fn keepalive_pass(app: &AppHandle, now: std::time::Instant) {
 
 #[cfg(test)]
 mod tests {
+    /// codex는 턴의 시작·끝을 이벤트로 남긴다. token_count가 뒤에 더 붙어도
+    /// 끝난 턴을 진행 중으로 보면 탭이 영영 작업중으로 남는다.
+    #[test]
+    fn codex_task_events_decide_the_turn() {
+        let dir = std::env::temp_dir().join(format!("deck-codex-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("rollout.jsonl");
+        let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+        let done = r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#;
+        let tok = r#"{"type":"event_msg","payload":{"type":"token_count","info":{}}}"#;
+
+        std::fs::write(&f, format!("{started}
+{tok}
+")).unwrap();
+        assert!(super::turn_in_progress(&f), "task_started 뒤면 작업 중");
+
+        std::fs::write(&f, format!("{started}
+{done}
+{tok}
+")).unwrap();
+        assert!(!super::turn_in_progress(&f), "task_complete 뒤의 token_count는 무시");
+
+        let aborted = r#"{"type":"event_msg","payload":{"type":"turn_aborted"}}"#;
+        std::fs::write(&f, format!("{started}
+{aborted}
+")).unwrap();
+        assert!(!super::turn_in_progress(&f), "중단된 턴은 작업 중이 아니다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     /// 완료 판정 게이트. 여기서 "진행 중"을 잘못 넓게 잡으면 탭이 영영

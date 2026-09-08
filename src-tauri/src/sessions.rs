@@ -339,6 +339,18 @@ pub(crate) fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
         }
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         match obj["type"].as_str().unwrap_or("") {
+            // 모델은 rollout 안에 그대로 있다. 상태 DB를 따로 열 필요가 없다.
+            // 세션 중간에 모델을 바꿀 수 있으므로 마지막 값이 이긴다.
+            "turn_context" => {
+                if let Some(m) = obj["payload"]["model"].as_str() {
+                    let eff = obj["payload"]["reasoning_effort"].as_str().unwrap_or("");
+                    meta.model = Some(if eff.is_empty() {
+                        m.to_string()
+                    } else {
+                        format!("{m} ({eff})")
+                    });
+                }
+            }
             "session_meta" => {
                 if let Some(id) = obj["payload"]["id"].as_str() {
                     meta.session_id = id.to_string();
@@ -624,5 +636,40 @@ mod tests {
     fn iso_ts_matches_known_epoch() {
         let got = parse_iso_ts("2026-07-04T17:22:51.651Z").unwrap();
         assert!((got - 1783185771.651).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod codex_dump {
+    /// 실제 rollout에서 모델이 뽑히는지 눈으로 확인 — `cargo test -- --ignored codex_model`
+    #[test]
+    #[ignore]
+    fn codex_model() {
+        let home = dirs::home_dir().unwrap();
+        let root = home.join(".codex").join("sessions");
+        let mut files = Vec::new();
+        let mut stack = vec![root];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().map(|x| x == "jsonl").unwrap_or(false) {
+                    files.push(p);
+                }
+            }
+        }
+        files.sort();
+        let mut with = 0;
+        for p in &files {
+            if let Some(m) = super::read_codex_meta(p) {
+                if m.model.is_some() {
+                    with += 1;
+                }
+                eprintln!("{:<10} {}", m.model.unwrap_or_else(|| "-".into()), m.session_id);
+            }
+        }
+        eprintln!("{with}/{} rollouts carry a model", files.len());
     }
 }
