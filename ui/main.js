@@ -633,6 +633,7 @@ listen("pty-state", (ev) => {
   if (t.busy === working && wasWaiting === !!waiting) return;
   t.busy = working;
   t.waiting = !!waiting;
+  if (working) noteTurnStart(id);
   if (!working && !t.exited && notify !== false) notifyDone(id, t);
   // 권한 확인·질문으로 멈춘 세션: 보고 있지 않으면 완료 알림과 같은 방식으로 알린다
   if (t.waiting && !wasWaiting && !(id === activeId && document.hasFocus())) {
@@ -846,6 +847,7 @@ async function openSession(meta, focus = true, opts = {}) {
   if (focus) activate(tabId);
   else renderTabs();
   await spawnInto(tabId, entry, "실행 실패");
+  if (forking) catchUpAdoption(tabId);
   saveOpenTabs();
 }
 
@@ -890,7 +892,7 @@ async function openNewSession(cwd, prof) {
   activate(id);
   await spawnInto(id, entry, "실행 실패");
   addRecentDir(cwd);
-  setTimeout(refreshSessions, 4000);
+  catchUpAdoption(id);
 }
 
 async function restartTab(id) {
@@ -971,6 +973,41 @@ function adoptFor(meta) {
   saveOpenTabs();
   renderTabs();
   return pick;
+}
+
+// 기록 파일은 첫 질문을 보낸 뒤에야 생긴다. 20초 폴링만 기다리면 사이드바에 그 세션이
+// 늦게 뜨고, 탭도 그때까지 임시 id로 남는다. 짝이 맞을 때까지 몇 번만 앞당겨 확인한다 —
+// 계속 훑지 않도록 간격을 늘리고, 붙으면 멈춘다.
+let ADOPT_CATCHUP_MS = [3000, 8000, 15000, 30000, 60000];
+
+function catchUpAdoption(tabId, step = 0) {
+  const t0 = terms.get(tabId);
+  if (!t0 || t0.sessionId || t0.exited) return;
+  if (step >= ADOPT_CATCHUP_MS.length) {
+    // 첫 질문이 언제 올지는 모른다. 여기서 포기하고, 턴이 시작되면 다시 건다.
+    t0.catchingUp = false;
+    return;
+  }
+  t0.catchingUp = true;
+  setTimeout(async () => {
+    const t = terms.get(tabId);
+    if (!t || t.sessionId || t.exited) return;   // 닫혔거나 이미 붙었거나 죽었다
+    // 폴링이 이미 돌고 있으면 그 결과를 받는다 — 그게 파일 생기기 전에 읽었더라도
+    // 다음 차례가 덮는다.
+    await refreshSessions();
+    const now = terms.get(tabId);
+    if (now && !now.sessionId) catchUpAdoption(tabId, step + 1);
+    else if (now) now.catchingUp = false;
+  }, ADOPT_CATCHUP_MS[step]);
+}
+
+// 기록 파일은 첫 질문을 보내야 생긴다. 그 순간(턴 시작)에 따라잡기를 다시 건다 —
+// 스폰 직후 몇 초만 보고 그만두면, 한참 있다 질문한 세션은 20초 폴링을 기다리게 된다.
+function noteTurnStart(tabId) {
+  const t = terms.get(tabId);
+  if (!t || t.sessionId || t.exited || t.catchingUp) return;
+  if (!tabId.startsWith("new-")) return;
+  catchUpAdoption(tabId, 0);
 }
 
 function samePath(a, b) {
