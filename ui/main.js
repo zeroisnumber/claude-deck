@@ -1446,7 +1446,6 @@ $("#btn-settings").onclick = () => {
   $("#ka-threshold").value = String(keepAlive.thresholdSecs / 60);
   $("#ka-message").value = keepAlive.message;
   syncKaFields();
-  $("#trace-path").textContent = "";
   $("#lmodal-backdrop").classList.remove("hidden");
 };
 // 캐시 유지를 꺼두면 임계값과 메시지는 아무 데도 쓰이지 않는다 — 만질 수 있게

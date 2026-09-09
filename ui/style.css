@@ -155,9 +155,9 @@ html, body {
   flex-shrink: 0;
 }
 
-.set-card { padding: 16px 0; border-bottom: 1px solid var(--border); }
+.set-card { padding: 12px 0; border-bottom: 1px solid var(--border); }
 .set-card:last-child { border-bottom: none; }
-.set-head { display: block; margin-bottom: 10px; }
+.set-head { display: block; margin-bottom: 8px; }
 .set-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .set-hint { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; line-height: 1.5; }
 
@@ -227,7 +227,31 @@ html, body {
 
 .btn-sm { padding: 5px 11px; font-size: 12px; margin-top: 8px; }
 .set-card .lmodal-note { margin-top: 9px; }
-.set-card #profile-list { margin-bottom: 8px; }
+/* 긴 설명은 접어 둔다. 한 번 읽고 나면 매번 자리만 차지해서, 여섯 장을 세로로
+   쌓으면 정작 만지려던 항목이 화면 밖으로 밀린다. JS 없이 <details>로 둔다. */
+.set-note { margin-top: 8px; }
+.set-note > summary {
+  display: inline-block;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.set-note > summary::-webkit-details-marker { display: none; }
+.set-note > summary::before { content: "▸ "; font-size: 9px; vertical-align: 1px; }
+.set-note[open] > summary::before { content: "▾ "; }
+.set-note > summary:hover { color: var(--text); }
+.set-note .lmodal-note { margin-top: 6px; }
+/* 위쪽은 세션 실행에 영향을 주고, 아래쪽은 이 기기의 화면·기록에만 영향을 준다 */
+.set-group {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  padding: 14px 0 2px;
+}
+.set-card #profile-list { margin-bottom: 6px; }
 
 .lmodal-section {
   display: flex;
