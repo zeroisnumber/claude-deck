@@ -243,7 +243,8 @@ html, body {
 .set-note[open] > summary::before { content: "▾ "; }
 .set-note > summary:hover { color: var(--text); }
 .set-note .lmodal-note { margin-top: 6px; }
-/* 위쪽은 세션 실행에 영향을 주고, 아래쪽은 이 기기의 화면·기록에만 영향을 준다 */
+/* 위쪽은 실행되는 세션까지 따라가고, 아래쪽은 앱 안에서 끝난다. 여섯 장 다
+   localStorage에 저장되므로 "이 기기"는 가르는 기준이 못 된다. */
 .set-group {
   font-size: 10.5px;
   font-weight: 600;
