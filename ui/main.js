@@ -74,9 +74,12 @@ let activeId = null;
 // 잦을 때 그만큼 왕복이 생기는데, 진단이 부하를 만드는 건 이미 한 번 겪었다.
 let traceOn = false;
 invoke("trace_enabled").then((v) => { traceOn = !!v; }).catch(() => {});
-const uiTrace = (kind, ms) => {
+// 값은 보통 밀리초(숫자)지만, IME 계측처럼 무슨 일이 있었는지를 문자열로
+// 남기는 자리도 있다. 숫자일 때만 반올림한다 — 안 그러면 문자열이 NaN이 된다.
+const uiTrace = (kind, v) => {
   if (!traceOn) return;
-  invoke("trace_ui", { kind, value: String(Math.round(ms)) }).catch(() => {});
+  invoke("trace_ui", { kind, value: typeof v === "number" ? String(Math.round(v)) : String(v) })
+    .catch(() => {});
 };
 try {
   new PerformanceObserver((list) => {
@@ -745,7 +748,47 @@ function makeTerm(id, title, cwd) {
   loadWebgl(entry);
   term.element.addEventListener("webglcontextrestored", () => scheduleWebglRebuild("context restored"), true);
 
-  term.onData((d) => invoke("write_pty", { id, data: d }));
+  // 한글 입력이 가끔 두 번 들어가고 조합창이 엉뚱한 데 뜬다. 재현이 들쭉날쭉해서
+  // 한 번 찍어 보는 로그로는 못 잡는다 — 진단 기록이 켜져 있는 동안 조합 이벤트와
+  // 실제로 PTY로 나간 것을 같은 줄에 남겨, 증상이 난 시각을 나중에 뒤져 본다.
+  // 두 번 들어가는 게 xterm이 두 번 보내서인지(onData 2회) 저쪽 에코인지(1회)가
+  // 여기서 갈린다. 조합 중이 아닐 때의 평범한 타이핑은 남기지 않는다.
+  let lastComposing = 0;
+  const imeTrace = (kind, data) => {
+    if (!traceOn) return;
+    uiTrace(`ime:${kind}`, `${Math.round(performance.now())}|${id}|${data}`);
+  };
+  term.onData((d) => {
+    if (traceOn && performance.now() - lastComposing < 500) {
+      imeTrace("data", JSON.stringify(d));
+    }
+    invoke("write_pty", { id, data: d });
+  });
+
+  // 조합창이 커서에서 얼마나 떨어져 있는지. 한 칸을 넘게 벌어지면 그게 "왼쪽 위"다.
+  const imeGap = () => {
+    try {
+      const ta = term.element.querySelector(".xterm-helper-textarea");
+      const scr = term.element.querySelector(".xterm-screen");
+      if (!ta || !scr) return "";
+      const cell = term._core._renderService.dimensions.css.cell;
+      const r = ta.getBoundingClientRect(), s = scr.getBoundingClientRect();
+      const wantTop = s.top + term.buffer.active.cursorY * cell.height;
+      const wantLeft = s.left + term.buffer.active.cursorX * cell.width;
+      return `dy=${Math.round(r.top - wantTop)},dx=${Math.round(r.left - wantLeft)}`;
+    } catch { return "?"; }
+  };
+  for (const ev of ["compositionstart", "compositionupdate", "compositionend"]) {
+    term.textarea.addEventListener(ev, (e) => {
+      lastComposing = performance.now();
+      if (!traceOn) return;   // 켜져 있을 때만 문자열을 만든다
+      imeTrace(ev.replace("composition", ""), `${JSON.stringify(e.data || "")} ${imeGap()}`);
+    });
+  }
+  term.textarea.addEventListener("input", (e) => {
+    if (!traceOn || performance.now() - lastComposing >= 500) return;
+    imeTrace("input", `${JSON.stringify(e.data || "")} composing=${e.isComposing} ${e.inputType || ""}`);
+  });
 
   // Ctrl+V / Shift+Insert = Tauri 클립보드로 붙여넣기 (WebView2 네이티브 paste 미동작 대응.
   // preventDefault로 keydown을 완전히 가로채므로 이중 붙여넣기도 발생하지 않음)
