@@ -926,6 +926,7 @@ async function spawnInto(id, t, failLabel) {
       id, cwd: t.cwd, command: t.spawnCommand || "claude", file: t.file || null, title: t.title,
       cols: t.term.cols, rows: t.term.rows,
     });
+    return true;
   } catch (err) {
     t.exited = true;
     t.term.write(`
@@ -933,6 +934,7 @@ async function spawnInto(id, t, failLabel) {
 `);
     showToast(`⚠ 세션 ${failLabel}`, String(err));
     renderTabs();
+    return false;
   }
 }
 
@@ -957,8 +959,8 @@ async function openNewSession(cwd, prof) {
   entry.knownAtStart = new Set(sessions.map((s) => s.session_id));
   entry.spawnCommand = composeCommand(null, p);
   activate(id);
-  await spawnInto(id, entry, "실행 실패");
-  addRecentDir(cwd);
+  // 띄우지 못한 경로를 최근 폴더에 넣으면 누를 때마다 같은 실패가 난다
+  if (await spawnInto(id, entry, "실행 실패")) addRecentDir(cwd);
   catchUpAdoption(id);
 }
 
@@ -1632,16 +1634,49 @@ function openNewModal() {
     chip.className = "dir-chip";
     chip.textContent = basename(d);
     chip.title = d;
-    chip.onclick = () => { $("#modal-path").value = d; };
-    chip.ondblclick = () => {
-      $("#modal-backdrop").classList.add("hidden");
-      detach("openNewSession:recent", openNewSession(d, profiles[newProfileIdx]));
-    };
+    chip.onclick = () => { $("#modal-path").value = d; hideMissing(); };
+    chip.ondblclick = () => { $("#modal-path").value = d; detach("startNew:recent", startNew(d)); };
     wrap.appendChild(chip);
   }
+  hideMissing();
   $("#modal-backdrop").classList.remove("hidden");
   $("#modal-path").focus();
 }
+
+// 없는 폴더로 시작하면 예전에는 백엔드가 말없이 홈에서 띄웠다. 이제는 여기서 먼저
+// 보고, 없으면 만들지 묻는다 — 오타 난 경로에 폴더가 생기면 안 되니 저절로 만들지 않는다.
+function hideMissing() { $("#modal-missing").classList.add("hidden"); }
+async function startNew(raw) {
+  // 탐색기의 "경로로 복사"는 따옴표를 붙인다
+  const p = raw.trim().replace(/^"(.*)"$/, "$1").trim();
+  if (!p) return;
+  let ok = false;
+  try { ok = await invoke("dir_exists", { path: p }); } catch { /* 모르면 띄워 보고 오류를 보인다 */ ok = true; }
+  // 네트워크 경로면 확인이 몇 초 걸린다. 그사이 경로를 고쳤으면 옛 경로로 안내하거나
+  // "만들고 시작"을 옛 경로에 걸면 안 된다 — 오타가 폴더가 된다.
+  if ($("#modal-path").value !== raw) return;
+  if (!ok) {
+    $("#modal-missing-text").textContent = `폴더가 없습니다: ${p}`;
+    $("#modal-create").onclick = async () => {
+      try {
+        await invoke("create_dir", { path: p });
+      } catch (err) {
+        $("#modal-missing-text").textContent = String(err);
+        return;
+      }
+      launchNew(p);
+    };
+    $("#modal-missing").classList.remove("hidden");
+    return;
+  }
+  launchNew(p);
+}
+function launchNew(p) {
+  hideMissing();
+  $("#modal-backdrop").classList.add("hidden");
+  detach("openNewSession", openNewSession(p, profiles[newProfileIdx]));
+}
+$("#modal-path").addEventListener("input", hideMissing);
 $("#btn-new").onclick = openNewModal;
 $("#modal-browse").onclick = async () => {
   try {
@@ -1650,13 +1685,7 @@ $("#modal-browse").onclick = async () => {
   } catch { /* 무시 */ }
 };
 $("#modal-cancel").onclick = () => closeModal($("#modal-backdrop"));
-$("#modal-ok").onclick = () => {
-  const p = $("#modal-path").value.trim();
-  if (p) {
-    $("#modal-backdrop").classList.add("hidden");
-    detach("openNewSession", openNewSession(p, profiles[newProfileIdx]));
-  }
-};
+$("#modal-ok").onclick = () => detach("startNew", startNew($("#modal-path").value));
 $("#modal-path").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#modal-ok").click();
   if (e.key === "Escape") $("#modal-cancel").click();

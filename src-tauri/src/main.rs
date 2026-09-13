@@ -121,6 +121,8 @@ fn main() {
             pty::write_pty,
             pty::resize_pty,
             pty::kill_pty,
+            pty::dir_exists,
+            pty::create_dir,
             sessions::list_sessions,
             delete_session,
             sessions::session_preview,

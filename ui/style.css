@@ -739,6 +739,16 @@ kbd {
 .modal-row #modal-path { flex: 1; }
 #modal-browse { flex-shrink: 0; padding: 8px 12px; }
 #recent-dirs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.modal-missing {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--amber);
+}
+.modal-missing span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.modal-missing button { flex-shrink: 0; }
 .dir-chip {
   padding: 4px 10px;
   background: var(--bg-hover);

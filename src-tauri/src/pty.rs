@@ -157,6 +157,25 @@ fn emit_output(app: &AppHandle, id: &str, data: &[u8]) {
     let _ = app.emit("pty-output", PtyOutput { id: id.to_string(), data: encoded });
 }
 
+/// 새 세션 창에서 시작 전에 폴더가 있는지 본다. 네트워크 드라이브면 stat도 멈출 수
+/// 있어 메인 스레드에 두지 않는다.
+#[tauri::command(async)]
+pub(crate) fn dir_exists(path: String) -> bool {
+    // "game"처럼 상대 경로면 앱 프로세스의 현재 폴더 기준으로 보게 된다 — 뜻한 곳이 아니다
+    let p = PathBuf::from(path);
+    p.is_absolute() && p.is_dir()
+}
+
+/// 없는 폴더를 사용자가 만들겠다고 했을 때만 부른다. 새 프로젝트를 여는 게 새 세션의
+/// 흔한 용도라, 창을 닫고 탐색기에서 만들어 오게 하지 않는다.
+#[tauri::command(async)]
+pub(crate) fn create_dir(path: String) -> Result<(), String> {
+    if !PathBuf::from(&path).is_absolute() {
+        return Err("C:\\로 시작하는 전체 경로를 적어 주세요".into());
+    }
+    std::fs::create_dir_all(&path).map_err(|e| format!("폴더를 만들 수 없습니다: {e}"))
+}
+
 #[tauri::command]
 pub(crate) fn spawn_pty(
     app: AppHandle,
@@ -175,6 +194,16 @@ pub(crate) fn spawn_pty(
     if map.contains_key(&id) {
         return Ok(()); // 이미 실행 중
     }
+    // 없는 폴더를 홈으로 바꿔 띄우면 안 된다. 사용자는 C:\workspace\game에서 시작한 줄
+    // 아는데 에이전트는 홈에서 돌고, 세션 기록도 홈 프로젝트로 쌓여 탭과 짝이 안 맞는다.
+    // cwd를 모르는 세션(빈 문자열)만 예전처럼 홈에서 띄운다.
+    let workdir = if cwd.trim().is_empty() {
+        dirs::home_dir().unwrap_or_default().to_string_lossy().to_string()
+    } else if PathBuf::from(&cwd).is_dir() {
+        cwd.clone()
+    } else {
+        return Err(format!("폴더가 없습니다: {cwd}"));
+    };
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -185,11 +214,6 @@ pub(crate) fn spawn_pty(
     let claude_cmd = if command.trim().is_empty() { "claude".to_string() } else { command };
     let mut cmd = CommandBuilder::new("cmd.exe");
     cmd.args(["/c", &claude_cmd]);
-    let workdir = if PathBuf::from(&cwd).is_dir() {
-        cwd.clone()
-    } else {
-        dirs::home_dir().unwrap_or_default().to_string_lossy().to_string()
-    };
     cmd.cwd(&workdir);
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
