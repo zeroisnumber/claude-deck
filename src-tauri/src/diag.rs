@@ -179,10 +179,27 @@ pub(crate) static TRACE_TX: LazyLock<std::sync::mpsc::Sender<String>> = LazyLock
                 let size = f.metadata().map(|m| m.len()).unwrap_or(0);
                 sink = Some((f, size));
             }
-            if let Some((f, written)) = sink.as_mut() {
-                if *written >= TRACE_MAX_BYTES {
+            // 상한에 닿으면 멈추지 않고 넘긴다. 예전엔 여기서 조용히 쓰기를 그만둬서,
+            // 진단 기록이 켜져 있는데도 며칠째 아무것도 안 남았다(09-09에 53MB로 멈춤).
+            // 필요한 건 방금 난 증상의 기록이라 옛것을 버리고 새것을 남기는 쪽이 맞다.
+            if sink.as_ref().map(|(_, w)| *w >= TRACE_MAX_BYTES).unwrap_or(false) {
+                sink = None; // 윈도우는 열린 파일의 이름을 못 바꾼다
+                let rotated = trace_prev_path()
+                    .map(|prev| {
+                        let _ = fs::remove_file(&prev);
+                        fs::rename(&path, &prev).is_ok()
+                    })
+                    .unwrap_or(false);
+                let Ok(f) = fs::OpenOptions::new().create(true).append(true).open(&path) else {
                     continue;
-                }
+                };
+                // 넘기기에 실패했으면(누가 prev 파일을 열어 둔 경우) 같은 파일에 계속 쓴다.
+                // 크기를 0으로 쳐서 배치마다 다시 넘기려 들지 않게 한다 — 한 번 더 상한만큼
+                // 쓰고 나서 다시 시도한다.
+                let size = if rotated { f.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };
+                sink = Some((f, size));
+            }
+            if let Some((f, written)) = sink.as_mut() {
                 use std::io::Write as _;
                 if f.write_all(batch.as_bytes()).is_ok() {
                     *written += batch.len() as u64;
@@ -195,6 +212,11 @@ pub(crate) static TRACE_TX: LazyLock<std::sync::mpsc::Sender<String>> = LazyLock
 
 pub(crate) fn trace_log_path() -> Option<PathBuf> {
     Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("pty-trace.log"))
+}
+
+/// 상한에 닿아 넘긴 직전 기록. 둘을 합쳐 최대 약 100MB가 남는다.
+pub(crate) fn trace_prev_path() -> Option<PathBuf> {
+    Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("pty-trace.prev.log"))
 }
 
 pub(crate) fn trace(id: &str, agent: &str, kind: &str, value: &str) {
