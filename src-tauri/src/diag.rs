@@ -51,7 +51,8 @@ pub(crate) fn install_panic_hook() {
 //   out    = "<바이트수>,<스피너글리프 포함 1|0>"
 //   in     = 사용자 입력 바이트수 (타이핑 에코를 출력과 구분하기 위해 필요)
 //   spawn  = 실행 명령, exit = 없음
-//   #start = <epoch ms>	<기준 경과ms> — 벽시계 환산용 (세션 jsonl과 대조)
+//   start  = <epoch ms> (id "#") — 파일을 열 때마다 첫 줄. 벽시계 환산용 (open_trace)
+// 앱을 켤 때마다 지난 기록은 pty-trace.prev.log로 밀린다 (rotate_trace).
 /// 런타임 토글 — 설정 창의 체크박스로 켜고 끈다. 릴리스에서 컴파일로 빼버렸더니
 /// 정작 문제가 보고되는 빌드에서 원인을 못 보는 상황이 생겨서 되돌렸다.
 pub(crate) static PTY_TRACE: AtomicBool = AtomicBool::new(false);
@@ -156,6 +157,8 @@ pub(crate) static TRACE_TX: LazyLock<std::sync::mpsc::Sender<String>> = LazyLock
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         let mut sink: Option<(fs::File, u64)> = None;
+        // 이번 실행에서 아직 파일을 연 적이 없다
+        let mut first_open = true;
         while let Ok(first) = rx.recv() {
             // 깨어난 김에 쌓인 것을 모두 모아 한 번에 쓴다
             let mut batch = first;
@@ -173,31 +176,25 @@ pub(crate) static TRACE_TX: LazyLock<std::sync::mpsc::Sender<String>> = LazyLock
                 if fs::create_dir_all(dir).is_err() {
                     continue;
                 }
-                let Ok(f) = fs::OpenOptions::new().create(true).append(true).open(&path) else {
-                    continue;
-                };
-                let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-                sink = Some((f, size));
+                // 앱을 켤 때마다 지난 실행의 기록은 prev로 밀고 새로 쓴다. 한 파일에 여러
+                // 실행을 이어 붙이면 경과 시간이 실행마다 0부터 다시 시작해 어디가 언제인지
+                // 가를 수 없고, 옛 기록이 쌓여 금방 상한에 닿는다(09-09에 53MB로 멈췄다).
+                if first_open {
+                    rotate_trace(&path);
+                    first_open = false;
+                }
+                let Some(opened) = open_trace(&path) else { continue };
+                sink = Some(opened);
             }
-            // 상한에 닿으면 멈추지 않고 넘긴다. 예전엔 여기서 조용히 쓰기를 그만둬서,
-            // 진단 기록이 켜져 있는데도 며칠째 아무것도 안 남았다(09-09에 53MB로 멈춤).
-            // 필요한 건 방금 난 증상의 기록이라 옛것을 버리고 새것을 남기는 쪽이 맞다.
+            // 한 실행이 상한을 넘기면 멈추지 않고 같은 식으로 넘긴다. 예전엔 여기서
+            // 조용히 쓰기를 그만둬서 진단 기록이 켜져 있는데도 아무것도 안 남았다.
             if sink.as_ref().map(|(_, w)| *w >= TRACE_MAX_BYTES).unwrap_or(false) {
                 sink = None; // 윈도우는 열린 파일의 이름을 못 바꾼다
-                let rotated = trace_prev_path()
-                    .map(|prev| {
-                        let _ = fs::remove_file(&prev);
-                        fs::rename(&path, &prev).is_ok()
-                    })
-                    .unwrap_or(false);
-                let Ok(f) = fs::OpenOptions::new().create(true).append(true).open(&path) else {
-                    continue;
-                };
-                // 넘기기에 실패했으면(누가 prev 파일을 열어 둔 경우) 같은 파일에 계속 쓴다.
-                // 크기를 0으로 쳐서 배치마다 다시 넘기려 들지 않게 한다 — 한 번 더 상한만큼
-                // 쓰고 나서 다시 시도한다.
-                let size = if rotated { f.metadata().map(|m| m.len()).unwrap_or(0) } else { 0 };
-                sink = Some((f, size));
+                let rotated = rotate_trace(&path);
+                let Some((f, size)) = open_trace(&path) else { continue };
+                // 넘기기에 실패했으면(누가 prev 파일을 열어 둔 경우) 같은 파일에 이어 쓴다.
+                // 크기를 0으로 쳐서 배치마다 다시 넘기려 들지 않게 한다.
+                sink = Some((f, if rotated { size } else { 0 }));
             }
             if let Some((f, written)) = sink.as_mut() {
                 use std::io::Write as _;
@@ -214,9 +211,39 @@ pub(crate) fn trace_log_path() -> Option<PathBuf> {
     Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("pty-trace.log"))
 }
 
-/// 상한에 닿아 넘긴 직전 기록. 둘을 합쳐 최대 약 100MB가 남는다.
+/// 지난 실행(또는 이번 실행이 상한을 넘기기 전)의 기록. 그 이전 것은 지운다.
 pub(crate) fn trace_prev_path() -> Option<PathBuf> {
     Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("pty-trace.prev.log"))
+}
+
+/// 지금 파일을 prev로 민다. 비어 있거나 없으면 아무것도 안 한다 — 기록 없이 켰다
+/// 끈 실행이 쓸 만한 prev를 빈 파일로 덮으면 안 된다.
+fn rotate_trace(path: &std::path::Path) -> bool {
+    if fs::metadata(path).map(|m| m.len() == 0).unwrap_or(true) {
+        return false;
+    }
+    let Some(prev) = trace_prev_path() else { return false };
+    let _ = fs::remove_file(&prev);
+    fs::rename(path, &prev).is_ok()
+}
+
+/// 파일을 열 때마다 첫 줄에 벽시계 기준을 찍는다. 각 줄의 첫 칸은 앱을 켠 뒤 경과 ms라
+/// 이게 없으면 "21:06쯤 났다"를 로그의 어느 줄인지로 옮길 수 없다.
+///   <경과ms>	#	-	start	<epoch ms>
+/// 벽시계 = epoch ms + (그 줄의 경과ms - 이 줄의 경과ms)
+fn open_trace(path: &std::path::Path) -> Option<(fs::File, u64)> {
+    use std::io::Write as _;
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
+    let mut size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!("{}\t#\t-\tstart\t{}\n", TRACE_START.elapsed().as_millis(), epoch);
+    if f.write_all(line.as_bytes()).is_ok() {
+        size += line.len() as u64;
+    }
+    Some((f, size))
 }
 
 pub(crate) fn trace(id: &str, agent: &str, kind: &str, value: &str) {
