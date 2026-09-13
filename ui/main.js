@@ -729,13 +729,23 @@ function makeTerm(id, title, cwd) {
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
-  // xterm 기본값은 유니코드 6 폭 테이블이라 ✅ ❌ 같은 이모지를 1칸으로 센다.
-  // 에이전트는 2칸으로 그리므로 행마다 1칸씩 어긋나고, 줄바꿈 지점이 달라지면서
-  // 표나 박스가 아래로 갈수록 왼쪽으로 밀린다. 11 테이블에서는 2칸으로 센다.
+  // 글자 폭을 에이전트와 똑같이 세야 한다. 다르게 세면 그 글자 뒤가 한 칸씩 밀리고,
+  // 줄바꿈 지점이 달라지면서 표나 박스가 아래로 갈수록 어긋난다.
+  // xterm 기본값(유니코드 6)은 ✅ ❌도 1칸으로 세서 11 테이블을 썼는데, 11도 모자랐다.
+  // 클로드는 Bun.stringWidth(ambiguousIsNarrow)로 세는데 그와 비교하면 11 테이블은
+  //   ⚠️ ✔️ ℹ️ (문자+VS16)      1칸  (클로드 2)
+  //   🥲 🫠 🪿 (유니코드 13~15)   1칸  (클로드 2)
+  //   👍🏻 👨‍💻 (피부색·ZWJ 연결)  4칸  (클로드 2)
+  // 로 어긋났다. 문자 묶음(grapheme)을 한 덩어리로 세는 15 테이블은 셋 다 맞춘다.
+  // 애드온은 불러오는 순간 "15-graphemes"로 바꾼다. 없으면 11로 물러난다.
   try {
-    term.loadAddon(new Unicode11Addon.Unicode11Addon());
-    term.unicode.activeVersion = "11";
-  } catch { /* 애드온 없으면 기본 동작 유지 */ }
+    term.loadAddon(new UnicodeGraphemesAddon.UnicodeGraphemesAddon());
+  } catch {
+    try {
+      term.loadAddon(new Unicode11Addon.Unicode11Addon());
+      term.unicode.activeVersion = "11";
+    } catch { /* 애드온 없으면 기본 동작 유지 */ }
+  }
   term.open(container);
   // 기본 DOM 렌더러는 스크롤·출력마다 행을 메인 스레드에서 다시 만든다. WebGL은
   // 글리프를 셀 단위로 GPU에서 그려서 그 비용이 사라진다.
