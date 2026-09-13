@@ -244,10 +244,11 @@ fn assistant_blocks(content: &serde_json::Value) -> (String, Vec<String>) {
 pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
     let path = session_file_in_store(&file)?;
     let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let ping = KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner()).message.clone();
     if path.components().any(|c| c.as_os_str() == ".codex") {
-        return Ok(codex_turns_from_text(&text));
+        return Ok(codex_turns_from_text(&text, &ping));
     }
-    Ok(turns_from_text(&text))
+    Ok(turns_from_text(&text, &ping))
 }
 
 /// Codex rollout을 클로드와 같은 모양의 턴 목록으로. 스키마가 전혀 달라서 별도 파서다.
@@ -255,11 +256,13 @@ pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
 /// - 토큰은 total_token_usage의 차분 (중복 이벤트가 있어 last_token_usage 합산은 부정확)
 /// - 한 턴의 경계는 token_count 이벤트다. 그 사이에 쌓인 말과 도구 호출을 그 턴에 붙인다.
 /// - Codex에는 캐시 쓰기 개념이 따로 없어 cache_5m/1h는 항상 0이다.
-pub(crate) fn codex_turns_from_text(text: &str) -> Vec<TurnRow> {
+pub(crate) fn codex_turns_from_text(text: &str, ping: &str) -> Vec<TurnRow> {
+    let ping = ping.trim();
     let mut out: Vec<TurnRow> = Vec::new();
     let mut model = String::from("?");
     let mut prompt = String::new();
     let mut prompt_idx: u32 = 0;
+    let mut real_idx: u32 = 0;
     let (mut p_in, mut p_cached, mut p_out) = (0u64, 0u64, 0u64);
     let mut said = String::new();
     let mut tools: Vec<String> = Vec::new();
@@ -292,8 +295,15 @@ pub(crate) fn codex_turns_from_text(text: &str) -> Vec<TurnRow> {
                     if let Some(m) = payload["message"].as_str() {
                         let m = m.trim();
                         if !m.is_empty() && !m.starts_with('<') {
-                            prompt = m.chars().take(300).collect();
-                            prompt_idx += 1;
+                            // 캐시 유지 핑은 탭의 에이전트를 가리지 않고 보내므로 여기도 같은 규칙
+                            if !ping.is_empty() && m == ping {
+                                prompt = "(캐시 유지 핑)".into();
+                                prompt_idx = PING_PROMPT_IDX;
+                            } else {
+                                prompt = m.chars().take(300).collect();
+                                real_idx += 1;
+                                prompt_idx = real_idx;
+                            }
                         }
                     }
                 }
@@ -354,11 +364,20 @@ pub(crate) fn codex_turns_from_text(text: &str) -> Vec<TurnRow> {
     out
 }
 
-/// session_turns의 본체 — 저장소 경로 검사 없이 텍스트만 파싱해 테스트할 수 있게 분리
-pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
+/// 캐시 유지 핑이 부른 턴은 전부 이 번호 하나로 묶는다. 핑은 질문이 아닌데 따로 세면
+/// 질문 목록의 다섯 줄에 하나가 `reply "." only`가 된다(실측: 87개 중 17개). 지우지 않고
+/// 한 줄로 모으는 건 핑에 든 비용도 보여야 해서다.
+pub(crate) const PING_PROMPT_IDX: u32 = u32::MAX;
+
+/// session_turns의 본체 — 저장소 경로 검사 없이 텍스트만 파싱해 테스트할 수 있게 분리.
+/// `ping`은 설정의 캐시 유지 메시지다. 메시지를 바꾸면 그 전의 핑은 질문으로 보인다.
+pub(crate) fn turns_from_text(text: &str, ping: &str) -> Vec<TurnRow> {
+    let ping = ping.trim();
     let mut out: Vec<TurnRow> = Vec::new();
     let mut prompt = String::new();
     let mut prompt_idx: u32 = 0;
+    // 핑이 끼어도 진짜 질문 번호는 이어져야 한다
+    let mut real_idx: u32 = 0;
     // usage_entries_of_file과 같은 이유로 message.id 기준 중복 제거 (한 응답 = 한 줄이 아니다)
     let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 방금 만든 턴의 id — 뒷줄을 합칠 때 위치가 아니라 id로 확인한다
@@ -375,8 +394,20 @@ pub(crate) fn turns_from_text(text: &str) -> Vec<TurnRow> {
                 && !txt.starts_with("Caveat:")
                 && !txt.starts_with("[Request interrupted")
             {
-                prompt = txt.chars().take(300).collect();
-                prompt_idx += 1;
+                if !ping.is_empty() && txt == ping {
+                    prompt = "(캐시 유지 핑)".into();
+                    prompt_idx = PING_PROMPT_IDX;
+                } else {
+                    // 컨텍스트가 넘쳐 이어받은 세션의 첫 줄은 수만 자짜리 요약이다.
+                    // 사용자가 물은 게 아니므로 요약 대신 무슨 일인지만 적는다.
+                    prompt = if is_continuation_notice(txt) {
+                        "(앞 대화에서 이어짐)".into()
+                    } else {
+                        txt.chars().take(300).collect()
+                    };
+                    real_idx += 1;
+                    prompt_idx = real_idx;
+                }
             }
             continue;
         }
@@ -814,7 +845,7 @@ mod tests {
             format!(r#"{{"type":"assistant","timestamp":"2026-09-08T01:00:01.000Z","message":{{"id":"msg_A","model":"claude-opus-5","usage":{usage},"content":[{{"type":"text","text":"응답"}}]}}}}"#),
             format!(r#"{{"type":"assistant","timestamp":"2026-09-08T01:00:02.000Z","message":{{"id":"msg_A","model":"claude-opus-5","usage":{usage},"content":[{{"type":"tool_use","name":"Read","input":{{"file_path":"src/usage.rs"}}}}]}}}}"#),
         );
-        let turns = turns_from_text(&text);
+        let turns = turns_from_text(&text, "");
         assert_eq!(turns.len(), 1, "같은 message.id는 한 턴");
         assert_eq!(turns[0].output, 20);
         assert_eq!(turns[0].cache_read, 100);
@@ -834,6 +865,39 @@ mod tests {
         assert_eq!(rows[0].requests, 1, "한 응답 = 요청 1회");
         assert_eq!(rows[0].output, 20);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 캐시 유지 핑은 질문으로 세지 않고 한 묶음으로 모은다. 핑 사이에 낀 진짜 질문의
+    /// 번호는 핑 때문에 밀리거나 끊기면 안 된다. 이어받은 세션의 요약은 질문 문구가 아니다.
+    #[test]
+    fn keepalive_pings_are_one_group_not_questions() {
+        let asst = |id: &str, ts: &str| format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"{id}","model":"claude-opus-5","usage":{{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":50}},"content":[{{"type":"text","text":"."}}]}}}}"#
+        );
+        let user = |t: &str, ts: &str| serde_json::json!({
+            "type": "user", "timestamp": ts, "message": { "content": t }
+        }).to_string();
+        let text = [
+            user("This session is being continued from a previous conversation that ran out of context. Summary: ...", "2026-09-08T01:00:00Z"),
+            asst("m0", "2026-09-08T01:00:01Z"),
+            user("첫 질문", "2026-09-08T01:01:00Z"),
+            asst("m1", "2026-09-08T01:01:01Z"),
+            user("reply \".\" only", "2026-09-08T01:56:00Z"),
+            asst("m2", "2026-09-08T01:56:01Z"),
+            user("두 번째 질문", "2026-09-08T02:00:00Z"),
+            asst("m3", "2026-09-08T02:00:01Z"),
+            user("  reply \".\" only ", "2026-09-08T02:56:00Z"),
+            asst("m4", "2026-09-08T02:56:01Z"),
+        ].join("\n");
+        let t = turns_from_text(&text, "reply \".\" only");
+        let idx: Vec<u32> = t.iter().map(|r| r.prompt_idx).collect();
+        assert_eq!(idx, vec![1, 2, PING_PROMPT_IDX, 3, PING_PROMPT_IDX]);
+        assert_eq!(t[0].prompt, "(앞 대화에서 이어짐)");
+        assert_eq!(t[3].prompt, "두 번째 질문");
+        assert_eq!(t[4].prompt, "(캐시 유지 핑)");
+        // 설정에 메시지가 없으면 예전처럼 질문으로 센다
+        let plain = turns_from_text(&text, "");
+        assert_eq!(plain[2].prompt_idx, 3);
     }
 
     #[test]
@@ -862,9 +926,9 @@ mod tests {
         let dst = std::env::var("DECK_DUMP_OUT").expect("DECK_DUMP_OUT");
         let text = fs::read_to_string(&src).unwrap();
         let turns = if src.contains(".codex") {
-            codex_turns_from_text(&text)
+            codex_turns_from_text(&text, &std::env::var("DECK_DUMP_PING").unwrap_or_default())
         } else {
-            turns_from_text(&text)
+            turns_from_text(&text, &std::env::var("DECK_DUMP_PING").unwrap_or_default())
         };
         fs::write(&dst, serde_json::to_string(&turns).unwrap()).unwrap();
         eprintln!("{} turns -> {dst}", turns.len());
@@ -877,6 +941,23 @@ mod codex_tests {
 
     /// 중복 token_count 이벤트를 그냥 더하면 토큰이 부풀어 오른다 (실측 2.3%).
     /// 누적값의 차분을 써야 마지막 total과 정확히 맞는다.
+    /// 코덱스 탭에도 캐시 유지 핑이 간다 — 클로드와 같은 규칙으로 한 묶음이어야 한다
+    #[test]
+    fn codex_keepalive_pings_are_one_group() {
+        let ev = |i: u64| format!(
+            r#"{{"type":"event_msg","timestamp":"2026-05-25T03:10:{i:02}Z","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{},"cached_input_tokens":0,"output_tokens":{i}}}}}}}}}"#,
+            i * 10
+        );
+        let msg = |m: &str| serde_json::json!({
+            "type": "event_msg", "payload": { "type": "user_message", "message": m }
+        }).to_string();
+        let text = [msg("q1"), ev(1), msg("reply \".\" only"), ev(2), msg("q2"), ev(3)].join("\n");
+        let t = codex_turns_from_text(&text, "reply \".\" only");
+        let idx: Vec<u32> = t.iter().map(|r| r.prompt_idx).collect();
+        assert_eq!(idx, vec![1, PING_PROMPT_IDX, 2]);
+        assert_eq!(t[1].prompt, "(캐시 유지 핑)");
+    }
+
     #[test]
     fn duplicate_token_events_are_not_double_counted() {
         let ev = |ts: &str, i: u64, c: u64, o: u64| {
