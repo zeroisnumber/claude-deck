@@ -458,4 +458,103 @@ mod tests {
             "자식이 종료됐는데 wait()가 돌아오지 않음 — 탭이 '종료됨'으로 바뀌지 않는다"
         );
     }
+
+    /// 실측용: 실행 직후 첫 출력까지 걸리는 시간. 사이드로드한 conpty.dll이 탭 여는
+    /// 속도를 늦추는지 본다. `cargo test -- --ignored conpty_first_output --nocapture`
+    #[test]
+    #[ignore]
+    fn conpty_first_output() {
+        for round in 0..3 {
+            let t0 = std::time::Instant::now();
+            let pair = native_pty_system()
+                .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+                .unwrap();
+            let opened = t0.elapsed().as_millis();
+            let mut cmd = CommandBuilder::new("cmd.exe");
+            cmd.args(["/c", "echo READY&& ping -n 2 127.0.0.1 >nul"]);
+            let mut child = pair.slave.spawn_command(cmd).unwrap();
+            drop(pair.slave);
+            let spawned = t0.elapsed().as_millis();
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            let mut writer = pair.master.take_writer().unwrap();
+            // xterm.js처럼 장치 속성 질의(DA1, ESC [ c)에 답한다. 답하지 않으면 새 ConPTY는
+            // 시작을 몇 초 미룬다 — 실제 앱에서는 xterm이 답하므로 그 조건을 흉내 낸다.
+            let answer = std::env::var("DECK_ANSWER_DA1").is_ok();
+            let (tx, rx) = std::sync::mpsc::channel::<u128>();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                let mut seen = Vec::new();
+                let mut answered = false;
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 { break; }
+                    if seen.is_empty() {
+                        eprintln!("   첫 조각 {:?}", String::from_utf8_lossy(&buf[..n]));
+                    }
+                    seen.extend_from_slice(&buf[..n]);
+                    if answer && !answered && String::from_utf8_lossy(&seen).contains("\x1b[c") {
+                        let _ = writer.write_all(b"\x1b[?1;2c");
+                        let _ = writer.flush();
+                        answered = true;
+                    }
+                    if String::from_utf8_lossy(&seen).contains("READY") {
+                        let _ = tx.send(t0.elapsed().as_millis());
+                        break;
+                    }
+                }
+            });
+            let ready = rx.recv_timeout(std::time::Duration::from_secs(15)).ok();
+            let _ = child.kill();
+            eprintln!("#{round} openpty {opened}ms, spawn {spawned}ms, 첫 출력 READY {:?}ms", ready);
+        }
+    }
+
+    /// 실측용: 풀스크린 TUI처럼 동기화 출력(?2026h ... ?2026l)으로 감싼 큰 프레임을
+    /// ConPTY에 흘려 보내고, 마스터 쪽에서 괄호가 살아 나오는지와 몇 조각으로 쪼개져
+    /// 오는지 본다. `cargo test -- --ignored conpty_sync_output --nocapture`
+    #[test]
+    #[ignore]
+    fn conpty_sync_output() {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let ps = "$e=[char]27; $l=('#'*110); \
+                  for($k=0;$k -lt 5;$k++){ $f=$e+'[?2026h'+$e+'[H'; \
+                  for($i=0;$i -lt 38;$i++){ $f+=$e+'['+($i+1)+';1H'+$k+$l } ; \
+                  $f+=$e+'[?2026l'; [Console]::Out.Write($f); [Console]::Out.Flush(); Start-Sleep -Milliseconds 300 }";
+        let mut cmd = CommandBuilder::new("powershell.exe");
+        cmd.args(["-NoProfile", "-Command", ps]);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<(u128, Vec<u8>)>();
+        let t0 = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send((t0.elapsed().as_millis(), buf[..n].to_vec())).is_err() {
+                    break;
+                }
+            }
+        });
+        let _ = child.wait();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut all = Vec::new();
+        while let Ok((ms, chunk)) = rx.try_recv() {
+            let s = String::from_utf8_lossy(&chunk);
+            eprintln!(
+                "{ms:>5}ms {:>6} bytes  2026h:{} 2026l:{}",
+                chunk.len(),
+                s.matches("?2026h").count(),
+                s.matches("?2026l").count()
+            );
+            all.extend_from_slice(&chunk);
+        }
+        let s = String::from_utf8_lossy(&all);
+        eprintln!(
+            "합계 {} bytes, ?2026h {}개, ?2026l {}개 (보낸 것: 각 5개)",
+            all.len(),
+            s.matches("?2026h").count(),
+            s.matches("?2026l").count()
+        );
+    }
 }
