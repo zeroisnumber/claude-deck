@@ -26,6 +26,9 @@ webview2-com = "0.38"
 # 버전을 그대로 재사용 — msgbox는 gtk-sys 버전이 충돌해서 못 씀. Windows 네이티브
 # 백엔드만 쓰므로 기본 피처(xdg-portal 등)는 불필요.
 rfd = { version = "0.15", default-features = false }
+# 세션을 가져간 프로세스를 끌 때만 쓴다. 번호만 믿지 않고 시작 시각까지 맞춰 보려면
+# GetProcessTimes가 필요하다. tauri가 이미 같은 버전을 물고 있어 빌드가 늘지 않는다.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [profile.dev]
 opt-level = 1

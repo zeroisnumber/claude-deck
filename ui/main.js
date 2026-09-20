@@ -1306,6 +1306,60 @@ listen("pty-output", (ev) => {
   }
 });
 
+// 같은 세션을 다른 프로세스가 이어받으면(클로드가 스스로 다시 띄우거나 다른
+// 터미널에서 --resume 했을 때) 이 탭의 화면을 그리고 키를 읽던 쪽이 사라진다.
+// 겉보기에는 멀쩡해서 한참 뒤에야 알아채므로, 알게 된 순간 띠를 띄운다.
+listen("session-moved", (ev) => {
+  const { id, from, to } = ev.payload;
+  const t = terms.get(id);
+  if (!t) return;
+  // to가 0이면 주인이 우리 쪽으로 돌아왔다는 뜻 — 경고를 거둔다
+  if (!to) {
+    if (t.movedBar) { t.movedBar.remove(); t.movedBar = null; }
+    return;
+  }
+  if (t.movedBar) return;
+  const bar = document.createElement("div");
+  bar.className = "term-moved";
+  bar.innerHTML = `<span class="moved-text"></span>
+    <button class="btn-ghost btn-sm moved-reopen">다시 열기</button>
+    <button class="btn-ghost btn-sm moved-kill">그 프로세스도 종료</button>
+    <button class="btn-ghost btn-sm moved-hide">닫기</button>`;
+  bar.querySelector(".moved-text").innerHTML =
+    `이 세션을 다른 프로세스가 이어받았습니다. 이 터미널은 더 이상 세션과 연결되어 있지 않습니다.
+     <span class="moved-sub">(${from} → ${to})</span>`;
+  bar.querySelector(".moved-reopen").onclick = () => reopenMoved(id);
+  bar.querySelector(".moved-kill").onclick = () => killOwner(id, to);
+  bar.querySelector(".moved-hide").onclick = () => { bar.remove(); t.movedBar = null; };
+  t.container.appendChild(bar);
+  t.movedBar = bar;
+  t.movedPid = to;
+  showToast("⚠ 세션이 옮겨갔습니다", `${t.title} — 탭에서 다시 열 수 있습니다`, () => activate(id));
+});
+
+// 우리 쪽 프로세스를 정리하고 같은 세션을 다시 띄운다. 대화는 --resume으로 이어진다.
+async function reopenMoved(id) {
+  const t = terms.get(id);
+  if (!t) return;
+  if (t.movedBar) { t.movedBar.remove(); t.movedBar = null; }
+  await invoke("kill_pty", { id });
+  t.exited = false;
+  t.term.write("\r\n\x1b[38;5;244m── 다시 열기 ──\x1b[0m\r\n\r\n");
+  activate(id);
+  await spawnInto(id, t, "다시 열기 실패");
+}
+
+// 세션을 가져간 프로세스를 끝낸다. 남겨 두면 다시 열어도 그쪽이 세션을 쥐고 있다.
+// 누르기 전에는 아무것도 하지 않는다 — 우리가 띄우지 않은 프로세스다.
+async function killOwner(id, pid) {
+  try {
+    await invoke("kill_session_owner", { id, pid });
+    showToast("프로세스를 종료했습니다", `${pid} — 이제 다시 열면 됩니다`);
+  } catch (err) {
+    showToast("⚠ 종료하지 못했습니다", String(err));
+  }
+}
+
 listen("pty-exit", (ev) => {
   const { id } = ev.payload;
   const t = terms.get(id);

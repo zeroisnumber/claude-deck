@@ -123,6 +123,7 @@ fn main() {
             pty::kill_pty,
             pty::dir_exists,
             pty::create_dir,
+            pty::kill_session_owner,
             sessions::list_sessions,
             delete_session,
             sessions::session_preview,

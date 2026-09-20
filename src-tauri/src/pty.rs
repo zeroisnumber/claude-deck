@@ -176,6 +176,71 @@ pub(crate) fn create_dir(path: String) -> Result<(), String> {
     std::fs::create_dir_all(&path).map_err(|e| format!("폴더를 만들 수 없습니다: {e}"))
 }
 
+/// 이 프로세스가 언제 시작됐는가 (윈도우 FILETIME). 클로드가 상태 파일에 적어 두는
+/// procStart와 같은 값이라, 번호가 재사용된 남의 프로세스를 가려낼 수 있다.
+fn process_start(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    let mut created = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let mut zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let ok = unsafe {
+        GetProcessTimes(handle, &mut created, &mut zero, &mut zero.clone(), &mut zero.clone())
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
+}
+
+/// 세션을 가져간 프로세스를 끝낸다. 우리가 띄우지 않은 프로세스라, 사용자가 띠에서
+/// 직접 누를 때만 부른다. 번호 하나로 아무 프로세스나 끄게 두지 않는다 — 클로드가 쓴
+/// 상태 파일이 "그 프로세스가 이 탭의 세션을 쥐고 있다"고 말하고, 그 파일이 적어 둔
+/// 시작 시각이 지금 그 번호를 쓰는 프로세스와 같을 때만 끈다. 비정상 종료로 남은
+/// 파일이 있을 수 있어 파일만으로는 부족하다(번호는 재사용된다).
+#[tauri::command(async)]
+pub(crate) fn kill_session_owner(id: String, pid: u32) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    };
+
+    let key = ACTIVITY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .and_then(|a| a.session_id.clone())
+        .unwrap_or(id);
+    let home = dirs::home_dir().ok_or("홈 폴더를 찾을 수 없습니다")?;
+    let path = home.join(".claude").join("sessions").join(format!("{pid}.json"));
+    let text = fs::read_to_string(&path).map_err(|_| "그 프로세스는 이미 없습니다".to_string())?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("상태 파일을 읽지 못했습니다: {e}"))?;
+    if v["sessionId"].as_str() != Some(key.as_str()) {
+        return Err("그 프로세스는 이 세션을 쥐고 있지 않습니다".into());
+    }
+    let want: Option<u64> = v["procStart"].as_str().and_then(|s| s.parse().ok());
+
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return Err("그 프로세스를 열 수 없습니다 (이미 끝났을 수 있습니다)".into());
+        }
+        let started = process_start(h);
+        // 시작 시각을 확인할 수 없으면 끄지 않는다. 엉뚱한 프로세스를 끄는 것보다
+        // 못 끄는 쪽이 낫다 — 사용자는 탭을 닫고 다시 여는 길이 남아 있다.
+        if want.is_none() || started.is_none() || want != started {
+            CloseHandle(h);
+            return Err("그 번호는 다른 프로세스가 쓰고 있습니다".into());
+        }
+        let ok = TerminateProcess(h, 1);
+        CloseHandle(h);
+        if ok == 0 {
+            return Err("종료 요청이 거부됐습니다".into());
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) fn spawn_pty(
     app: AppHandle,
@@ -249,6 +314,9 @@ pub(crate) fn spawn_pty(
             file: file.filter(|f| !f.trim().is_empty()).map(PathBuf::from),
             file_backed: false,
             waiting: false,
+            owner_pid: None,
+            moved: false,
+            moved_seen: None,
         },
     );
 
@@ -364,6 +432,41 @@ pub(crate) fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 탭을 닫거나 다시 열 때 우리가 끄는 건 `cmd.exe`다. 에이전트는 그 아래 손자라
+    /// TerminateProcess가 닿지 않는다. 그래도 죽는지 — 안 죽으면 세션 하나에 프로세스가
+    /// 계속 쌓인다. `cargo test -- --ignored grandchild_dies --nocapture`
+    #[test]
+    #[ignore]
+    fn grandchild_dies_when_the_pty_closes() {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        // ping은 오래 살아 있고 부모가 없어도 계속 돈다 — 손자가 남는지 보기 좋다
+        cmd.args(["/c", "ping", "-n", "60", "127.0.0.1"]);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let cmd_pid = child.process_id().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        let alive = |name: &str| -> usize {
+            let out = std::process::Command::new("tasklist").args(["/NH"]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).to_lowercase().matches(name).count()
+        };
+        let before = alive("ping.exe");
+        assert!(before > 0, "ping이 떠 있어야 시험이 성립한다");
+
+        // 앱이 탭을 닫을 때 하는 것과 같다: 직계 자식을 끄고 PTY를 놓는다
+        let _ = child.clone_killer().kill();
+        drop(child);
+        drop(pair.master);
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+
+        let after = alive("ping.exe");
+        eprintln!("cmd.exe pid {cmd_pid} / ping 프로세스 {before}개 → {after}개");
+        assert!(after < before, "손자가 살아남았다 — 다시 열면 세션에 프로세스가 하나 더 붙는다");
+    }
 
     /// 한산할 때의 첫 조각은 그대로 나가고(에코가 늦으면 타자가 밀린다), 그 직후
     /// 몰려오는 조각은 타이머가 한 번에 비운다.

@@ -626,6 +626,27 @@ html, body {
 .term-container.visible { display: block; }
 .term-container .xterm { height: 100%; }
 
+/* 세션이 다른 프로세스로 넘어갔을 때 그 탭 위에 띄우는 띠.
+   터미널 위에 겹쳐 둔다 — 화면은 이미 주인을 잃어 더 그려지지 않는다. */
+.term-moved {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  right: 10px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #7a5d1f;
+  border-radius: 6px;
+  background: #2b2413;
+  color: #e8d9b0;
+  font-size: 12px;
+}
+.term-moved .moved-text { flex: 1; }
+.term-moved .moved-sub { opacity: 0.7; }
+
 /* ─── 빈 화면 ─────────────────────────────────────────── */
 #empty-state {
   position: absolute;

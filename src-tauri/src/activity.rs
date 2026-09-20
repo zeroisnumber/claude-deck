@@ -104,6 +104,13 @@ pub(crate) struct Activity {
     pub(crate) file_backed: bool,
     /// 상태 파일이 "입력 필요"라고 보고한 마지막 값
     pub(crate) waiting: bool,
+    /// 이 세션을 처음 보고한 프로세스. 나중에 다른 프로세스가 같은 세션을 보고하면
+    /// 세션이 그쪽으로 옮겨간 것이고, 우리 터미널은 주인을 잃는다.
+    pub(crate) owner_pid: Option<u32>,
+    /// 옮겨간 걸 이미 알렸는가 (한 번만 알린다)
+    pub(crate) moved: bool,
+    /// 옮겨간 후보를 처음 본 시각 — 잠깐 스쳐 가는 값으로 오판하지 않으려고 한 번 더 본다
+    pub(crate) moved_seen: Option<(u32, std::time::Instant)>,
 }
 
 pub(crate) static ACTIVITY: LazyLock<Mutex<HashMap<String, Activity>>> =
@@ -324,11 +331,15 @@ pub(crate) fn note_output(id: &str) {
 /// status 값: busy/working/compacting/shell = 작업 중, blocked/waiting(또는 waitingFor가 있음) =
 /// 사람의 답을 기다림, idle/exited = 대기. 세션 ID → (작업 중, 입력 필요). 프로세스가 끝나면 파일도 지워지지만, 비정상 종료로 남은
 /// 파일이 영원히 "작업 중"으로 읽히지 않게 갱신 시각이 오래된 건 버린다.
-pub(crate) fn scan_session_status() -> HashMap<String, (bool, bool)> {
+pub(crate) fn scan_session_status() -> (HashMap<String, (bool, bool)>, HashMap<String, u32>) {
     let mut out = HashMap::new();
+    let mut owner = HashMap::new();
     let mut latest: HashMap<String, f64> = HashMap::new();
-    let Some(home) = dirs::home_dir() else { return out };
-    let Ok(entries) = fs::read_dir(home.join(".claude").join("sessions")) else { return out };
+    let mut owner_latest: HashMap<String, f64> = HashMap::new();
+    let Some(home) = dirs::home_dir() else { return (out, owner) };
+    let Ok(entries) = fs::read_dir(home.join(".claude").join("sessions")) else {
+        return (out, owner);
+    };
     let now_ms = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as f64)
@@ -340,7 +351,22 @@ pub(crate) fn scan_session_status() -> HashMap<String, (bool, bool)> {
         }
         let Ok(text) = fs::read_to_string(&p) else { continue };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-        let (Some(sid), Some(status)) = (v["sessionId"].as_str(), v["status"].as_str()) else { continue };
+        let Some(sid) = v["sessionId"].as_str() else { continue };
+        // 주인 판정은 status가 없는 파일도 센다. 세션을 이어받은 프로세스가 status 없이
+        // 파일만 올려 둔 채 굳어 있는 것을 실제로 봤다(updatedAt이 80분 전에 멈춤).
+        // 그 파일을 건너뛰면 정작 잡아야 할 인수인계를 통째로 놓친다.
+        let pid = v["pid"].as_u64().unwrap_or(0) as u32;
+        let stamp = v["updatedAt"].as_f64().or_else(|| v["startedAt"].as_f64()).unwrap_or(0.0);
+        if pid != 0 && now_ms - stamp <= 6.0 * 3600.0 * 1000.0 {
+            match owner_latest.get(sid) {
+                Some(&t) if t >= stamp => {}
+                _ => {
+                    owner_latest.insert(sid.to_string(), stamp);
+                    owner.insert(sid.to_string(), pid);
+                }
+            }
+        }
+        let Some(status) = v["status"].as_str() else { continue };
         let updated = v["updatedAt"].as_f64().unwrap_or(0.0);
         if now_ms - updated > 6.0 * 3600.0 * 1000.0 {
             continue;
@@ -358,7 +384,58 @@ pub(crate) fn scan_session_status() -> HashMap<String, (bool, bool)> {
             }
         }
     }
-    out
+    (out, owner)
+}
+
+/// 세션이 우리가 띄운 프로세스에서 다른 프로세스로 넘어갔다. 그 탭의 터미널에는
+/// 화면을 그리고 키를 읽던 쪽이 더는 없다 — 사용자가 알아야 고칠 수 있다.
+#[derive(Clone, Serialize)]
+pub(crate) struct SessionMovedEvent {
+    pub(crate) id: String,
+    pub(crate) from: u32,
+    pub(crate) to: u32,
+}
+
+/// 이 세션의 주인이 바뀌었는지 본다. 한 번 스쳐 본 값으로는 판정하지 않는다 —
+/// 세션을 넘기는 동안 두 프로세스의 파일이 잠깐 같이 있을 수 있어서, 같은 새 주인이
+/// 이 시간을 넘겨 유지될 때만 알린다.
+const OWNER_CONFIRM_MS: u64 = 5_000;
+
+pub(crate) fn check_owner(
+    id: &str,
+    a: &mut Activity,
+    pid: u32,
+    now: std::time::Instant,
+    moved: &mut Vec<(String, u32, u32)>,
+) {
+    let Some(mine) = a.owner_pid else {
+        a.owner_pid = Some(pid);
+        return;
+    };
+    if pid == mine {
+        a.moved_seen = None;
+        // 돌아왔으면 경고도 거둬야 한다. 다른 터미널에서 잠깐 이어받았다가 닫은
+        // 경우까지 영영 "세션을 잃었다"로 남겨 두면, 멀쩡한 탭을 다시 열게 만든다.
+        if a.moved {
+            a.moved = false;
+            trace(id, &a.agent, "state", &format!("session back {pid}"));
+            moved.push((id.to_string(), pid, 0));
+        }
+        return;
+    }
+    if a.moved {
+        return;
+    }
+    match a.moved_seen {
+        Some((seen, t)) if seen == pid => {
+            if now.duration_since(t).as_millis() as u64 >= OWNER_CONFIRM_MS {
+                a.moved = true;
+                trace(id, &a.agent, "state", &format!("session moved {mine}->{pid}"));
+                moved.push((id.to_string(), mine, pid));
+            }
+        }
+        _ => a.moved_seen = Some((pid, now)),
+    }
 }
 
 /// 버스트 상태를 주기적으로 평가해 working 전이를 이벤트로 올린다.
@@ -369,6 +446,7 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
     std::thread::spawn(move || {
         let mut tick: u64 = 0;
         let mut file_status: HashMap<String, (bool, bool)> = HashMap::new();
+        let mut session_owner: HashMap<String, u32> = HashMap::new();
         loop {
         std::thread::sleep(std::time::Duration::from_millis(250));
         tick = tick.wrapping_add(1);
@@ -381,7 +459,7 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
         }
         // 상태 파일은 1초에 한 번 (파일 몇 개를 읽는 정도라 부담이 없다)
         if tick % 4 == 0 {
-            file_status = scan_session_status();
+            (file_status, session_owner) = scan_session_status();
         }
 
         // 1단계: 잠금 안에서 판정에 필요한 것만 모은다 (파일 I/O는 잠금 밖에서)
@@ -390,9 +468,17 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
         let mut candidates: Vec<(String, Option<PathBuf>, u64)> = Vec::new();
         let mut file_off: Vec<String> = Vec::new();
         let mut wait_changed: Vec<(String, bool)> = Vec::new();
+        let mut moved: Vec<(String, u32, u32)> = Vec::new();
         {
             let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
             for (id, a) in act.iter_mut() {
+                let owner = {
+                    let key = a.session_id.as_deref().unwrap_or(id.as_str());
+                    session_owner.get(key).copied()
+                };
+                if let Some(pid) = owner {
+                    check_owner(id, a, pid, now, &mut moved);
+                }
                 let key = a.session_id.as_deref().unwrap_or(id.as_str());
                 if let Some(&(w, wt)) = file_status.get(key) {
                     let first = !a.file_backed;
@@ -459,6 +545,9 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
             });
         }
         turn_off.extend(file_off);
+        for (id, from, to) in moved {
+            let _ = app.emit("session-moved", SessionMovedEvent { id, from, to });
+        }
         for id in turn_on {
             let _ = app.emit("pty-state", PtyStateEvent { id, working: true, waiting: false, notify: true });
         }
@@ -730,6 +819,41 @@ mod tests {
         assert!(!b.draft);
     }
 
+    /// 세션이 다른 프로세스로 넘어간 것과, 넘기는 도중 잠깐 두 파일이 겹친 것을
+    /// 가른다. 잠깐 보인 값으로 "터미널을 잃었다"고 알리면 멀쩡한 탭에 경고가 뜬다.
+    #[test]
+    fn owner_change_is_reported_once_and_only_after_it_holds() {
+        let mut a = blank_activity();
+        let t0 = std::time::Instant::now();
+        let mut moved = Vec::new();
+
+        // 처음 본 프로세스가 주인이다
+        check_owner("tab", &mut a, 100, t0, &mut moved);
+        assert_eq!(a.owner_pid, Some(100));
+        assert!(moved.is_empty());
+
+        // 다른 프로세스를 한 번 봤다고 바로 알리지 않는다
+        check_owner("tab", &mut a, 200, t0, &mut moved);
+        assert!(moved.is_empty());
+        // 원래 주인이 다시 보이면 없던 일이 된다
+        check_owner("tab", &mut a, 100, t0 + std::time::Duration::from_secs(1), &mut moved);
+        assert!(moved.is_empty());
+        assert!(a.moved_seen.is_none());
+
+        // 같은 새 주인이 확인 시간을 넘겨 유지되면 알린다 — 한 번만
+        check_owner("tab", &mut a, 200, t0 + std::time::Duration::from_secs(2), &mut moved);
+        check_owner("tab", &mut a, 200, t0 + std::time::Duration::from_secs(8), &mut moved);
+        assert_eq!(moved, vec![("tab".to_string(), 100, 200)]);
+        check_owner("tab", &mut a, 200, t0 + std::time::Duration::from_secs(9), &mut moved);
+        assert_eq!(moved.len(), 1);
+
+        // 주인이 우리 쪽으로 돌아오면 경고를 거둔다(to=0). 다른 터미널에서 잠깐
+        // 열었다 닫은 경우까지 영영 경고로 남기지 않는다.
+        check_owner("tab", &mut a, 100, t0 + std::time::Duration::from_secs(10), &mut moved);
+        assert!(!a.moved);
+        assert_eq!(moved.last(), Some(&("tab".to_string(), 100, 0)));
+    }
+
     fn blank_activity() -> Activity {
         Activity {
             session_id: None,
@@ -751,6 +875,9 @@ mod tests {
             file: None,
             file_backed: false,
             waiting: false,
+            owner_pid: None,
+            moved: false,
+            moved_seen: None,
         }
     }
 
