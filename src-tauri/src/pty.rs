@@ -541,8 +541,13 @@ mod tests {
         let mut all = Vec::new();
         while let Ok((ms, chunk)) = rx.try_recv() {
             let s = String::from_utf8_lossy(&chunk);
+            let head: String = s
+                .chars()
+                .take(160)
+                .map(|c| if c == '\x1b' { "^".to_string() } else { c.to_string() })
+                .collect();
             eprintln!(
-                "{ms:>5}ms {:>6} bytes  2026h:{} 2026l:{}",
+                "{ms:>5}ms {:>6} bytes  2026h:{} 2026l:{}  {head}",
                 chunk.len(),
                 s.matches("?2026h").count(),
                 s.matches("?2026l").count()
