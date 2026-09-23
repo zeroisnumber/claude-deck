@@ -1591,6 +1591,7 @@ $("#btn-settings").onclick = () => {
   $("#global-env").value = globalEnv;
   invoke("trace_enabled").then((on) => { $("#opt-trace").checked = !!on; }).catch(() => {});
   $("#update-state").textContent = "";
+  loadAgentVersions();
   $("#opt-webgl").checked = webglOn;
   $("#opt-statusline").checked = statusLineOn;
   $("#opt-restore-ask").checked = localStorage.getItem("restoreAsk") !== "0";
@@ -1600,6 +1601,77 @@ $("#btn-settings").onclick = () => {
   syncKaFields();
   $("#lmodal-backdrop").classList.remove("hidden");
 };
+// 설정을 열 때마다 새로 본다. 에이전트마다 --version 한 번과 npm 레지스트리 한 번이라
+// 1~2초 걸리므로 창은 먼저 열고 나중에 채운다.
+async function loadAgentVersions() {
+  const box = $("#agent-versions");
+  box.innerHTML = '<span class="lmodal-hint">확인 중…</span>';
+  let list = [];
+  try { list = await invoke("agent_versions"); } catch (e) {
+    box.innerHTML = "";
+    box.textContent = "확인하지 못했습니다: " + e;
+    return;
+  }
+  box.innerHTML = "";
+  for (const a of list) {
+    const row = document.createElement("div");
+    row.className = "agent-row";
+    row.innerHTML = `<span class="agent-name"></span><span class="agent-ver mono"></span><span class="agent-state"></span>`;
+    row.querySelector(".agent-name").textContent = a.name;
+    const ver = row.querySelector(".agent-ver");
+    const state = row.querySelector(".agent-state");
+    if (!a.installed) {
+      ver.textContent = "—";
+      state.textContent = "설치 안 됨";
+      state.className = "agent-state dim";
+    } else {
+      ver.textContent = a.installed;
+      if (!a.latest) {
+        state.textContent = "최신판 확인 실패";
+        state.className = "agent-state dim";
+      } else if (a.update_available) {
+        state.textContent = `${a.latest} 있음` + (a.channel !== "latest" ? ` (${a.channel})` : "");
+        state.className = "agent-state new";
+        if (a.can_update) {
+          const b = document.createElement("button");
+          b.className = "btn-ghost btn-sm";
+          b.textContent = "업데이트";
+          b.onclick = async () => {
+            b.disabled = true;
+            b.textContent = "받는 중…";
+            try {
+              const out = await invoke("update_claude");
+              showToast("클로드 업데이트", out || "완료 — 새로 여는 세션부터 새 판을 씁니다");
+            } catch (e) {
+              showToast("⚠ 클로드 업데이트 실패", String(e));
+            }
+            loadAgentVersions();
+          };
+          row.appendChild(b);
+        } else {
+          // npm으로 깔았는지 다른 길로 깔았는지 앱은 모른다. 대신 올려 주지 않고
+          // 흔한 명령을 복사해 준다.
+          const b = document.createElement("button");
+          b.className = "btn-ghost btn-sm";
+          b.textContent = "명령 복사";
+          b.title = a.update_cmd;
+          b.onclick = () => {
+            const cm = window.__TAURI__ && window.__TAURI__.clipboardManager;
+            (cm ? cm.writeText(a.update_cmd) : navigator.clipboard.writeText(a.update_cmd))
+              .then(() => showToast("명령을 복사했습니다", a.update_cmd))
+              .catch(() => showToast("⚠ 복사하지 못했습니다", a.update_cmd));
+          };
+          row.appendChild(b);
+        }
+      } else {
+        state.textContent = "최신";
+        state.className = "agent-state ok";
+      }
+    }
+    box.appendChild(row);
+  }
+}
+
 // 캐시 유지를 꺼두면 임계값과 메시지는 아무 데도 쓰이지 않는다 — 만질 수 있게
 // 두면 껐다는 사실이 안 보인다.
 function syncKaFields() {

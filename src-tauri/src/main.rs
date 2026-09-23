@@ -18,6 +18,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
 
+mod agents;
 mod diag;
 mod statusline;
 mod activity;
@@ -124,6 +125,8 @@ fn main() {
             pty::dir_exists,
             pty::create_dir,
             pty::kill_session_owner,
+            agents::agent_versions,
+            agents::update_claude,
             sessions::list_sessions,
             delete_session,
             sessions::session_preview,

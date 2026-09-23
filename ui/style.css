@@ -1344,3 +1344,14 @@ kbd {
   color: var(--text-dim);
 }
 .pv-body .md-num { margin: 0; }
+
+/* 설정 — 에이전트 버전 */
+.agent-versions { display: flex; flex-direction: column; gap: 6px; }
+.agent-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }
+.agent-name { width: 96px; color: var(--text); }
+.agent-ver { width: 80px; color: var(--text-dim); font-family: var(--font-mono); font-size: 12px; }
+.agent-row .btn-sm { margin-top: 0; }
+.agent-state { flex: 1; color: var(--text-dim); }
+.agent-state.ok { color: var(--text-faint); }
+.agent-state.new { color: var(--amber); }
+.agent-state.dim { color: var(--text-faint); }
