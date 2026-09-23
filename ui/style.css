@@ -659,6 +659,34 @@ html, body {
   color: var(--text-dim);
 }
 #empty-state.hidden { display: none; }
+
+/* 켤 때 지난번 탭을 이어서 열지 묻는 카드 */
+.restore-card {
+  margin-top: 22px;
+  width: min(460px, 100%);
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.restore-title { font-size: 13px; font-weight: 600; }
+.restore-list { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; }
+.restore-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+  padding: 3px 2px;
+}
+.restore-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.restore-proj { font-size: 11px; color: var(--text-faint); }
+.restore-remember { font-size: 11.5px; color: var(--text-dim); display: flex; gap: 6px; align-items: center; }
+.restore-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .empty-mark { font-size: 44px; color: var(--accent); opacity: 0.9; }
 .empty-title { font-size: 19px; font-weight: 600; color: var(--text); }
 .empty-sub { font-size: 13px; color: var(--text-dim); }

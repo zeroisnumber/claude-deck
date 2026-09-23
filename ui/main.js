@@ -1125,8 +1125,47 @@ function restoreTabs() {
   let saved = [];
   try { saved = JSON.parse(localStorage.getItem("openTabs")) || []; } catch { /* 무시 */ }
   const toOpen = saved.map((sid) => sessions.find((s) => s.session_id === sid)).filter(Boolean);
-  toOpen.forEach((meta, i) =>
+  if (!toOpen.length) return;
+  // 묻지 않고 바로 띄우면 탭마다 에이전트가 하나씩 뜬다(클로드 하나가 1GB 가까이 쓴다).
+  // 오늘 이어서 할 것만 고르게 한다. 예전처럼 바로 열고 싶으면 한 번 끄면 된다.
+  if (localStorage.getItem("restoreAsk") === "0") return openRestored(toOpen);
+  askRestore(toOpen);
+}
+
+function openRestored(list) {
+  list.forEach((meta, i) =>
     detach(`restoreTab:${meta.session_id.slice(0, 8)}`, openSession(meta, i === 0)));
+}
+
+function askRestore(list) {
+  const card = document.createElement("div");
+  card.className = "restore-card";
+  card.innerHTML = `<div class="restore-title">지난번에 열려 있던 세션 ${list.length}개</div>
+    <div class="restore-list"></div>
+    <label class="restore-remember"><input type="checkbox"> 다음부터 묻지 않고 바로 열기</label>
+    <div class="restore-actions">
+      <button class="btn-ghost btn-sm restore-skip">열지 않기</button>
+      <button class="btn-accent btn-sm restore-ok">이어서 열기</button>
+    </div>`;
+  const box = card.querySelector(".restore-list");
+  for (const meta of list) {
+    const row = document.createElement("label");
+    row.className = "restore-row";
+    row.innerHTML = `<input type="checkbox" checked><span class="restore-name"></span><span class="restore-proj"></span>`;
+    row.querySelector(".restore-name").textContent = (sessionTitle(meta) || meta.session_id.slice(0, 8)).slice(0, 60);
+    row.querySelector(".restore-proj").textContent = basename(meta.cwd);
+    row.meta = meta;
+    box.appendChild(row);
+  }
+  const done = () => card.remove();
+  card.querySelector(".restore-ok").onclick = () => {
+    if (card.querySelector(".restore-remember input").checked) localStorage.setItem("restoreAsk", "0");
+    const picked = [...box.children].filter((r) => r.querySelector("input").checked).map((r) => r.meta);
+    done();
+    openRestored(picked);
+  };
+  card.querySelector(".restore-skip").onclick = done;
+  emptyState.appendChild(card);
 }
 
 function activate(id) {
@@ -1137,6 +1176,9 @@ function activate(id) {
     t.container.classList.toggle("visible", tid === id);
   }
   emptyState.classList.add("hidden");
+  // 묻는 카드가 떠 있는데 사이드바에서 직접 골라 열었으면 그걸로 답한 것이다.
+  // 남겨 두면 탭을 다 닫았을 때 지난 질문이 다시 나타난다.
+  emptyState.querySelector(".restore-card")?.remove();
   const t = terms.get(id);
   requestAnimationFrame(() => {
     // 이 프레임 사이에 탭이 닫혔을 수 있다. 버려진 터미널에 fit()을 걸면 xterm이
@@ -1551,6 +1593,7 @@ $("#btn-settings").onclick = () => {
   $("#update-state").textContent = "";
   $("#opt-webgl").checked = webglOn;
   $("#opt-statusline").checked = statusLineOn;
+  $("#opt-restore-ask").checked = localStorage.getItem("restoreAsk") !== "0";
   $("#opt-keepalive").checked = !!keepAlive.enabled;
   $("#ka-threshold").value = String(keepAlive.thresholdSecs / 60);
   $("#ka-message").value = keepAlive.message;
@@ -1600,6 +1643,7 @@ $("#lmodal-save").onclick = () => {
   webglOn = $("#opt-webgl").checked;
   localStorage.setItem("webgl", webglOn ? "1" : "0");
   if (webglOn !== webglWas) applyRenderer();
+  localStorage.setItem("restoreAsk", $("#opt-restore-ask").checked ? "1" : "0");
   statusLineOn = $("#opt-statusline").checked;
   localStorage.setItem("statusLine", statusLineOn ? "1" : "0");
   ensureStatusLinePath();
