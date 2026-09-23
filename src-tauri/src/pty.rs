@@ -433,6 +433,111 @@ pub(crate) fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String>
 mod tests {
     use super::*;
 
+    /// 풀스크린 클로드가 보내던 크기(약 10KB)의 전체 화면을 쉬지 않고 쏟아낼 때
+    /// ConPTY가 얼마나 빨리 통과시키는가. 느리면 클로드의 출력 쓰기가 막히고, 그동안
+    /// 키 입력도 처리하지 못한다(실제로 입력 뒤 5~9초 무응답이 기록됐다).
+    /// `cargo test -- --ignored conpty_frame_throughput --nocapture`
+    #[test]
+    #[ignore]
+    fn conpty_frame_throughput() {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 42, cols: 176, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        // 176x42 화면을 줄마다 위치를 찍고 색을 바꿔 가며 다시 그린다 — 클로드의 프레임과 비슷한 모양
+        let ps = "$e=[char]27; $sw=[Diagnostics.Stopwatch]::StartNew(); \
+                  for($k=0;$k -lt 200;$k++){ $f=$e+'[?2026h'; \
+                  for($y=1;$y -le 42;$y++){ $f+=$e+'['+$y+';1H'+$e+'['+(31+($y+$k)%7)+'m'+('가나다abc'+$k+' ')*14 } ; \
+                  $f+=$e+'[0m'+$e+'[?2026l'; [Console]::Out.Write($f) }; [Console]::Out.Flush(); \
+                  $sw.Stop(); [Console]::Out.Write($e+'[0mDONE '+$sw.ElapsedMilliseconds+' '+$f.Length)";
+        let mut cmd = CommandBuilder::new("powershell.exe");
+        cmd.args(["-NoProfile", "-Command", ps]);
+        let t0 = std::time::Instant::now();
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() { break; }
+            }
+        });
+        let mut total = 0usize;
+        let mut first: Option<f64> = None;
+        let mut tail = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(std::time::Duration::from_millis(1500)) {
+                Ok(c) => {
+                    if first.is_none() { first = Some(t0.elapsed().as_secs_f64() * 1000.0); }
+                    total += c.len();
+                    tail.extend_from_slice(&c);
+                    if tail.len() > 4096 { tail.drain(..tail.len() - 4096); }
+                    if String::from_utf8_lossy(&tail).contains("DONE ") { break; }
+                }
+                Err(_) => break,
+            }
+        }
+        let all = t0.elapsed().as_secs_f64() * 1000.0;
+        let s = String::from_utf8_lossy(&tail).to_string();
+        let done = s.rsplit("DONE ").next().unwrap_or("").split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+        eprintln!("자식이 200장 쓰는 데 걸린 시간·한 장 크기: {done}  /  우리가 받은 양 {} KB, 첫 조각 {:.0}ms, 끝까지 {all:.0}ms",
+                  total / 1024, first.unwrap_or(0.0));
+        let _ = child.kill();
+    }
+
+    /// spawn_pty·resize_pty·kill_pty는 메인 스레드에서 돈다. 여기서 막히면 창 전체가
+    /// 멈추는데(출력 이벤트도 메인 스레드를 거친다) 화면 쪽 기록(longtask)에는 안 잡힌다.
+    /// 각각 얼마나 걸리는지, 자식이 출력을 쏟아내는 중에도 그런지 잰다.
+    /// `cargo test -- --ignored main_thread_pty_calls --nocapture`
+    #[test]
+    #[ignore]
+    fn main_thread_pty_calls() {
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        for round in 0..3 {
+            let t = std::time::Instant::now();
+            let pair = native_pty_system()
+                .openpty(PtySize { rows: 42, cols: 176, pixel_width: 0, pixel_height: 0 })
+                .unwrap();
+            let open_ms = ms(t);
+            let mut cmd = CommandBuilder::new("cmd.exe");
+            // 클로드가 시작하며 화면을 쏟아내는 것처럼 출력을 계속 낸다
+            cmd.args(["/c", "for /L %i in (1,1,4000) do @echo ################################################################ %i"]);
+            let t = std::time::Instant::now();
+            let mut child = pair.slave.spawn_command(cmd).unwrap();
+            let spawn_ms = ms(t);
+            drop(pair.slave);
+            let mut reader = pair.master.try_clone_reader().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 { break; }
+                }
+            });
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let mut resize = Vec::new();
+            for k in 0..10 {
+                let t = std::time::Instant::now();
+                let _ = pair.master.resize(PtySize {
+                    rows: 42 + (k % 2), cols: 176, pixel_width: 0, pixel_height: 0,
+                });
+                resize.push(ms(t));
+            }
+            let t = std::time::Instant::now();
+            let _ = child.clone_killer().kill();
+            let kill_ms = ms(t);
+            let t = std::time::Instant::now();
+            drop(pair.master);
+            let close_ms = ms(t);
+            let _ = child.wait();
+            resize.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!(
+                "{round}: openpty {open_ms:.1}ms  spawn {spawn_ms:.1}ms  resize 중앙 {:.1} 최대 {:.1}ms  kill {kill_ms:.1}ms  PTY 닫기 {close_ms:.1}ms",
+                resize[5], resize[9]
+            );
+        }
+    }
+
     /// 탭을 닫거나 다시 열 때 우리가 끄는 건 `cmd.exe`다. 에이전트는 그 아래 손자라
     /// TerminateProcess가 닿지 않는다. 그래도 죽는지 — 안 죽으면 세션 하나에 프로세스가
     /// 계속 쌓인다. `cargo test -- --ignored grandchild_dies --nocapture`

@@ -712,6 +712,53 @@ function scheduleWebglRebuild(why) {
   }, 100);
 }
 
+// 풀스크린 클로드는 "마우스가 움직일 때마다 알려 달라"(DEC 1003)를 켠다. 그러면 터미널
+// 위에서 마우스를 스치기만 해도 칸이 바뀔 때마다 신호가 하나씩 가고, 휠은 한 번 굴리는
+// 데 6~20ms 간격으로 여러 개가 간다. 실측: 보낸 입력의 88%가 마우스 신호였고, 한글 24자가
+// 8.8초 막히기 직전에 움직임 115개와 휠 16개가 먼저 들어가 있었다. 클로드는 신호마다
+// 화면을 다시 계산하므로 그동안 키 입력이 뒤로 밀린다.
+// 앱이 마우스 신호를 받는 모드일 때만 솎는다. 평소 스크롤(xterm 자체 스크롤백)은 그대로.
+const MOUSE_REPORT_GAP_MS = 50;
+function throttleMouseReports(term, container) {
+  const reporting = () => term.modes.mouseTrackingMode !== "none";
+  let lastWheel = 0;
+  term.attachCustomWheelEventHandler(() => {
+    if (!reporting()) return true;
+    const now = performance.now();
+    if (now - lastWheel < MOUSE_REPORT_GAP_MS) return false;
+    lastWheel = now;
+    return true;
+  });
+  // 움직임은 xterm에 걸 고리가 없어 한 단계 위에서 가로챈다. 버튼을 누른 채 끄는
+  // 것(선택·드래그)은 건드리지 않는다. 멈춘 자리는 꼭 알려야 해서 마지막 것은 늦게라도 보낸다.
+  let lastMove = 0;
+  let pending = null;
+  let timer = 0;
+  container.addEventListener("mousemove", (ev) => {
+    if (ev.__deckPassed || ev.buttons || !reporting()) return;
+    const now = performance.now();
+    if (now - lastMove >= MOUSE_REPORT_GAP_MS) {
+      lastMove = now;
+      pending = null;
+      return;
+    }
+    ev.stopPropagation();
+    pending = ev;
+    if (!timer) {
+      timer = setTimeout(() => {
+        timer = 0;
+        const p = pending;
+        pending = null;
+        if (!p) return;
+        lastMove = performance.now();
+        const again = new MouseEvent("mousemove", p);
+        again.__deckPassed = true;
+        p.target.dispatchEvent(again);
+      }, MOUSE_REPORT_GAP_MS);
+    }
+  }, true);
+}
+
 function makeTerm(id, title, cwd) {
   const container = document.createElement("div");
   container.className = "term-container";
@@ -747,6 +794,7 @@ function makeTerm(id, title, cwd) {
     } catch { /* 애드온 없으면 기본 동작 유지 */ }
   }
   term.open(container);
+  throttleMouseReports(term, container);
   // 기본 DOM 렌더러는 스크롤·출력마다 행을 메인 스레드에서 다시 만든다. WebGL은
   // 글리프를 셀 단위로 GPU에서 그려서 그 비용이 사라진다.
   // GPU 프로세스가 죽었다 살아나면(드라이버 리셋 — 2026-09-07/08 두 번 실측) 모든 탭의
