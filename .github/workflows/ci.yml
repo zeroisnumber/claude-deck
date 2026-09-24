@@ -1,0 +1,66 @@
+name: CI
+
+# main에 올라가거나 PR이 열리면 돈다. 릴리스 워크플로도 이것을 먼저 불러,
+# 검사가 깨진 태그는 빌드까지 가지 않는다.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      # 러너의 파이프 출력은 cp1252라 한글을 찍다가 죽는다
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # 릴리스와 같은 캐시를 쓰지 않는다: 여기는 dev 프로필(테스트), 릴리스는 release 프로필
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ci-test
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      # 프런트가 최상위에서 던지면 창도 안 뜬다. node 기본 모듈만 쓰므로 npm ci가 필요 없다.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Frontend startup check
+        run: |
+          node tools/startup-check.js
+          $env:STARTUP_READY = 'loading'; node tools/startup-check.js
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ui-checks deps
+        run: python -m pip install --disable-pip-version-check websocket-client
+
+      # windows-latest 이미지에는 크롬이 깔려 있다. 자리가 바뀌면 여기서 분명하게 실패한다.
+      - name: Locate Chrome
+        run: |
+          $c = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+          if (-not (Test-Path $c)) { throw "Chrome not found at $c" }
+          "Chrome $((Get-Item $c).VersionInfo.ProductVersion)"
+          "CHROME=$c" >> $env:GITHUB_ENV
+
+      - name: UI checks (headless Chrome)
+        run: python tools/ui-checks.py

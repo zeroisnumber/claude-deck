@@ -1874,7 +1874,8 @@ $("#btn-check-update").onclick = async (e) => {
   btn.disabled = true;            // 연타로 두드리지 않게
   el.textContent = "확인 중…";
   try {
-    const found = await checkUpdate();
+    // 저장 전이라도 지금 켜 둔 채널로 본다 — 스위치를 켜고 바로 누르는 경우가 흔하다
+    const found = await checkUpdate($("#opt-beta").checked);
     el.textContent = found ? `v${found} 있음 — 창 위 버튼으로 설치` : "최신 버전입니다";
   } finally {
     btn.disabled = false;
@@ -1889,6 +1890,7 @@ $("#btn-settings").onclick = () => {
   $("#update-state").textContent = "";
   loadAgentVersions();
   $("#opt-webgl").checked = webglOn;
+  $("#opt-beta").checked = betaUpdates;
   $("#opt-statusline").checked = statusLineOn;
   $("#opt-restore-ask").checked = localStorage.getItem("restoreAsk") !== "0";
   $("#opt-keepalive").checked = !!keepAlive.enabled;
@@ -2011,6 +2013,10 @@ $("#lmodal-save").onclick = () => {
   webglOn = $("#opt-webgl").checked;
   localStorage.setItem("webgl", webglOn ? "1" : "0");
   if (webglOn !== webglWas) applyRenderer();
+  const betaWas = betaUpdates;
+  betaUpdates = $("#opt-beta").checked;
+  localStorage.setItem("betaUpdates", betaUpdates ? "1" : "0");
+  if (betaUpdates !== betaWas) checkUpdate(); // 새 채널로 바로 본다 (앞 채널 제안은 거기서 거둔다)
   localStorage.setItem("restoreAsk", $("#opt-restore-ask").checked ? "1" : "0");
   statusLineOn = $("#opt-statusline").checked;
   localStorage.setItem("statusLine", statusLineOn ? "1" : "0");
@@ -2297,34 +2303,50 @@ window.addEventListener("blur", () => setZoomWheel(false));
 // 확인 경로는 둘뿐이다: 시작 직후와 6시간 주기, 그리고 설정의 "업데이트 확인".
 // 세션 갱신(20초)에 얹지 않는다 — 사무실처럼 여러 대가 같은 IP를 쓰면 그 IP의 호출만
 // 쌓이고, 얻는 것은 "몇 시간 일찍 안다" 정도다.
-async function checkUpdate() {
-  // 이미 버튼이 떠 있으면 더 물어볼 게 없다
+// 채널: 끄면 정식판만(GitHub의 latest), 켜면 beta-channel 릴리스의 manifest —
+// 거기엔 베타와 정식판 가운데 더 새로운 쪽이 실린다. 주소 선택은 Rust가 한다
+// (JS updater.check()는 확인할 주소를 바꿀 수 없다).
+let betaUpdates = localStorage.getItem("betaUpdates") === "1";
+let offeredVersion = null; // 버튼에 띄운 판 — 버튼 글자에서 다시 읽지 않는다(베타 판에는 글자가 섞인다)
+let offeredBeta = false;   // 그 판을 어느 채널에서 찾았나
+async function checkUpdate(beta = betaUpdates) {
   const btn = $("#btn-update");
-  if (btn && !btn.classList.contains("hidden")) {
-    return btn.textContent.replace(/[^0-9.]/g, "") || "";
+  if (!btn.classList.contains("hidden")) {
+    // 이미 같은 채널의 버튼이 떠 있으면 더 물어볼 게 없다. 채널이 바뀌었으면 앞 제안을
+    // 거둔다 — 남겨 두면 베타를 꺼도 베타 설치 버튼이 남는다.
+    if (offeredBeta === beta) return offeredVersion || "";
+    if (btn.disabled) return null; // 받는 중이면 건드리지 않는다
+    resetUpdateOffer();
   }
   try {
-    const updater = window.__TAURI__ && window.__TAURI__.updater;
-    if (!updater) return;
-    const update = await updater.check();
-    if (!update) return null;
-    const btn = $("#btn-update");
-    btn.textContent = `⬆ v${update.version} 업데이트`;
+    const version = await invoke("check_update", { beta });
+    if (typeof version !== "string" || !version) return null;
+    offeredVersion = version;
+    offeredBeta = beta;
+    btn.textContent = `⬆ v${version} 업데이트`;
     btn.classList.remove("hidden");
     btn.onclick = async () => {
       btn.disabled = true;
       btn.textContent = "다운로드 중…";
       try {
-        await update.downloadAndInstall();
-        await window.__TAURI__.process.relaunch();
+        // 받고 설치한 뒤 Rust가 다시 띄운다 (Windows는 설치 프로그램이 앱을 끝낸다)
+        await invoke("install_update");
       } catch (e) {
         btn.textContent = "업데이트 실패";
+        btn.title = String(e);
         btn.disabled = false;
       }
     };
-    return update.version;
+    return version;
   } catch { /* 오프라인 등 — 조용히 무시 */ }
   return null;
+}
+function resetUpdateOffer() {
+  const btn = $("#btn-update");
+  btn.classList.add("hidden");
+  btn.disabled = false;
+  btn.onclick = null;
+  offeredVersion = null;
 }
 setTimeout(checkUpdate, 5000);
 setInterval(checkUpdate, 6 * 3600 * 1000); // 6시간마다

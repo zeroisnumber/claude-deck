@@ -11,11 +11,38 @@ import base64, json, os, shutil, subprocess, sys, tempfile, time, traceback, url
 
 import websocket
 
-CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+def find_chrome():
+    """CHROME 환경 변수가 있으면 그것, 없으면 흔히 깔리는 자리를 차례로 본다 (CI 러너 포함)."""
+    env = os.environ.get("CHROME")
+    if env:
+        if not os.path.isfile(env):
+            sys.exit(f"CHROME={env} 가 가리키는 파일이 없다")
+        return env
+    tail = os.path.join("Google", "Chrome", "Application", "chrome.exe")
+    candidates = [os.path.join(os.environ[v], tail)
+                  for v in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA") if os.environ.get(v)]
+    candidates.append(os.path.join(r"C:\Program Files", tail))
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    for name in ("chrome", "google-chrome", "chromium"):
+        found = shutil.which(name)
+        if found:
+            return found
+    sys.exit("크롬을 찾지 못했다. CHROME 환경 변수로 chrome.exe 경로를 알려 준다. 찾아본 곳:\n  " + "\n  ".join(candidates))
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PAGE = "file:///" + os.path.join(ROOT, "ui", "index.html").replace("\\", "/")
-# 여러 작업 트리에서 동시에 돌리면 같은 포트의 남의 크롬에 붙는다 — 그럴 땐 바꿔 준다.
-PORT = int(os.environ.get("UI_CHECKS_PORT", "9471"))
+def free_port():
+    # 고정 번호를 쓰면 동시에 돈 다른 검사의 크롬에 붙어 서로의 창을 끈다
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+PORT = int(os.environ.get("UI_CHECKS_PORT") or free_port())
 
 # 앱 명령을 흉내 낸다. 부른 것은 window.__calls에, PTY로 보낸 것은 window.__sent에 쌓인다.
 STUB = r"""
@@ -32,6 +59,7 @@ window.__TAURI__ = {
     if (c === 'write_pty') window.__sent.push(a.data);
     if (c === 'list_sessions') return Promise.resolve(__SESS);
     if (c === 'trace_enabled') return Promise.resolve(%(trace)s);
+    if (c === 'check_update') return Promise.resolve(window.__updateFor ? window.__updateFor(a.beta) : null);
     if (c === 'spawn_pty') return new Promise(r => setTimeout(() => r(++window.__gen), 20));
     if (c in __REPLIES) return Promise.resolve(__REPLIES[c]);
     return Promise.resolve(null);
@@ -804,14 +832,42 @@ def ctrl_wheel_changes_font_size(p):
     assert p.js("fontSize") == 22, f"상한 22를 넘었다: {p.js('fontSize')}"
 
 
+@check
+def beta_switch_picks_the_channel_and_drops_a_stale_offer(p):
+    """베타 스위치가 확인 채널을 바꾸고, 끄면 베타에서 찾은 설치 버튼을 거둔다"""
+    p.load()
+    p.js("window.__updateFor = (beta) => beta ? '0.9.0-beta.1' : null; 'ok'")
+    p.js("document.querySelector('#btn-settings').click(); document.querySelector('#opt-beta').checked = true; "
+         "document.querySelector('#lmodal-save').click()")
+    time.sleep(0.3)
+    assert p.js("localStorage.getItem('betaUpdates')") == "1", "켠 것이 저장되지 않았다"
+    assert p.js("window.__calls.filter(c => c[0] === 'check_update').map(c => c[1].beta)")[-1:] == [True], \
+        p.js("window.__calls.filter(c => c[0] === 'check_update')")
+    btn = "(() => { const b = document.querySelector('#btn-update'); return b.classList.contains('hidden') ? null : b.textContent })()"
+    assert "0.9.0-beta.1" in (p.js(btn) or ""), f"버튼 {p.js(btn)!r}"
+    p.js("document.querySelector('#btn-settings').click(); document.querySelector('#opt-beta').checked = false; "
+         "document.querySelector('#lmodal-save').click()")
+    time.sleep(0.3)
+    assert p.js(btn) is None, f"베타를 껐는데 버튼이 남았다: {p.js(btn)!r}"
+    assert p.js("window.__calls.filter(c => c[0] === 'check_update').map(c => c[1].beta)")[-1:] == [False]
+
+
 # ---------------------------------------------------------------- 실행
 
 def main():
+    # CI처럼 출력이 파이프면 cp1252로 열려 한글을 찍다가 죽는다
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     want = sys.argv[1:]
     chosen = [c for c in CHECKS if not want or any(w in c.__name__ for w in want)]
+    chrome_exe = find_chrome()
+    print(f"크롬: {chrome_exe}")
     profile = tempfile.mkdtemp(prefix="deck-ui-checks-")
     chrome = subprocess.Popen([
-        CHROME, "--headless=new", f"--remote-debugging-port={PORT}", f"--user-data-dir={profile}",
+        chrome_exe, "--headless=new", f"--remote-debugging-port={PORT}", f"--user-data-dir={profile}",
         "--window-size=1280,800", "--hide-scrollbars", "--force-device-scale-factor=1",
         "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
         "--allow-file-access-from-files", "--remote-allow-origins=*", "about:blank",
@@ -826,6 +882,8 @@ def main():
                 break
             except Exception:
                 time.sleep(0.3)
+        if target is None:
+            raise RuntimeError(f"크롬 디버깅 포트({PORT})에 붙지 못했다")
         ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=60)
         p = Page(ws)
         p.cdp("Page.enable")

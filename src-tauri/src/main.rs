@@ -25,6 +25,7 @@ mod statusline;
 mod activity;
 mod pty;
 mod sessions;
+mod update;
 mod usage;
 use diag::*;
 use statusline::*;
@@ -149,6 +150,7 @@ fn main() {
                 .build(),
         )
         .manage(PtyState::default())
+        .manage(update::PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             pty::spawn_pty,
             pty::write_pty,
@@ -176,6 +178,8 @@ fn main() {
             open_log_file,
             open_path,
             rebind_ime,
+            update::check_update,
+            update::install_update,
         ])
         .setup(|app| {
             use tauri::menu::{Menu, MenuItem};

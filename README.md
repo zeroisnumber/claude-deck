@@ -42,7 +42,7 @@ UI(`ui/`)는 빌드 시 바이너리에 임베드되므로, 프런트 수정 후
 | `ui/vendor/` | xterm.js와 애드온. 수동 패치는 `ui/vendor/PATCHES.md` 참고 |
 | `tools/startup-check.js` | `main.js`를 최상위까지 실행해 시작 시 던지는지 검사 (`node tools/startup-check.js`) |
 
-러스트 모듈은 `use super::*`로 크레이트 루트를 공유하므로, 모듈 간에 쓰는 항목은 `pub(crate)`로 둔다. 검증은 `cd src-tauri && cargo test`와 `node tools/startup-check.js`.
+러스트 모듈은 `use super::*`로 크레이트 루트를 공유하므로, 모듈 간에 쓰는 항목은 `pub(crate)`로 둔다. 검증은 `cd src-tauri && cargo test`, `node tools/startup-check.js`, `python tools/ui-checks.py`(크롬 + `pip install websocket-client`; 크롬이 흔한 자리에 없으면 `CHROME` 환경 변수로 경로를 준다).
 
 ## 릴리스
 
@@ -53,5 +53,17 @@ git push origin v0.3.0
 ```
 
 태그를 푸시하면 GitHub Actions(tauri-action)가 빌드·서명·Release 업로드·`latest.json` 생성까지 수행하고, 설치된 앱이 다음 실행 시 업데이트 버튼을 표시한다.
+
+빌드 전에 `.github/workflows/ci.yml`(러스트 테스트, 시작 검사, `python tools/ui-checks.py`)이 먼저 돌고, 하나라도 깨지면 릴리스하지 않는다. 같은 검사가 main 푸시와 PR마다 돈다. 태그의 판이 `tauri.conf.json`·`Cargo.toml`과 다르면 릴리스 잡이 멈춘다.
+
+### 베타 채널
+
+```powershell
+# 판을 0.5.22-beta.1로 올린 뒤 (Cargo.toml, tauri.conf.json)
+git tag v0.5.22-beta.1
+git push origin v0.5.22-beta.1
+```
+
+판에 `-`가 있으면 프리릴리스로 올라간다. 안정 채널 주소(`releases/latest/download/latest.json`)는 프리릴리스를 건너뛰므로 일반 사용자에게는 가지 않는다. 워크플로가 그 `latest.json`을 늘 같은 자리인 `beta-channel` 릴리스(프리릴리스, 처음 한 번 자동 생성)에 덮어쓰고, 설정의 **베타 업데이트 받기**를 켠 앱만 그 주소를 본다(`src-tauri/src/update.rs`). 정식판도 그 자리에 실리므로(실린 판 이상일 때만) 베타 사용자는 정식판도 받는다. 베타를 꺼도 이미 설치한 베타보다 낮은 판으로 되돌리지는 않는다. `beta-channel` 릴리스와 태그는 지우지 않는다.
 
 업데이트 서명 개인키는 `%USERPROFILE%\.tauri\claude-deck.key` (저장소에 없음). GitHub Secrets의 `TAURI_SIGNING_PRIVATE_KEY`에 등록되어 있어야 한다.

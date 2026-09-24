@@ -1,17 +1,45 @@
 name: Release
 
+# v0.5.22        → 정식 릴리스. 안정 채널(releases/latest/download/latest.json)이 받는다.
+# v0.5.22-beta.1 → 프리릴리스. GitHub의 "latest"는 프리릴리스를 건너뛰므로 안정 사용자에게는
+#                  가지 않고, beta-channel 릴리스의 latest.json을 보는 베타 사용자만 받는다.
+# 태그의 판과 tauri.conf.json·Cargo.toml의 판이 다르면 빌드하지 않는다 — latest.json에
+# 적히는 판은 태그가 아니라 tauri.conf.json에서 오기 때문이다.
 on:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
+  # CI와 같은 검사(러스트 테스트, 시작 검사, 헤드리스 UI 검사). 깨지면 릴리스하지 않는다.
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: checks
     runs-on: windows-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check tag matches app version
+        id: ver
+        run: |
+          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "tag=$tag tauri.conf.json=$conf Cargo.toml=$cargo"
+          if ($tag -ne $conf -or $tag -ne $cargo) {
+            throw "Tag v$tag does not match tauri.conf.json ($conf) / Cargo.toml ($cargo). Bump both before tagging."
+          }
+          # 판에 '-'가 있으면(0.5.22-beta.1) 프리릴리스
+          $pre = if ($tag.Contains('-')) { 'true' } else { 'false' }
+          "prerelease=$pre" >> $env:GITHUB_OUTPUT
+          "version=$tag" >> $env:GITHUB_OUTPUT
 
       - uses: actions/setup-node@v4
         with:
@@ -26,13 +54,6 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      # 프런트가 최상위에서 던지면 창도 안 뜨고 세션 목록도 안 그려진다.
-      # 빌드는 통과하므로 여기서 막지 않으면 그대로 릴리스된다.
-      - name: Frontend startup check
-        run: |
-          node tools/startup-check.js
-          $env:STARTUP_READY = 'loading'; node tools/startup-check.js
-
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -42,6 +63,43 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "CLI Deck ${{ github.ref_name }}"
-          releaseBody: "See the assets to download this version and install."
+          releaseBody: ${{ steps.ver.outputs.prerelease == 'true' && 'Beta build — installed only by users who turned on 베타 업데이트 받기. See the assets to download this version and install.' || 'See the assets to download this version and install.' }}
           releaseDraft: false
-          prerelease: false
+          prerelease: ${{ steps.ver.outputs.prerelease == 'true' }}
+
+      # 베타 채널 manifest: 늘 같은 주소(releases/download/beta-channel/latest.json)에 둔다.
+      # 베타는 언제나 덮어쓰고, 정식판은 지금 실린 판 이상일 때만 덮어쓴다 — 그래야 베타
+      # 사용자도 정식판을 받고, 더 새 베타가 나와 있는데 옛 정식판으로 덮이지 않는다.
+      # (프리릴리스끼리는 비교하지 않는다: [semver]는 beta.10 < beta.9로 본다.)
+      - name: Publish beta channel manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $channel = 'beta-channel'
+          $pre = '${{ steps.ver.outputs.prerelease }}' -eq 'true'
+          New-Item -ItemType Directory -Force new, cur | Out-Null
+          gh release download "${{ github.ref_name }}" -p latest.json -D new --clobber
+          if ($LASTEXITCODE -ne 0) { throw "latest.json missing from ${{ github.ref_name }}" }
+          $newVer = (Get-Content new/latest.json -Raw | ConvertFrom-Json).version
+          if ($newVer -ne '${{ steps.ver.outputs.version }}') { throw "latest.json says $newVer, tag says ${{ steps.ver.outputs.version }}" }
+
+          gh release view $channel *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $channel --prerelease --latest=false --target "${{ github.sha }}" `
+              --title "Beta update channel" `
+              --notes "Updater manifest for users with 베타 업데이트 받기 on. Rewritten by the release workflow; do not delete or download from here."
+            if ($LASTEXITCODE -ne 0) { throw "could not create $channel release" }
+          } elseif (-not $pre) {
+            gh release download $channel -p latest.json -D cur --clobber 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              $curVer = (Get-Content cur/latest.json -Raw | ConvertFrom-Json).version
+              if ([semver]$newVer -lt [semver]$curVer) {
+                "Beta channel already carries $curVer (newer than $newVer); leaving it."
+                exit 0
+              }
+            }
+          }
+          gh release upload $channel new/latest.json --clobber
+          if ($LASTEXITCODE -ne 0) { throw "upload to $channel failed" }
+          "Beta channel now offers $newVer"
