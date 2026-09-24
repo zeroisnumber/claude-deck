@@ -627,6 +627,9 @@ html, body {
 }
 .term-container.visible { display: block; }
 .term-container .xterm { height: 100%; padding: 8px 4px 6px 10px; }
+/* 여백이 .xterm 안으로 들어오면서 그 자리에 스크롤 영역의 기본 배경(xterm.css의 #000)이
+   드러나 위·왼쪽에 검은 띠가 생겼다. 터미널 테마 배경(--bg)과 같게 둔다. */
+.term-container .xterm .xterm-viewport { background-color: var(--bg); }
 
 /* 세션이 다른 프로세스로 넘어갔을 때 그 탭 위에 띄우는 띠.
    터미널 위에 겹쳐 둔다 — 화면은 이미 주인을 잃어 더 그려지지 않는다. */
