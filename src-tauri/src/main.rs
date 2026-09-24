@@ -93,6 +93,28 @@ fn delete_session(file: String) -> Result<(), String> {
     Ok(())
 }
 
+/// WebView2가 한글 입력기와의 연결을 놓치면 조합창이 창 왼쪽 위에 뜨고 글자가 하나씩
+/// 따로 확정된다(가끔 두 번 들어간다). 다른 창에 갔다 오면 풀리는데, 그게 하는 일이
+/// 이것이다 — 포커스를 WebView 안에서 한 번 옮겼다 되돌려 입력기를 다시 붙인다.
+fn rebind_webview_focus(w: &tauri::WebviewWindow) {
+    let _ = w.with_webview(|webview| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+        };
+        let controller = webview.controller();
+        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT);
+        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    });
+}
+
+/// 화면이 "입력기가 떨어졌다"고 판단했을 때 부른다 (조합 없이 한글이 들어옴).
+/// with_webview는 메인 스레드로 넘겨 실행하므로 여기서는 작업 스레드에서 부른다.
+#[tauri::command(async)]
+fn rebind_ime(window: tauri::WebviewWindow) {
+    trace_always("app", "", "ime", "rebind");
+    rebind_webview_focus(&window);
+}
+
 fn main() {
     // 상태줄 명령으로 불린 경우 GUI를 띄우지 않고 stdin만 처리한다
     if std::env::args().any(|a| a == STATUSLINE_FLAG) {
@@ -143,6 +165,7 @@ fn main() {
             usage::codex_state,
             open_log_file,
             open_path,
+            rebind_ime,
         ])
         .setup(|app| {
             use tauri::menu::{Menu, MenuItem};
@@ -191,15 +214,7 @@ fn main() {
                 let w2 = w.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(700));
-                    let _ = w2.with_webview(|webview| unsafe {
-                        use webview2_com::Microsoft::Web::WebView2::Win32::{
-                            COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT,
-                            COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
-                        };
-                        let controller = webview.controller();
-                        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT);
-                        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
-                    });
+                    rebind_webview_focus(&w2);
                 });
 
                 // 안전망: 창 표시를 프런트에만 맡기면 JS가 거기까지 못 가는 순간

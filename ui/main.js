@@ -737,6 +737,19 @@ function scheduleWebglRebuild(why) {
   }, 100);
 }
 
+// 한글 음절·자모. 붙여넣기는 xterm이 onData로 한 번에 넘기지만 괄호 붙여넣기 모드면
+// ESC[200~로 시작해서, 조합 없이 온 "한 글자"와 구별된다(아래는 짧은 입력만 본다).
+const HANGUL = /^[ᄀ-ᇿ㄰-㆏가-힣]{1,2}$/;
+let imeRebindAt = 0;
+function rebindIme(term) {
+  const now = performance.now();
+  if (now - imeRebindAt < 3000) return; // 연달아 치는 동안 한 번이면 된다
+  imeRebindAt = now;
+  invoke("rebind_ime")
+    .then(() => setTimeout(() => { try { term.focus(); } catch { /* 닫힌 탭 */ } }, 50))
+    .catch(() => {});
+}
+
 // 풀스크린 클로드는 "마우스가 움직일 때마다 알려 달라"(DEC 1003)를 켠다. 그러면 터미널
 // 위에서 마우스를 스치기만 해도 칸이 바뀔 때마다 신호가 하나씩 가고, 휠은 한 번 굴리는
 // 데 6~20ms 간격으로 여러 개가 간다. 실측: 보낸 입력의 88%가 마우스 신호였고, 한글 24자가
@@ -869,9 +882,25 @@ function makeTerm(id, title, cwd) {
     if (!traceOn) return;
     uiTrace(`ime:${kind}`, `${Math.round(performance.now())}|${id}|${data}`);
   };
+  let lastOrphan = { at: 0, data: "" };
   term.onData((d) => {
-    if (traceOn && performance.now() - lastComposing < 500) {
+    const now = performance.now();
+    if (traceOn && now - lastComposing < 500) {
       imeTrace("data", JSON.stringify(d));
+    }
+    // 정상이면 한글은 반드시 조합(composition)을 거쳐 들어온다. 조합 없이 완성된 한글이
+    // 오면 WebView2가 입력기를 놓친 것이다 — 조합창이 창 왼쪽 위에 뜨고 글자가 하나씩
+    // 따로 확정되며, 가끔 같은 글자가 두 번 온다. 다른 창에 갔다 오면 풀리는 상태라
+    // 앱이 그 재연결을 대신 한다. 그 사이 같은 글자가 거의 동시에 또 오면 버린다
+    // (사람이 같은 글자를 50ms 안에 두 번 칠 수는 없다).
+    if (HANGUL.test(d) && now - lastComposing > 1000) {
+      if (d === lastOrphan.data && now - lastOrphan.at < 50) {
+        uiTrace("ime:orphan-dup", `${Math.round(now)}|${id}|${JSON.stringify(d)}`);
+        return;
+      }
+      lastOrphan = { at: now, data: d };
+      uiTrace("ime:orphan", `${Math.round(now)}|${id}|${JSON.stringify(d)}`);
+      rebindIme(term);
     }
     invoke("write_pty", { id, data: d });
   });
