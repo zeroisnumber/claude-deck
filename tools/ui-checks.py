@@ -57,12 +57,16 @@ window.__TAURI__ = {
   core: { invoke: (c, a) => {
     window.__calls.push([c, a]);
     if (c === 'write_pty') window.__sent.push(a.data);
+    // 검사가 정한 답이 늘 먼저다 — 아래 기본값이 가로채지 않게
+    if (c in __REPLIES) return Promise.resolve(__REPLIES[c]);
     if (c === 'list_sessions') return Promise.resolve(__SESS);
     if (c === 'trace_enabled') return Promise.resolve(%(trace)s);
     if (c === 'agent_versions') return Promise.resolve([]);
-    if (c === 'check_update') return Promise.resolve(window.__updateFor ? window.__updateFor(a.beta) : null);
+    if (c === 'check_update') {
+      if (window.__updateFails) return Promise.reject('updater error');
+      return Promise.resolve(window.__updateFor ? window.__updateFor(a.beta) : null);
+    }
     if (c === 'spawn_pty') return new Promise(r => setTimeout(() => r(++window.__gen), 20));
-    if (c in __REPLIES) return Promise.resolve(__REPLIES[c]);
     return Promise.resolve(null);
   } },
   event: { listen: (name, fn) => { window.__handlers[name] = fn; return Promise.resolve(() => {}); } },
@@ -851,6 +855,21 @@ def beta_switch_picks_the_channel_and_drops_a_stale_offer(p):
     time.sleep(0.3)
     assert p.js(btn) is None, f"베타를 껐는데 버튼이 남았다: {p.js(btn)!r}"
     assert p.js("window.__calls.filter(c => c[0] === 'check_update').map(c => c[1].beta)")[-1:] == [False]
+
+
+@check
+def update_check_falls_back_to_the_old_path(p):
+    """새 Rust 확인 경로가 실패해도 정식 채널은 예전 JS 경로로 찾아 업데이트가 끊기지 않는다"""
+    p.load()
+    p.js("window.__updateFails = true; window.__TAURI__.updater = { check: () => Promise.resolve({ version: '9.9.9', "
+         "downloadAndInstall: () => Promise.resolve() }) }; 'ok'")
+    found = p.js("checkUpdate(false)")
+    assert found == "9.9.9", f"예전 경로로 못 찾았다: {found!r}"
+    btn = p.js("(() => { const b = document.querySelector('#btn-update'); return b.classList.contains('hidden') ? null : b.textContent })()")
+    assert btn and "9.9.9" in btn, f"버튼 {btn!r}"
+    # 베타 채널은 예전 경로로 볼 수 없다 — 대신 정식판을 내밀면 안 된다
+    p.js("resetUpdateOffer()")
+    assert p.js("checkUpdate(true)") is None, "베타 확인 실패에 정식 경로 결과를 내밀었다"
 
 
 # ---------------------------------------------------------------- 실행

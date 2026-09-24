@@ -1731,7 +1731,10 @@ function onDprMaybeChanged() {
   });
 }
 (function watchDpr() {
-  // 쿼리는 현재 배율에만 맞으므로 바뀔 때마다 새로 건다.
+  // 쿼리는 현재 배율에만 맞으므로 바뀔 때마다 새로 건다. matchMedia가 없는 런타임
+  // (기동 검사의 node 등)에서는 창 크기 변경(resize)만으로 둔다 — 여기서 던지면
+  // main.js 전체가 멈춘다.
+  if (typeof matchMedia !== "function") return;
   matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
     "change", () => { onDprMaybeChanged(); watchDpr(); }, { once: true });
 })();
@@ -2319,7 +2322,16 @@ async function checkUpdate(beta = betaUpdates) {
     resetUpdateOffer();
   }
   try {
-    const version = await invoke("check_update", { beta });
+    let version;
+    try {
+      version = await invoke("check_update", { beta });
+    } catch (e) {
+      // 확인 경로를 Rust로 옮긴 지 얼마 안 됐다. 거기서 실패하면 정식 채널만큼은 예전
+      // JS 경로로 한 번 더 본다 — 새 경로가 잘못돼도 업데이트가 끊기지 않게.
+      uiTrace("update-check-failed", String(e));
+      if (!beta) return await legacyCheckUpdate(btn);
+      throw e;
+    }
     if (typeof version !== "string" || !version) return null;
     offeredVersion = version;
     offeredBeta = beta;
@@ -2341,6 +2353,31 @@ async function checkUpdate(beta = betaUpdates) {
   } catch { /* 오프라인 등 — 조용히 무시 */ }
   return null;
 }
+// 예전 확인 경로(JS 업데이트 플러그인). 정식 채널만 볼 수 있다 — 안전망으로만 쓴다.
+async function legacyCheckUpdate(btn) {
+  const updater = window.__TAURI__ && window.__TAURI__.updater;
+  if (!updater) return null;
+  const update = await updater.check();
+  if (!update) return null;
+  offeredVersion = update.version;
+  offeredBeta = false;
+  btn.textContent = `⬆ v${update.version} 업데이트`;
+  btn.classList.remove("hidden");
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = "다운로드 중…";
+    try {
+      await update.downloadAndInstall();
+      await window.__TAURI__.process.relaunch();
+    } catch (e) {
+      btn.textContent = "업데이트 실패";
+      btn.title = String(e);
+      btn.disabled = false;
+    }
+  };
+  return update.version;
+}
+
 function resetUpdateOffer() {
   const btn = $("#btn-update");
   btn.classList.add("hidden");
