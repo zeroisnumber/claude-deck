@@ -47,16 +47,44 @@ pub(crate) fn is_newer(latest: &str, installed: &str) -> bool {
 /// cmd.exe로 돌리고 끝나기를 기다린다. 출력은 따로 읽는다 — 안 읽으면 출력이 파이프
 /// 버퍼(약 4KB)를 넘을 때 자식이 쓰다 멈춰 영영 안 끝난다(npm은 출력이 많다).
 fn run(args: &[&str], secs: u64) -> Option<(bool, String, String)> {
-    use std::io::Read as _;
-    let mut child = std::process::Command::new("cmd.exe")
-        .arg("/c")
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::null())
+    run_in(args, secs, None, None, false)
+}
+
+/// run과 같되, 작업 폴더와 표준 입력을 줄 수 있다. direct면 cmd.exe를 거치지 않고 첫
+/// 인자를 바로 띄운다 — 따옴표·중괄호가 든 인자를 cmd.exe가 다시 풀어 헤치지 않게.
+fn run_in(
+    args: &[&str],
+    secs: u64,
+    cwd: Option<&std::path::Path>,
+    input: Option<String>,
+    direct: bool,
+) -> Option<(bool, String, String)> {
+    use std::io::{Read as _, Write as _};
+    let mut cmd = if direct {
+        let mut c = std::process::Command::new(args[0]);
+        c.args(&args[1..]);
+        c
+    } else {
+        let mut c = std::process::Command::new("cmd.exe");
+        c.arg("/c").args(args);
+        c
+    };
+    cmd.creation_flags(CREATE_NO_WINDOW)
+        .stdin(if input.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
+        .stderr(std::process::Stdio::piped());
+    if let Some(d) = cwd {
+        cmd.current_dir(d);
+    }
+    let mut child = cmd.spawn().ok()?;
+    if let Some(text) = input {
+        // 쓰는 동안 자식이 출력을 못 비우면 서로 기다리므로 따로 쓴다
+        if let Some(mut si) = child.stdin.take() {
+            std::thread::spawn(move || {
+                let _ = si.write_all(text.as_bytes());
+            });
+        }
+    }
     let read = |mut r: Box<dyn std::io::Read + Send>| {
         std::thread::spawn(move || {
             let mut b = Vec::new();
@@ -289,6 +317,58 @@ pub(crate) fn agent_changelog(name: String, from: String, to: String) -> Result<
     .map_err(|_| "변경 내용을 읽다 멈췄습니다".to_string())?
 }
 
+/// 변경 내역 한 판을 한국어로. 이미 쓰고 있는 클로드(Haiku)에게 맡긴다 — 따로 키나 외부
+/// 번역 서비스가 필요 없고 기술 문서 품질이 좋다. 한 번 번역한 판은 저장해 두고 다시 쓴다.
+/// - --no-session-persistence: 번역마다 사이드바에 세션이 생기지 않게
+/// - MCP를 띄우지 않는다: 띄우면 두 줄 번역에 14초, 안 띄우면 7초(실측)
+/// - 앱 전용 폴더에서 돈다: 클로드가 작업 폴더마다 프로젝트 폴더를 만들므로 한 곳으로 모은다
+/// 긴 판(수만 자)은 1분 넘게 걸릴 수 있어 3분까지 기다린다.
+#[tauri::command(async)]
+pub(crate) fn translate_changelog(name: String, version: String, text: String) -> Result<String, String> {
+    let base = dirs::data_local_dir().ok_or("앱 폴더를 찾을 수 없습니다")?.join("com.user.cli-deck").join("translate");
+    let cache = base.join("cache");
+    fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    let safe: String = format!("{name}-{version}")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect();
+    let file = cache.join(format!("{safe}.ko.md"));
+    if let Ok(t) = fs::read_to_string(&file) {
+        if !t.trim().is_empty() {
+            return Ok(t);
+        }
+    }
+    let prompt = "Translate this software changelog into natural Korean for a developer. \
+                  Keep the markdown structure, code spans, command-line flags, file names, setting keys \
+                  and product names exactly as they are. Output only the translation.";
+    // 빈 MCP 설정은 파일로 넘긴다 — 명령줄에 JSON을 쓰면 따옴표 처리가 꼬일 수 있다
+    let mcp = base.join("no-mcp.json");
+    if !mcp.exists() {
+        fs::write(&mcp, "{\"mcpServers\":{}}").map_err(|e| e.to_string())?;
+    }
+    let mcp = mcp.to_string_lossy().to_string();
+    let args = ["claude", "-p", prompt, "--no-session-persistence", "--model", "haiku",
+                "--strict-mcp-config", "--mcp-config", mcp.as_str()];
+    // 네이티브 설치(claude.exe)는 바로 띄우고, npm 설치(claude.cmd)면 cmd.exe로 넘어간다
+    // 바로 못 띄웠을 때(곧바로 실패)만 cmd.exe로 다시 — 시간이 다 돼 끊긴 걸 한 번 더 기다리지 않는다
+    let t0 = std::time::Instant::now();
+    let first = run_in(&args, 180, Some(&base), Some(text.clone()), true);
+    let (ok, out, err) = match first {
+        Some(r) => r,
+        None if t0.elapsed() < std::time::Duration::from_secs(2) => {
+            run_in(&args, 180, Some(&base), Some(text), false).ok_or("3분 안에 번역이 끝나지 않았습니다")?
+        }
+        None => return Err("3분 안에 번역이 끝나지 않았습니다".into()),
+    };
+    let out = out.trim().to_string();
+    if !ok || out.is_empty() {
+        let e = err.trim();
+        return Err(if e.is_empty() { "클로드가 번역을 돌려주지 않았습니다".into() } else { e.lines().last().unwrap_or(e).to_string() });
+    }
+    let _ = fs::write(&file, &out);
+    Ok(out)
+}
+
 /// 에이전트 CLI를 올린다. 클로드는 자체 명령(`claude update`), codex·gemini는 npm 전역
 /// 설치일 때만(agent_versions가 can_update로 알려 준다) `npm i -g <패키지>@latest`.
 /// 돌고 있는 세션은 그대로 두고 새로 여는 세션부터 새 판을 쓴다. 받는 데 시간이 걸려 5분까지 기다린다.
@@ -339,6 +419,20 @@ mod tests {
                 }
                 Err(e) => eprintln!("{name}: 실패 {e}"),
             }
+        }
+    }
+
+    /// 실제로 번역해 본다(클로드 Haiku, 구독 사용량이 조금 든다). 두 번째는 저장본이라 즉시.
+    /// `cargo test -- --ignored real_translate --nocapture`
+    #[test]
+    #[ignore]
+    fn real_translate() {
+        let text = "- Added `\"attribution\": false` in `settings.json` to hide commit attribution
+- Fixed a crash when resuming a session".to_string();
+        for round in 0..2 {
+            let t = std::time::Instant::now();
+            let r = translate_changelog("Test".into(), format!("0.0.{}", std::process::id()), text.clone());
+            eprintln!("{round}: {:.1}s {:?}", t.elapsed().as_secs_f64(), r);
         }
     }
 

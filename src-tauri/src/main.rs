@@ -162,6 +162,7 @@ fn main() {
             agents::agent_versions,
             agents::update_agent,
             agents::agent_changelog,
+            agents::translate_changelog,
             sessions::list_sessions,
             delete_session,
             sessions::session_preview,

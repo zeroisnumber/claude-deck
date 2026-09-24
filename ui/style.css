@@ -1430,3 +1430,4 @@ kbd {
 .agent-changes-body { margin: 4px 0 0 12px; line-height: 1.55; }
 .agent-changes-body ul { padding-left: 16px; }
 .agent-row { flex-wrap: wrap; }
+.agent-changes .agent-translate { margin: 4px 0 0 12px; padding: 2px 9px; font-size: 11px; }

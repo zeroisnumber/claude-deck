@@ -1909,6 +1909,42 @@ $("#btn-settings").onclick = () => {
 };
 // 새 판에 뭐가 바뀌었는지 — 설치판 다음부터 최신판까지를 버전별로 접어 보인다(최신만
 // 펼침). 한 판이 수만 자인 경우도 있어 칸 안에서 스크롤한다. 누를 때만 받아 온다.
+// 변경 내역 한 판을 한국어로 — 클로드(Haiku)가 번역하고, 한 번 한 것은 저장해 둔다(Rust).
+// 펼쳐 본 판만 번역한다: 긴 판은 수만 자라 1분 가까이 걸린다. "원문"으로 되돌린다.
+function translateButton(agentName, c, body) {
+  const b = document.createElement("button");
+  b.className = "btn-ghost btn-sm agent-translate";
+  b.textContent = "번역";
+  let original = null;
+  let translated = null;
+  b.onclick = async () => {
+    if (original !== null) { // 지금 번역을 보고 있다 → 원문으로
+      body.innerHTML = original;
+      original = null;
+      b.textContent = "번역";
+      return;
+    }
+    if (translated === null) {
+      b.disabled = true;
+      b.textContent = (c.notes || "").length > 8000 ? "번역 중… (길어서 1분쯤)" : "번역 중…";
+      try {
+        translated = await invoke("translate_changelog", { name: agentName, version: c.version, text: c.notes || "" });
+      } catch (e) {
+        b.disabled = false;
+        b.textContent = "번역";
+        showToast("⚠ 번역하지 못했습니다", String(e));
+        return;
+      }
+      b.disabled = false;
+    }
+    original = body.innerHTML;
+    body.innerHTML = mdToHtml(translated); // 번역도 마크다운 — 먼저 이스케이프한다
+    b.textContent = "원문";
+  };
+  if (!(c.notes || "").trim()) b.hidden = true;
+  return b;
+}
+
 // recent=true면 최신판을 쓰고 있을 때 — 새로 받을 건 없지만 지금 판까지 무엇이
 // 바뀌었는지는 볼 수 있어야 한다. 설치판까지의 최근 판들(백엔드가 15개, 여기서 5개)을 보인다.
 function changelogButton(a, box, row, recent = false) {
@@ -1944,7 +1980,7 @@ function changelogButton(a, box, row, recent = false) {
       const body = document.createElement("div");
       body.className = "agent-changes-body";
       body.innerHTML = mdToHtml(c.notes || "(설명 없음)"); // mdToHtml이 먼저 이스케이프한다
-      d.append(sum, body);
+      d.append(sum, translateButton(a.name, c, body), body);
       panel.appendChild(d);
     });
   };

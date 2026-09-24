@@ -1062,6 +1062,32 @@ def csp_blocks_injected_script(p):
     assert rows == 1, f"사이드바 줄 {rows}"
 
 
+@check
+def changelog_translates_on_demand_and_toggles_back(p):
+    """변경 내역 번역: 누른 판만 번역을 부르고, 번역도 이스케이프해 그리며, 원문으로 되돌린다"""
+    agents = [{"name": "Codex", "installed": "0.9.0", "latest": "1.0.0", "update_available": True,
+               "can_update": True, "channel": "latest", "update_cmd": ""}]
+    notes = [{"version": "1.0.0", "notes": "- **New** thing"}, {"version": "0.9.5", "notes": "- old"}]
+    p.load(replies={"agent_versions": agents, "agent_changelog": notes,
+                    "translate_changelog": "- **새** 기능 <img src=x onerror=window.__pwned=1>"})
+    p.js("document.querySelector('#btn-settings').click()")
+    time.sleep(0.3)
+    p.js("[...document.querySelectorAll('#agent-versions button')].find(b => b.textContent === '변경 내용').click()")
+    time.sleep(0.3)
+    p.js("document.querySelector('.agent-changes details .agent-translate').click()")
+    time.sleep(0.3)
+    calls = p.js("window.__calls.filter(c => c[0] === 'translate_changelog').map(c => c[1])")
+    assert calls == [{"name": "Codex", "version": "1.0.0", "text": "- **New** thing"}], calls
+    body = "document.querySelector('.agent-changes details .agent-changes-body')"
+    assert "새" in p.js(f"{body}.textContent"), p.js(f"{body}.textContent")
+    assert not p.js(f"!!{body}.querySelector('img')"), "번역 속 태그가 그대로 들어갔다"
+    p.js("document.querySelector('.agent-changes details .agent-translate').click()")
+    assert "New" in p.js(f"{body}.textContent"), "원문으로 안 돌아갔다"
+    p.js("document.querySelector('.agent-changes details .agent-translate').click()")
+    time.sleep(0.2)
+    assert len(p.js("window.__calls.filter(c => c[0] === 'translate_changelog')")) == 1, "다시 볼 때 또 번역을 불렀다"
+
+
 # ---------------------------------------------------------------- 실행
 
 def main():
