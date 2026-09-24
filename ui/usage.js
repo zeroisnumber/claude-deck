@@ -300,6 +300,7 @@ function renderTurns(s) {
 // 막대만 두면 전체가 어디까지 갔는지 모르고, 누적선만 두면 어느 구간이 비쌌는지
 // 기울기로 읽어야 해서 눈에 안 들어온다. 막대 높이는 제곱근 축이다 — 상한을 두면
 // 비싼 턴들이 전부 같은 높이로 뭉개지고, 선형이면 작은 턴이 전부 바닥에 깔린다.
+const TURN_BARS = 400;
 function renderCurve(cost, total, misses) {
   const n = cost.length;
   const denom = total || 1;
@@ -314,14 +315,30 @@ function renderCurve(cost, total, misses) {
   const y = (i) => 100 - (acc[i] / denom) * 100;
   const bw = n > 1 ? 100 / n : 100;
   const missSet = new Set(misses);
-  const bars = cost
-    .map((c, i) => {
-      const h = Math.max(0.8, Math.sqrt(c / peak) * 100);
-      return `<rect class="tc-b${missSet.has(i) ? " miss" : ""}" x="${(i * bw).toFixed(3)}" ` +
-        `y="${(100 - h).toFixed(3)}" width="${Math.max(bw * 0.9, 0.12).toFixed(3)}" height="${h.toFixed(3)}" />`;
-    })
-    .join("");
-  const pts = cost.map((_, i) => `${x(i).toFixed(3)},${y(i).toFixed(3)}`).join(" ");
+  // 턴이 수천 개면 막대 하나가 화면에서 1px도 안 된다. 그래도 전부 그리면 7857개 막대의
+  // 배치에만 0.1~0.15초가 들었다. 화면 폭에 맞춰 최대 TURN_BARS개로 묶는다 — 묶인 칸은
+  // 그 안에서 가장 비싼 턴의 높이를 써서 튀는 지점이 묻히지 않게 하고, 캐시가 끊긴 턴이
+  // 하나라도 있으면 빨갛게 둔다. 마우스·클릭은 여전히 턴 하나 단위로 짚는다.
+  const per = Math.max(1, Math.ceil(n / TURN_BARS));
+  const groups = Math.ceil(n / per);
+  const gw = 100 / Math.max(groups, 1);
+  let bars = "";
+  let pts = "";
+  for (let g = 0; g < groups; g++) {
+    const lo = g * per;
+    const hi = Math.min(n, lo + per);
+    let top = 0;
+    let miss = false;
+    for (let i = lo; i < hi; i++) {
+      if (cost[i] > top) top = cost[i];
+      if (missSet.has(i)) miss = true;
+    }
+    const h = Math.max(0.8, Math.sqrt(top / peak) * 100);
+    bars += `<rect class="tc-b${miss ? " miss" : ""}" x="${(g * gw).toFixed(3)}" ` +
+      `y="${(100 - h).toFixed(3)}" width="${Math.max(gw * 0.9, 0.12).toFixed(3)}" height="${h.toFixed(3)}" />`;
+    const last = hi - 1;
+    pts += `${(per === 1 ? x(last) : ((g + 1) * gw)).toFixed(3)},${y(last).toFixed(3)} `;
+  }
   $("#turns-chart").innerHTML =
     `<svg viewBox="0 0 100 100" preserveAspectRatio="none">${bars}` +
     `<polyline points="${pts}" /></svg>` +

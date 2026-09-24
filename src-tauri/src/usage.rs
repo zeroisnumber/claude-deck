@@ -398,6 +398,10 @@ pub(crate) const PING_PROMPT_IDX: u32 = u32::MAX;
 /// session_turns의 본체 — 저장소 경로 검사 없이 텍스트만 파싱해 테스트할 수 있게 분리.
 /// `ping`은 설정의 캐시 유지 메시지다. 메시지를 바꾸면 그 전의 핑은 질문으로 보인다.
 pub(crate) fn turns_from_text(text: &str, ping: &str) -> Vec<TurnRow> {
+    turns_from_text_with(text, ping, true)
+}
+
+fn turns_from_text_with(text: &str, ping: &str, allow_prefilter: bool) -> Vec<TurnRow> {
     let ping = ping.trim();
     let mut out: Vec<TurnRow> = Vec::new();
     let mut prompt = String::new();
@@ -408,7 +412,21 @@ pub(crate) fn turns_from_text(text: &str, ping: &str) -> Vec<TurnRow> {
     let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 방금 만든 턴의 id — 뒷줄을 합칠 때 위치가 아니라 id로 확인한다
     let mut last_id = String::new();
+    // 줄마다 JSON 전체를 푸는 게 비용의 대부분이다. 237MB 세션에서 177MB가 여기서 안 쓰는
+    // 줄이고(도구 결과만 130MB), 걸러 내면 파싱이 약 540 → 270ms가 된다. 따옴표가
+    // 이스케이프되지 않은 모양은 실제 JSON 키로만 나온다 — 사용자가 붙여넣은 JSON 안이면
+    // \"type\" 꼴이라 걸리지 않는다. 표기가 바뀌어 표시가 하나도 없으면 예전처럼 전부 푼다.
+    const ASSISTANT: &str = "\"type\":\"assistant\"";
+    const USER: &str = "\"type\":\"user\"";
+    const TOOL_RESULT: &str = "\"type\":\"tool_result\"";
+    let prefilter = allow_prefilter && text.contains(ASSISTANT);
     for line in text.lines() {
+        if prefilter
+            && !line.contains(ASSISTANT)
+            && !(line.contains(USER) && !line.contains(TOOL_RESULT))
+        {
+            continue;
+        }
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
         // 사람이 실제로 친 프롬프트만 센다 — 도구 결과와 시스템 주입은 제외
         // (read_meta의 first_prompt 판정과 같은 규칙).
@@ -879,6 +897,35 @@ pub(crate) fn subscription_state(force: bool) -> Option<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    /// 줄 거르기가 결과를 바꾸지 않는지, 얼마나 빨라지는지 이 기기의 가장 큰 세션으로 본다.
+    /// `cargo test --release -- --ignored real_turns_prefilter --nocapture`
+    #[test]
+    #[ignore]
+    fn real_turns_prefilter() {
+        let home = dirs::home_dir().unwrap();
+        let mut files: Vec<_> = std::fs::read_dir(home.join(".claude").join("projects"))
+            .unwrap()
+            .flatten()
+            .flat_map(|d| std::fs::read_dir(d.path()).into_iter().flatten().flatten())
+            .map(|f| f.path())
+            .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
+            .collect();
+        files.sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)));
+        for p in files.iter().take(3) {
+            let text = std::fs::read_to_string(p).unwrap();
+            let t = std::time::Instant::now();
+            let full = turns_from_text_with(&text, "reply \".\" only", false);
+            let full_ms = t.elapsed().as_millis();
+            let t = std::time::Instant::now();
+            let fast = turns_from_text_with(&text, "reply \".\" only", true);
+            let fast_ms = t.elapsed().as_millis();
+            let same = serde_json::to_string(&full).unwrap() == serde_json::to_string(&fast).unwrap();
+            eprintln!("{:>4}MB  전부 {full_ms}ms  거르기 {fast_ms}ms  턴 {}  같음 {same}",
+                      text.len() / 1_000_000, full.len());
+            assert!(same, "줄 거르기가 결과를 바꿨다: {}", p.display());
+        }
+    }
+
     /// codex shell 호출은 명령을 보여야지 작업 폴더를 보이면 안 된다
     #[test]
     fn codex_tool_arg_prefers_the_command() {
