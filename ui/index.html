@@ -176,12 +176,12 @@
           <label class="set-head switch-head">
             <div>
               <div class="set-title">GPU 렌더링</div>
-              <div class="set-hint">터미널 글자를 GPU로 그립니다 — 평소엔 켜두는 쪽이 빠릅니다</div>
+              <div class="set-hint">터미널 글자를 GPU로 그립니다 — 켜 두는 쪽이 입력이 덜 밀립니다</div>
             </div>
             <input type="checkbox" id="opt-webgl" class="switch" />
           </label>
           <details class="set-note"><summary>자세히</summary>
-            <div class="lmodal-note">같은 기기에서 학습·렌더링처럼 GPU를 오래 붙잡는 작업을 돌리는 동안에는, 끄는 쪽이 덜 끊길 수 있습니다. 끄면 CPU로 그립니다. 열려 있는 탭에 바로 적용됩니다. 다만 창 합성은 WebView2가 계속 GPU로 하므로, 꺼도 VRAM이 돌아오지는 않습니다.</div>
+            <div class="lmodal-note">풀스크린 클로드의 화면 한 장을 CPU로 그리면 60ms(최대 100ms), GPU로는 17ms입니다. 그동안 앱이 멈춰 키 입력이 밀리므로 켜 두기를 권합니다. GPU는 최근에 본 탭 4개에만 쓰고 나머지는 CPU로 두어, 탭이 많아도 GPU 사용량이 늘지 않습니다. 학습처럼 GPU를 오래 붙잡는 작업을 돌리는 동안에만 꺼 보세요. 열려 있는 탭에 바로 적용됩니다.</div>
           </details>
         </section>
 

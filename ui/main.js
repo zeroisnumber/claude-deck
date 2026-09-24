@@ -89,6 +89,7 @@ try {
 
 const $ = (s) => document.querySelector(s);
 const listEl = $("#session-list");
+let kbId = null; // 사이드바에서 키보드로 고른 세션 (아래 키보드 탐색 참고)
 const tabsEl = $("#tabs");
 const termArea = $("#term-area");
 const emptyState = $("#empty-state");
@@ -351,6 +352,7 @@ function renderSidebar() {
   if (bgN) parts.push(`백그라운드 ${bgN}`);
   if (prof.cmd !== "claude") parts.push(prof.name);
   $("#foot-count").textContent = parts.join(" · ");
+  kbRestore();
   updateTtlBadges();
 }
 
@@ -689,12 +691,35 @@ function loadWebgl(entry) {
 // 설정을 바꾸면 열려 있는 탭에 바로 반영한다 — 끊길 때 켜고 끄며 확인하는 값이라
 // 재시작을 요구하면 쓸모가 없다.
 function applyRenderer() {
-  for (const t of terms.values()) {
-    try { t.webgl && t.webgl.dispose(); } catch { /* 죽은 컨텍스트 위의 dispose는 던질 수 있다 */ }
-    t.webgl = null;
-    if (webglOn) loadWebgl(t);
+  for (const t of terms.values()) dropWebgl(t);
+  glOrder = [];
+  if (webglOn && activeId) ensureWebgl(activeId);
+}
+
+// GPU 렌더러는 최근에 본 탭 몇 개에만 붙인다. 탭마다 붙이면 WebGL 컨텍스트가 탭 수만큼
+// 생기는데, 브라우저는 16개쯤에서 가장 오래된 것을 말없이 버리고 그 탭은 되살아나지
+// 않는다(되살리려고 다시 만들면 또 하나가 버려진다). 안 보이는 탭은 그릴 일이 없으니
+// CPU 렌더러로 둬도 비용이 없다. 보이는 탭은 GPU가 필요하다 — 풀스크린 클로드의 화면
+// 한 장을 CPU로 그리면 60ms(최대 104ms), GPU는 17ms. 그동안 키 입력이 밀린다.
+const WEBGL_MAX = 4;
+let glOrder = [];
+function ensureWebgl(id) {
+  if (!webglOn) return;
+  const t = terms.get(id);
+  if (!t || t.disposed) return;
+  glOrder = [id, ...glOrder.filter((x) => x !== id)];
+  if (!t.webgl) {
+    loadWebgl(t);
     try { t.term.refresh(0, t.term.rows - 1); } catch { /* 닫히는 중인 탭 */ }
   }
+  while (glOrder.length > WEBGL_MAX) {
+    const old = terms.get(glOrder.pop());
+    if (old) dropWebgl(old);
+  }
+}
+function dropWebgl(t) {
+  try { t.webgl && t.webgl.dispose(); } catch { /* 죽은 컨텍스트 위의 dispose는 던질 수 있다 */ }
+  t.webgl = null;
 }
 
 let webglRebuildTimer = null;
@@ -703,14 +728,11 @@ function scheduleWebglRebuild(why) {
   reportFatal(`webgl ${why} — 모든 탭의 렌더러 재생성`);
   webglRebuildTimer = setTimeout(() => {
     webglRebuildTimer = null;
-    for (const t of terms.values()) {
-      try { t.webgl && t.webgl.dispose(); } catch { /* 죽은 컨텍스트 위의 dispose는 던질 수 있다 */ }
-      t.webgl = null;
-    }
-    for (const t of terms.values()) {
-      loadWebgl(t);
-      try { t.term.refresh(0, t.term.rows - 1); } catch { /* 닫히는 중인 탭 */ }
-    }
+    for (const t of terms.values()) dropWebgl(t);
+    // 최근에 본 순서를 그대로 살려 다시 붙인다 (오래된 것부터 붙여야 순서가 유지된다)
+    const keep = glOrder.slice();
+    glOrder = [];
+    for (const id of keep.reverse()) ensureWebgl(id);
   }, 100);
 }
 
@@ -833,7 +855,7 @@ function makeTerm(id, title, cwd) {
   // 우리가 직접 받아 모든 탭의 애드온을 버리고 다시 만들면 정상으로 돌아온다 — 탭들이
   // 글리프 아틀라스를 공유하므로 전부 함께 버려야 한다. 손실·복구 이벤트 때만 도는 코드다.
   const entry = { term, fit, container, title, cwd, exited: false, busy: false, profile: null, webgl: null };
-  loadWebgl(entry);
+  // GPU 렌더러는 activate가 붙인다 (최근에 본 몇 개만)
   term.element.addEventListener("webglcontextrestored", () => scheduleWebglRebuild("context restored"), true);
 
   // 한글 입력이 가끔 두 번 들어가고 조합창이 엉뚱한 데 뜬다. 재현이 들쭉날쭉해서
@@ -1274,6 +1296,7 @@ function activate(id) {
   // 묻는 카드가 떠 있는데 사이드바에서 직접 골라 열었으면 그걸로 답한 것이다.
   // 남겨 두면 탭을 다 닫았을 때 지난 질문이 다시 나타난다.
   emptyState.querySelector(".restore-card")?.remove();
+  ensureWebgl(id);
   const t = terms.get(id);
   requestAnimationFrame(() => {
     // 이 프레임 사이에 탭이 닫혔을 수 있다. 버려진 터미널에 fit()을 걸면 xterm이
@@ -1299,6 +1322,7 @@ async function closeTab(id) {
   t.container.remove();
   terms.delete(id);
   tabOrder = tabOrder.filter((x) => x !== id);
+  glOrder = glOrder.filter((x) => x !== id);
   saveOpenTabs();
   if (activeId === id) {
     activeId = null;
@@ -2010,38 +2034,52 @@ function handleShortcut(e) {
 
 // 사이드바 키보드 탐색: 검색창에 포커스가 있을 때 ↑↓로 행을 고르고 Enter로 연다.
 // Esc는 검색어를 비우고 터미널로 돌아간다. 고른 행은 .kb 클래스로 표시한다.
-let kbIndex = -1;
+// 고른 행은 번호가 아니라 세션 id로 기억한다. 목록은 20초마다·상태가 바뀔 때마다 새로
+// 그려지고 최근 순으로 다시 정렬된다 — 번호로 기억하면 그 사이 표시가 사라지거나,
+// Enter가 고른 것과 다른 세션을 연다. (kbId는 맨 위 listEl 옆에 둔다 — renderSidebar가
+// 이 줄보다 먼저 불릴 수 있다)
 function kbRows() { return [...listEl.querySelectorAll(".session-item")]; }
+function kbCurrent(rows) { return rows.findIndex((r) => r.dataset.id === kbId); }
 function kbHighlight(i) {
   const rows = kbRows();
   rows.forEach((r) => r.classList.remove("kb"));
-  if (!rows.length) { kbIndex = -1; return; }
-  kbIndex = Math.max(0, Math.min(rows.length - 1, i));
-  rows[kbIndex].classList.add("kb");
-  rows[kbIndex].scrollIntoView({ block: "nearest" });
+  if (!rows.length) { kbId = null; return; }
+  const k = Math.max(0, Math.min(rows.length - 1, i));
+  kbId = rows[k].dataset.id;
+  rows[k].classList.add("kb");
+  rows[k].scrollIntoView({ block: "nearest" });
+}
+// 새로 그린 목록에 고른 표시를 다시 얹는다 (renderSidebar 끝에서 부른다)
+function kbRestore() {
+  if (!kbId) return;
+  const row = listEl.querySelector(`.session-item[data-id="${CSS.escape(kbId)}"]`);
+  if (row) row.classList.add("kb");
+  else kbId = null;
 }
 $("#search").addEventListener("keydown", (e) => {
   if (e.isComposing) return;
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
-    kbHighlight(kbIndex + (e.key === "ArrowDown" ? 1 : -1));
+    const rows = kbRows();
+    const cur = kbCurrent(rows);
+    kbHighlight(cur < 0 ? (e.key === "ArrowDown" ? 0 : rows.length - 1) : cur + (e.key === "ArrowDown" ? 1 : -1));
   } else if (e.key === "Enter") {
     e.preventDefault();
     const rows = kbRows();
-    const row = rows[kbIndex] || rows[0];
+    const row = rows[kbCurrent(rows)] || rows[0];
     if (!row) return;
     const s = sessions.find((x) => x.session_id === row.dataset.id);
     if (s) detach("openSession:search", openSession(s));
   } else if (e.key === "Escape") {
     e.preventDefault();
     $("#search").value = "";
-    kbIndex = -1;
+    kbId = null;
     renderSidebar();
     const t = terms.get(activeId);
     if (t) t.term.focus();
   }
 });
-$("#search").addEventListener("input", () => { kbIndex = -1; });
+$("#search").addEventListener("input", () => { kbId = null; });
 window.addEventListener("keydown", (e) => {
   if (handleShortcut(e)) e.preventDefault();
 });
