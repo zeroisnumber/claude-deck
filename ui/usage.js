@@ -27,8 +27,10 @@ function rowCost(r) {
   const [i, o] = priceFor(r.model);
   return (r.input * i + r.cache_read * i * 0.1 + r.cache_5m * i * 1.25 + r.cache_1h * i * 2 + r.output * o) / 1e6;
 }
+// 천 단위 쉼표 — $1238.54보다 $1,238.54가 한눈에 읽힌다
+const COST_FMT = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 function fmtCost(v) {
-  return v === null ? "—" : `$${v.toFixed(2)}`;
+  return v === null ? "—" : `$${COST_FMT.format(v)}`;
 }
 function fmtTok(n) {
   if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
@@ -93,7 +95,7 @@ function renderDash() {
     m.cacheW += r.cache_5m + r.cache_1h;
     m.input += r.input;
     byModel.set(r.model, m);
-    const pName = basename(r.cwd) || r.cwd;
+    const pName = r.project || basename(r.cwd) || r.cwd;
     const p = byProj.get(pName) || { cost: 0, req: 0, unpriced: false };
     if (cost === null) p.unpriced = true;
     p.cost += cost || 0;
@@ -102,9 +104,9 @@ function renderDash() {
   }
 
   $("#dash-tiles").innerHTML = `
-    <div class="tile"><div class="tile-v">$${tot.cost.toFixed(2)}</div><div class="tile-l">추정 비용${unpriced ? " (클로드만)" : ""}</div></div>
+    <div class="tile"><div class="tile-v">${fmtCost(tot.cost)}</div><div class="tile-l">추정 비용${unpriced ? " (클로드만)" : ""}</div></div>
     <div class="tile"><div class="tile-v">${tot.requests.toLocaleString()}</div><div class="tile-l">요청</div></div>
-    <div class="tile"><div class="tile-v">${fmtTok(tot.input + tot.cache_read + tot.cache_w)}</div><div class="tile-l">입력 토큰 (캐시 포함)</div></div>
+    <div class="tile"><div class="tile-v">${fmtTok(tot.input + tot.cache_read + tot.cache_w)}</div><div class="tile-l" title="캐시 읽기·쓰기 포함">입력 토큰</div></div>
     <div class="tile"><div class="tile-v">${fmtTok(tot.output)}</div><div class="tile-l">출력 토큰</div></div>
     <div class="tile"><div class="tile-v">${tot.cache_read + tot.input > 0 ? Math.round((tot.cache_read / (tot.cache_read + tot.cache_w + tot.input)) * 100) : 0}%</div><div class="tile-l">캐시 적중률</div></div>`;
 
@@ -118,7 +120,8 @@ function renderDash() {
       .map(([m, v]) => {
         const denom = v.cacheRead + v.cacheW + v.input;
         const hit = denom > 0 ? Math.round((v.cacheRead / denom) * 100) : 0;
-        return `<tr><td>${escapeHtml(String(m))}</td><td>${v.req.toLocaleString()}</td><td>${fmtTok(v.tok)}</td><td>${fmtTok(v.out)}</td><td>${hit}%</td><td>${v.unpriced ? "—" : fmtCost(v.cost)}</td></tr>`;
+        // 날것 id(claude-opus-5-5) 대신 사람이 읽는 이름. 모르는 모델은 id 그대로.
+        return `<tr><td title="${escapeHtml(String(m))}">${escapeHtml(modelName(String(m)) || String(m))}</td><td>${v.req.toLocaleString()}</td><td>${fmtTok(v.tok)}</td><td>${fmtTok(v.out)}</td><td>${hit}%</td><td>${v.unpriced ? "—" : fmtCost(v.cost)}</td></tr>`;
       })
       .join("") || `<tr><td colspan="6">데이터 없음</td></tr>`,
   );
@@ -274,13 +277,13 @@ function renderTurns(s) {
   const hit = denom > 0 ? Math.round((readTot / denom) * 100) : 0;
 
   $("#turns-sub").textContent =
-    `${turnsTitle} · ${basename(s.cwd)} · ${modelName(ts[ts.length - 1].model) || ts[ts.length - 1].model}`;
+    `${turnsTitle} · ${projOf(s)} · ${modelName(ts[ts.length - 1].model) || ts[ts.length - 1].model}`;
 
   const tile = (v, l, cls) => `<div class="tile"><div class="tile-v ${cls || ""}">${v}</div><div class="tile-l">${l}</div></div>`;
   const outTot = ts.reduce((a, t) => a + t.output, 0);
   $("#turns-tiles").innerHTML = turnsPriced
     ? tile(fmtVal(total), "누적 비용") +
-      tile(`$${saved.toFixed(2)}`, "캐시가 아낀 돈") +
+      tile(fmtCost(saved), "캐시가 아낀 돈") +
       tile(`${hit}%`, "캐시 적중률") +
       tile(String(misses.length), "캐시 끊김", misses.length ? "hot" : "")
     : tile(fmtTok(inTot), "입력 토큰") +
@@ -591,15 +594,19 @@ function fmtRemain(iso) {
   const ms = new Date(iso) - Date.now();
   if (isNaN(ms)) return "";
   if (ms <= 0) return "리셋됨";
-  const h = Math.floor(ms / 3600000);
-  const m = Math.round((ms % 3600000) / 60000);
+  // 분을 먼저 반올림한 뒤 시간으로 나눈다 — 거꾸로 하면 59.6분이 60분이 되어
+  // "1시간 60분"이 나왔다.
+  const total = Math.round(ms / 60000);
+  const h = Math.floor(total / 60);
+  const m = total % 60;
   // 주간 창은 최대 168시간이라 시간 단위로만 쓰면 "90시간"처럼 읽기 나쁜 값이 나온다
   if (h >= 24) {
     const d = Math.floor(h / 24);
     const rh = h % 24;
     return rh > 0 ? `${d}일 ${rh}시간` : `${d}일`;
   }
-  return h > 0 ? `${h}시간 ${m}분` : `${m}분`;
+  if (h > 0) return m > 0 ? `${h}시간 ${m}분` : `${h}시간`;
+  return `${m}분`;
 }
 
 function limitRow(label, w) {

@@ -1048,6 +1048,9 @@ kbd {
 }
 .dash-table td:first-child { color: var(--text-dim); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dash-table tr:last-child td { border-bottom: none; }
+/* 숫자 칸은 오른쪽 정렬·고정폭 숫자 — 자릿수가 세로로 맞아야 크기를 한눈에 비교한다 */
+.dash-table th:not(:first-child),
+.dash-table td:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
 
 .dash-note { margin-top: 14px; font-size: 10.5px; color: var(--text-faint); line-height: 1.5; }
 

@@ -110,6 +110,12 @@ const b64ToBytes = typeof Uint8Array.fromBase64 === "function"
     return bytes;
   };
 
+// 보여 줄 프로젝트 이름. 목록은 저장소 이름(project)을 준다 — 저장소 안 하위 폴더
+// (claude-deck\src-tauri\src)에서 띄운 세션이 "src"로 따로 보이던 것을 막는다.
+function projOf(s) {
+  return (s && s.project) || basename(s && s.cwd);
+}
+
 function basename(p) {
   return (p || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
 }
@@ -220,6 +226,19 @@ function markDuplicateTitles(list) {
   dupTitles = new Set([...seen].filter(([, n]) => n > 1).map(([k]) => k));
 }
 
+// 세션 줄 셋째 칸은 클로드가 잡 상태에 적는 한 줄 요약이다. 마지막 입력이 캐시 유지
+// 핑이면 클로드가 그 핑을 요약으로 적어서 "reply "." only"가 줄마다 보였다 — 숨긴다.
+// 요약은 마크다운이라 **굵게** 같은 기호가 그대로 보였다 — 글자만 남긴다.
+function bgDetailText(d) {
+  const t = mdPlain(String(d || "")).trim();
+  if (!t) return "";
+  // keepAlive는 파일 아래쪽에서 선언된다 — 그보다 먼저 목록을 그리는 경로가 있어도 깨지지 않게
+  let ping = "";
+  try { ping = (keepAlive.message || "").trim(); } catch { /* 아직 선언 전 */ }
+  if (ping && t === mdPlain(ping).trim()) return "";
+  return t;
+}
+
 function sessionRow(s, child) {
   const el = document.createElement("div");
   el.className = "session-item" + (s.session_id === activeId ? " active" : "") + (child ? " child" : "");
@@ -252,7 +271,7 @@ function sessionRow(s, child) {
         ${ctxText}
         ${ttl}
       </div>
-      ${s.bg_detail ? `<div class="si-bg-detail"></div>` : ""}
+      ${bgDetailText(s.bg_detail) ? `<div class="si-bg-detail"></div>` : ""}
     </div>`;
   el.querySelector(".si-title-text").textContent = title;
   if (dupTitles.has(sessionTitle(s))) {
@@ -262,8 +281,9 @@ function sessionRow(s, child) {
     tag.title = "같은 이름이 여럿이라 세션 id를 함께 표시합니다";
     el.querySelector(".si-title").appendChild(tag);
   }
-  el.querySelector(".si-proj").textContent = basename(s.cwd);
-  if (s.bg_detail) el.querySelector(".si-bg-detail").textContent = s.bg_detail;
+  el.querySelector(".si-proj").textContent = projOf(s);
+  const detail = bgDetailText(s.bg_detail);
+  if (detail) el.querySelector(".si-bg-detail").textContent = detail;
 
   el.onclick = () => detach("openSession", openSession(s));
   el.oncontextmenu = (e) => { e.preventDefault(); showCtxMenu(e, s, el); };
@@ -315,6 +335,7 @@ function renderSidebar() {
     // 제목·프로젝트에 더해 백그라운드 상태 문구도 검색 대상에 넣는다
     const hay = [
       sessionTitle(s),
+      projOf(s),
       basename(s.cwd),
       s.bg_detail || "",
       s.bg_state || "",
@@ -1084,7 +1105,7 @@ async function openSession(meta, focus = true, opts = {}) {
 
   const name = (sessionTitle(meta) || id.slice(0, 8)).slice(0, 40);
   const shown = forking ? `${name} (복사본)`.slice(0, 40) : name;
-  const title = basename(meta.cwd) + " · " + shown.slice(0, 24);
+  const title = projOf(meta) + " · " + shown.slice(0, 24);
   // 복사본은 아직 자기 세션 id가 없다. 새 세션과 같은 임시 id로 띄우고, 자기 기록
   // 파일이 생기면 adoptFor가 붙여 준다.
   const tabId = forking ? "new-" + Date.now() : id;
@@ -1100,7 +1121,7 @@ async function openSession(meta, focus = true, opts = {}) {
     : spec.cmd;
   const entry = makeTerm(tabId, title, meta.cwd);
   entry.name = shown;
-  entry.proj = basename(meta.cwd);
+  entry.proj = projOf(meta);
   entry.profile = spec.profile;
   if (forking) {
     entry.agent = meta.agent || "claude";
@@ -1242,7 +1263,8 @@ function adoptFor(meta) {
   }
   const name = (sessionTitle(meta) || meta.session_id.slice(0, 8)).slice(0, 40);
   t.name = name;
-  t.title = basename(meta.cwd) + " · " + name.slice(0, 24);
+  t.title = projOf(meta) + " · " + name.slice(0, 24);
+  t.proj = projOf(meta);
   // 재시작은 이제 "새 세션 시작"이 아니라 "이 세션 재개"여야 한다. 안 바꾸면 탭 이름은
   // 그대로인데 다른 세션이 뜬다.
   // 재시작은 이제 이 세션의 재개다. 프로필의 "재개" 설정이 꺼져 있어도 붙인다 —
@@ -1352,7 +1374,7 @@ function askRestore(list) {
     row.className = "restore-row";
     row.innerHTML = `<input type="checkbox" checked><span class="restore-name"></span><span class="restore-proj"></span>`;
     row.querySelector(".restore-name").textContent = (sessionTitle(meta) || meta.session_id.slice(0, 8)).slice(0, 60);
-    row.querySelector(".restore-proj").textContent = basename(meta.cwd);
+    row.querySelector(".restore-proj").textContent = projOf(meta);
     row.meta = meta;
     box.appendChild(row);
   }

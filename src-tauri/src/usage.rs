@@ -13,6 +13,8 @@ pub(crate) struct UsageRow {
     pub(crate) date: String,
     pub(crate) model: String,
     pub(crate) cwd: String,
+    /// 저장소 이름 — 대시보드는 이걸로 묶는다(같은 저장소의 하위 폴더가 따로 잡히지 않게)
+    pub(crate) project: String,
     pub(crate) input: u64,
     pub(crate) output: u64,
     pub(crate) cache_read: u64,
@@ -128,6 +130,7 @@ pub(crate) fn aggregate(entries: Vec<UsageEntry>) -> Vec<UsageRow> {
                 date: e.date.clone(),
                 model: e.model.clone(),
                 cwd: e.cwd.clone(),
+                project: project_name(&e.cwd),
                 agent: e.agent.clone(),
                 ..Default::default()
             });

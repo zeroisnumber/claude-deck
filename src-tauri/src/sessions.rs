@@ -9,6 +9,9 @@ pub(crate) struct SessionMeta {
     pub(crate) session_id: String,
     pub(crate) agent: String, // "claude" | "codex" | "gemini"
     pub(crate) cwd: String,
+    /// 보여 줄 프로젝트 이름 — cwd를 품은 저장소(.git)의 폴더 이름. 저장소 안 하위
+    /// 폴더에서 띄운 세션이 "src" 같은 이름으로 따로 보이지 않게 한다.
+    pub(crate) project: String,
     pub(crate) summary: Option<String>,
     pub(crate) first_prompt: Option<String>,
     /// recent와 마찬가지로 미리보기 전용 — 목록 응답에서는 제외한다
@@ -59,6 +62,43 @@ impl SessionMeta {
             ..Default::default()
         }
     }
+}
+
+/// cwd를 품은 저장소의 최상위 폴더. `.git`(폴더든 파일이든 — worktree는 파일이다)을 찾아
+/// 위로 올라가고, 없으면 cwd 그대로. 목록을 20초마다 읽으므로 결과를 기억해 둔다.
+/// 찾다가 홈 폴더나 드라이브 맨 위에 닿으면 멈춘다(홈에 .git이 있는 사람도 있다).
+pub(crate) fn project_root(cwd: &str) -> String {
+    static CACHE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    if cwd.is_empty() {
+        return String::new();
+    }
+    if let Some(r) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(cwd) {
+        return r.clone();
+    }
+    let home = dirs::home_dir();
+    let mut found = cwd.to_string();
+    let mut dir = Some(std::path::Path::new(cwd));
+    while let Some(d) = dir {
+        if home.as_deref() == Some(d) || d.parent().is_none() {
+            break;
+        }
+        if d.join(".git").exists() {
+            found = d.to_string_lossy().to_string();
+            break;
+        }
+        dir = d.parent();
+    }
+    CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(cwd.to_string(), found.clone());
+    found
+}
+
+/// 보여 줄 프로젝트 이름 (저장소 폴더 이름)
+pub(crate) fn project_name(cwd: &str) -> String {
+    let root = project_root(cwd);
+    std::path::Path::new(&root)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or(root)
 }
 
 /// 호버 미리보기 전용 페이로드 (목록에서 제외한 무거운 필드만)
@@ -630,6 +670,9 @@ pub(crate) fn list_sessions() -> Vec<SessionMeta> {
                 }
             }
         }
+    }
+    for m in out.iter_mut() {
+        m.project = project_name(&m.cwd);
     }
     // 상태줄이 실제 컨텍스트 윈도우를 알려준다 — 모델명으로 추측하던 걸 대체한다
     for m in out.iter_mut() {
