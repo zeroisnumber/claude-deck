@@ -32,8 +32,10 @@ pub(crate) fn finish_pty(app: &AppHandle, id: &str, generation: u64) {
         _ => return,
     }
     map.remove(id);
-    drop(map);
+    // 맵 잠금 안에서 같이 지운다 — 놓은 뒤에 지우면 그 사이 같은 id로 새로 띄운 탭의
+    // 상태 항목을 지울 수 있다 (kill_pty와 같은 순서)
     ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    drop(map);
     let _ = app.emit("pty-exit", PtyExit { id: id.to_string() });
 }
 
@@ -400,6 +402,10 @@ pub(crate) fn spawn_pty(
                         carry = buf[n.saturating_sub(3)..n].to_vec();
                         trace(&id2, &agent2, "out", &format!("{},{}", n, spin));
                     }
+                    // 이 탭을 다시 열었으면 새 프로세스의 상태 항목에 잠깐 출력이 더해질 수 있다.
+                    // 끈 프로세스는 PTY가 닫히면 곧 EOF라 창은 짧고, 결과도 잠깐의 "작업 중"
+                    // 오판뿐이라 조각마다 세대를 확인하지 않는다. 화면에는 섞이지 않는다
+                    // (출력은 실행 번호로 걸러진다).
                     note_output(&id2);
                     pipe.write(std::time::Instant::now(), &buf[..n], &|d: &[u8]| {
                         emit_output(&app2, &id2, generation, d)
