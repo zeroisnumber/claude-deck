@@ -775,7 +775,9 @@ function scheduleWebglRebuild(why) {
 // 한글 음절·자모. 붙여넣기는 xterm이 onData로 한 번에 넘기지만 괄호 붙여넣기 모드면
 // ESC[200~로 시작해서, 조합 없이 온 "한 글자"와 구별된다(아래는 짧은 입력만 본다).
 const HANGUL = /^[ᄀ-ᇿ㄰-㆏가-힣]{1,2}$/;
-let imeRebindAt = 0;
+// 처음 값이 0이면 앱을 켜고 3초 안에는 재연결이 막혔다 — 바로 그때가 WebView2가 입력기를
+// 놓치는 알려진 때다.
+let imeRebindAt = -Infinity;
 let imeOrphanAt = 0;
 let pasting = false; // 붙여넣기는 조합 없이 한글이 오는 정상 경로다
 function rebindIme(term) {

@@ -2,12 +2,17 @@
 
     python tools/ui-checks.py            # 전부
     python tools/ui-checks.py wheel ime  # 이름에 해당 글자가 든 것만
+    python tools/ui-checks.py --csp      # tauri.conf.json의 CSP를 걸고 전부 (위반이 하나라도 나면 실패)
+
+--csp는 ui/를 로컬 HTTP로 띄우고 CSP를 응답 헤더로 보낸다 — 윈도우의 Tauri가
+http://tauri.localhost에 거는 방식과 같다. 가짜 앱(STUB)은 Tauri의 초기화 스크립트처럼
+CSP 밖에서 돈다. 포트가 겹치면 UI_CHECKS_PORT / UI_CHECKS_HTTP_PORT로 바꾼다.
 
 실제 앱 없이 잡을 수 있는 것만 본다. 이 검사들이 잡은 적이 있는 것: 목록 전체가 비는 것,
 클릭 사이에 끼는 마우스 신호, 덜 가는 휠, 터미널 둘레의 검은 띠, 두 번 실행되는 단축키.
 필요한 것: Chrome, python `websocket-client`.
 """
-import base64, json, os, shutil, subprocess, sys, tempfile, time, traceback, urllib.request
+import base64, functools, http.server, json, os, shutil, subprocess, sys, tempfile, threading, time, traceback, urllib.request
 
 import websocket
 
@@ -43,9 +48,52 @@ def free_port():
 
 
 PORT = int(os.environ.get("UI_CHECKS_PORT") or free_port())
+HTTP_PORT = int(os.environ.get("UI_CHECKS_HTTP_PORT") or free_port())
+CSP = None   # --csp일 때 tauri.conf.json의 정책 문자열
+
+
+def conf_csp():
+    if os.environ.get("UI_CHECKS_CSP"):   # 정책을 바꿔 가며 볼 때
+        return os.environ["UI_CHECKS_CSP"]
+    with open(os.path.join(ROOT, "src-tauri", "tauri.conf.json"), encoding="utf-8") as f:
+        csp = json.load(f)["app"]["security"].get("csp")
+    if isinstance(csp, dict):   # Tauri는 지시어 맵 형식도 받는다
+        csp = "; ".join(f"{k} {v if isinstance(v, str) else ' '.join(v)}" for k, v in csp.items())
+    if not csp:
+        sys.exit("tauri.conf.json에 csp가 없다")
+    # 여기서는 정책을 그대로 건다. Tauri는 index.html에 <style>·인라인 <script>·http <script src>가
+    # 있으면 nonce를 덧붙이는데, style-src에 nonce가 붙는 순간 'unsafe-inline'이 무시되어
+    # xterm이 깨진다. 그런 태그가 생기면 이 검사는 실제 앱과 달라지므로 먼저 멈춘다.
+    with open(os.path.join(ROOT, "ui", "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    import re
+    if re.search(r"<style[\s>]|<script(?![^>]*\ssrc=)[^>]*>|<script[^>]*\ssrc=[\"']?http", html, re.I):
+        sys.exit("index.html에 <style>/인라인 <script>/http 스크립트가 있다 — Tauri가 CSP에 nonce를 붙여 "
+                 "style-src 'unsafe-inline'이 꺼진다. 파일로 빼거나 dangerousDisableAssetCspModification을 보라.")
+    return csp
+
+
+def serve_ui(csp):
+    class H(http.server.SimpleHTTPRequestHandler):
+        def end_headers(self):
+            self.send_header("Content-Security-Policy", csp)
+            self.send_header("Cache-Control", "no-store")
+            super().end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", HTTP_PORT),
+                                          functools.partial(H, directory=os.path.join(ROOT, "ui")))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
 
 # 앱 명령을 흉내 낸다. 부른 것은 window.__calls에, PTY로 보낸 것은 window.__sent에 쌓인다.
+# CSP 위반은 window.__csp에 — 문서가 파싱되기 전에 걸어야 막힌 <script src>도 잡힌다.
 STUB = r"""
+window.__csp = [];
+document.addEventListener('securitypolicyviolation', e => window.__csp.push(
+  [e.effectiveDirective, e.blockedURI, (e.sample || '').slice(0, 80), e.sourceFile + ':' + e.lineNumber].join(' | ')));
 localStorage.clear(); // 앞 검사가 남긴 설정(묻지 않기·폰트 크기 등)이 섞이지 않게
 localStorage.setItem('openTabs', JSON.stringify(%(open_tabs)s));
 localStorage.setItem('webgl', %(webgl)s);
@@ -89,6 +137,16 @@ def fake_sessions(n=3, over=None):
 class Page:
     def __init__(self, ws):
         self.ws, self._id = ws, 0
+        self.violations = []
+
+    def harvest(self):
+        """지금 문서에서 난 CSP 위반을 모아 둔다 (다음 load가 문서를 갈아엎기 전에)."""
+        try:
+            got = self.js("window.__csp ? window.__csp.splice(0) : []") or []
+        except Exception:
+            got = []
+        self.violations += got
+        return got
 
     def cdp(self, method, **params):
         self._id += 1
@@ -107,6 +165,7 @@ class Page:
         return r["result"].get("value")
 
     def load(self, sessions=None, open_tabs=(), webgl=False, trace=False, extra_storage="", replies=None):
+        self.harvest()
         # 앞 검사의 가짜 앱을 떼고 새로 붙인다 (쌓이면 앞 것이 먼저 돌아 뒤섞인다)
         if getattr(self, "_stub", None):
             self.cdp("Page.removeScriptToEvaluateOnNewDocument", identifier=self._stub)
@@ -115,8 +174,28 @@ class Page:
             "sessions": json.dumps(sessions or [], ensure_ascii=False), "trace": "true" if trace else "false",
             "extra_storage": extra_storage,
             "replies": json.dumps(replies or {}, ensure_ascii=False)})["identifier"]
-        self.cdp("Page.navigate", url=PAGE)
-        time.sleep(2.5)
+        # 고정 시간만 기다리면 느린 러너나 HTTP로 띄울 때(--csp) 스크립트가 덜 올라온 채로
+        # 검사가 돌아 가끔 실패했다("makeTerm is not defined", Terminal 없음). 앱이 실제로
+        # 준비될 때까지 보고, 검사용 로컬 서버가 파일 하나를 놓친 경우를 위해 한 번 더 띄운다.
+        ready = ("document.readyState === 'complete' && typeof Terminal === 'function' "
+                 "&& typeof makeTerm === 'function' && typeof renderSidebar === 'function'")
+        for attempt in range(2):
+            self.cdp("Page.navigate", url=PAGE)
+            deadline = time.time() + 15
+            ok = False
+            while time.time() < deadline:
+                try:
+                    if self.js(ready):
+                        ok = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.1)
+            if ok:
+                break
+        else:
+            raise AssertionError("15초 안에 앱이 준비되지 않았다 (두 번 띄움)")
+        time.sleep(0.8)  # 첫 목록 불러오기(list_sessions) 같은 시작 직후 비동기 작업
 
     def key(self, key, code, vk, modifiers=0, text=None):
         down = dict(type="rawKeyDown" if text is None else "keyDown", key=key, code=code,
@@ -925,6 +1004,64 @@ def up_to_date_agent_shows_recent_changes(p):
     assert p.js("document.querySelectorAll('.agent-changes details').length") == 5, "최근 5개가 아니다"
 
 
+@check
+def screens_render_without_errors(p):
+    """대시보드·토큰 상세·설정·한도·토스트·탭 게이지 — 다른 검사가 안 여는 화면들 (CSP 위반도 여기서 걸린다)"""
+    p.load(sessions=fake_sessions(2, {0: {"ctx_tokens": 700000, "model": "claude-opus-5-5"}}))
+    p.term(fake_sessions(1)[0]["session_id"])
+    r = p.js("""(async () => {
+      syncCtxGauges(); renderTabs();
+      dashRows = [{date: new Date().toISOString().slice(0, 10), model: 'claude-opus-5-5', project: 'p', cwd: 'D:/p',
+                   input: 10, output: 20, cache_read: 30, cache_5m: 1, cache_1h: 2, requests: 3, agent: 'claude'}];
+      document.querySelector('#dash-backdrop').classList.remove('hidden'); renderDash();
+      turnsData = [0, 1, 2].map(i => ({ts: 1.7e9 + i * 60, model: 'claude-opus-5-5', input: 5, output: 9, cache_read: i ? 9000 : 0,
+                   cache_5m: 0, cache_1h: i ? 0 : 9000, prompt_idx: 0, prompt: '**질문** `x`', text: '답 | a | b |', tools: ['Read a']}));
+      turnsCanPrice = true; turnsPriced = true;
+      document.querySelector('#turns-backdrop').classList.remove('hidden'); renderTurns(sessions[0]);
+      selectedPrompt = 0; renderPrompts(turnsData.map(turnValue));
+      document.querySelector('#foot-limits-rows').innerHTML = limitRow('5시간', {utilization_pct: 42, resets_at: new Date(Date.now() + 3.6e6).toISOString()});
+      document.querySelector('#btn-settings').click();
+      showToast('제목', '본문');
+      previewCard.innerHTML = mdToHtml('# h\\n- a\\n```\\ncode\\n```\\n> q');
+      await new Promise(r => setTimeout(r, 300));
+      return [document.querySelectorAll('#dash-models tr').length, !!document.querySelector('#turns-detail .td-q'),
+              !!document.querySelector('.tab-ctx'), !!document.querySelector('.limit-fill'), document.querySelectorAll('.lrow').length > 0];
+    })()""")
+    assert r == [2, True, True, True, True], r
+
+
+@check
+def csp_blocks_injected_script(p):
+    """정책이 실제로 걸렸는지 — 주입한 스크립트가 도는지 본다 (--csp일 때만)"""
+    if not CSP:
+        return "skip: --csp 없이는 볼 게 없음"
+    p.load(sessions=fake_sessions(1))
+    p.js("""(() => {
+      const box = document.createElement('div'); document.body.appendChild(box);
+      box.innerHTML = '<img src="nope.png" onerror="window.__pwned=1"><svg onload="window.__pwned=2"></svg>';
+      const s = document.createElement('script'); s.textContent = 'window.__pwned=3'; document.body.appendChild(s);
+      const d = document.createElement('script'); d.src = 'data:text/javascript,window.__pwned=4'; document.body.appendChild(d);
+      const a = document.createElement('a'); a.href = 'javascript:window.__pwned=5'; document.body.appendChild(a); a.click();
+      // Runtime.evaluate 안에서는 DevTools가 eval을 풀어 준다 — 페이지의 다음 작업에서 부른다
+      setTimeout(() => { try { new Function('window.__pwned=6')(); } catch (e) { window.__evalErr = e.name; } }, 0);
+      try { setTimeout('window.__pwned=7', 0); } catch {}
+      const b = document.createElement('base'); b.href = 'https://example.com/'; document.head.appendChild(b);
+      return 'ok'; })()""")
+    time.sleep(0.8)
+    pwned = p.js("window.__pwned === undefined ? null : window.__pwned")
+    got = p.js("window.__csp.splice(0)")   # 기대한 위반이므로 전체 집계에서 뺀다
+    assert pwned is None, f"주입한 스크립트가 돌았다 (__pwned={pwned}); 위반 {got}"
+    assert p.js("window.__evalErr") == "EvalError", f"new Function이 막히지 않았다: {p.js('window.__evalErr')}"
+    dirs = {v.split(" | ")[0] for v in got}
+    for want in ("script-src-attr", "script-src-elem", "script-src", "base-uri"):
+        assert want in dirs, f"{want} 위반이 기록되지 않았다: {got}"
+    # 앱의 모든 스크립트는 여전히 돌고 있어야 한다
+    alive = p.js("[typeof Terminal, typeof renderSidebar, typeof openDash]")
+    assert alive == ["function"] * 3, f"앱 스크립트가 죽었다: {alive}"
+    rows = p.js("document.querySelectorAll('.session-item').length")
+    assert rows == 1, f"사이드바 줄 {rows}"
+
+
 # ---------------------------------------------------------------- 실행
 
 def main():
@@ -934,7 +1071,14 @@ def main():
             s.reconfigure(encoding="utf-8")
         except Exception:
             pass
-    want = sys.argv[1:]
+    global CSP, PAGE
+    want = [a for a in sys.argv[1:] if a != "--csp"]
+    srv = None
+    if "--csp" in sys.argv[1:]:
+        CSP = conf_csp()
+        srv = serve_ui(CSP)
+        PAGE = f"http://127.0.0.1:{HTTP_PORT}/index.html"
+        print(f"CSP: {CSP}\n")
     chosen = [c for c in CHECKS if not want or any(w in c.__name__ for w in want)]
     chrome_exe = find_chrome()
     print(f"크롬: {chrome_exe}")
@@ -966,15 +1110,22 @@ def main():
         p.cdp("Emulation.setFocusEmulationEnabled", enabled=True)
         for c in chosen:
             try:
+                before = len(p.violations)
                 note = c(p)
+                p.harvest()
+                new = p.violations[before:]
+                assert not new, f"CSP 위반 {len(new)}건: " + "; ".join(sorted(set(new)))[:600]
                 print(f"통과  {c.__name__}" + (f"  ({note})" if note else ""))
             except Exception as e:
                 failed += 1
+                p.harvest()   # 이 검사의 위반이 다음 검사로 넘어가지 않게
                 print(f"실패  {c.__name__}: {e}")
                 if not isinstance(e, AssertionError):
                     traceback.print_exc()
         ws.close()
     finally:
+        if srv:
+            srv.shutdown()
         chrome.terminate()
         try:
             chrome.wait(timeout=10)

@@ -23,7 +23,7 @@ jobs:
       PYTHONIOENCODING: utf-8
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -38,7 +38,7 @@ jobs:
         run: cargo test --locked
 
       # 프런트가 최상위에서 던지면 창도 안 뜬다. node 기본 모듈만 쓰므로 npm ci가 필요 없다.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
 
@@ -47,7 +47,7 @@ jobs:
           node tools/startup-check.js
           $env:STARTUP_READY = 'loading'; node tools/startup-check.js
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -64,3 +64,7 @@ jobs:
 
       - name: UI checks (headless Chrome)
         run: python tools/ui-checks.py
+
+      # 같은 검사를 tauri.conf.json의 CSP를 걸고 한 번 더 — 정책 위반이 하나라도 나면 실패한다
+      - name: UI checks under the app's CSP
+        run: python tools/ui-checks.py --csp
