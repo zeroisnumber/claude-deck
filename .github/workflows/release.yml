@@ -14,20 +14,18 @@ permissions:
   contents: read
 
 jobs:
-  # CI와 같은 검사(러스트 테스트, 시작 검사, 헤드리스 UI 검사). 깨지면 릴리스하지 않는다.
-  checks:
-    uses: ./.github/workflows/ci.yml
-
-  release:
-    needs: checks
-    runs-on: windows-latest
-    permissions:
-      contents: write
+  # 태그를 잘못 붙였으면 긴 검사를 기다리지 않고 바로 멈춘다
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.ver.outputs.prerelease }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Check tag matches app version
         id: ver
+        shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}" -replace '^v', ''
           $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
@@ -40,6 +38,23 @@ jobs:
           $pre = if ($tag.Contains('-')) { 'true' } else { 'false' }
           "prerelease=$pre" >> $env:GITHUB_OUTPUT
           "version=$tag" >> $env:GITHUB_OUTPUT
+
+  # CI와 같은 검사(러스트 테스트, 시작 검사, 헤드리스 UI 검사). 깨지면 릴리스하지 않는다.
+  checks:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: [version, checks]
+    runs-on: windows-latest
+    # 태그 두 개를 연달아 올리면 beta-channel manifest를 두고 겨룬다 — 한 번에 하나씩
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
@@ -63,9 +78,9 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "CLI Deck ${{ github.ref_name }}"
-          releaseBody: ${{ steps.ver.outputs.prerelease == 'true' && 'Beta build — installed only by users who turned on 베타 업데이트 받기. See the assets to download this version and install.' || 'See the assets to download this version and install.' }}
+          releaseBody: ${{ needs.version.outputs.prerelease == 'true' && 'Beta build — installed only by users who turned on 베타 업데이트 받기. See the assets to download this version and install.' || 'See the assets to download this version and install.' }}
           releaseDraft: false
-          prerelease: ${{ steps.ver.outputs.prerelease == 'true' }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
 
       # 베타 채널 manifest: 늘 같은 주소(releases/download/beta-channel/latest.json)에 둔다.
       # 베타는 언제나 덮어쓰고, 정식판은 지금 실린 판 이상일 때만 덮어쓴다 — 그래야 베타
@@ -77,16 +92,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           $channel = 'beta-channel'
-          $pre = '${{ steps.ver.outputs.prerelease }}' -eq 'true'
+          $pre = '${{ needs.version.outputs.prerelease }}' -eq 'true'
           New-Item -ItemType Directory -Force new, cur | Out-Null
           gh release download "${{ github.ref_name }}" -p latest.json -D new --clobber
           if ($LASTEXITCODE -ne 0) { throw "latest.json missing from ${{ github.ref_name }}" }
           $newVer = (Get-Content new/latest.json -Raw | ConvertFrom-Json).version
-          if ($newVer -ne '${{ steps.ver.outputs.version }}') { throw "latest.json says $newVer, tag says ${{ steps.ver.outputs.version }}" }
+          if ($newVer -ne '${{ needs.version.outputs.version }}') { throw "latest.json says $newVer, tag says ${{ needs.version.outputs.version }}" }
 
           gh release view $channel *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $channel --prerelease --latest=false --target "${{ github.sha }}" `
+            gh release create $channel --prerelease --target "${{ github.sha }}" `
               --title "Beta update channel" `
               --notes "Updater manifest for users with 베타 업데이트 받기 on. Rewritten by the release workflow; do not delete or download from here."
             if ($LASTEXITCODE -ne 0) { throw "could not create $channel release" }

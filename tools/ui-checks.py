@@ -59,6 +59,7 @@ window.__TAURI__ = {
     if (c === 'write_pty') window.__sent.push(a.data);
     if (c === 'list_sessions') return Promise.resolve(__SESS);
     if (c === 'trace_enabled') return Promise.resolve(%(trace)s);
+    if (c === 'agent_versions') return Promise.resolve([]);
     if (c === 'check_update') return Promise.resolve(window.__updateFor ? window.__updateFor(a.beta) : null);
     if (c === 'spawn_pty') return new Promise(r => setTimeout(() => r(++window.__gen), 20));
     if (c in __REPLIES) return Promise.resolve(__REPLIES[c]);

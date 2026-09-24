@@ -47,7 +47,7 @@ UI(`ui/`)는 빌드 시 바이너리에 임베드되므로, 프런트 수정 후
 ## 릴리스
 
 ```powershell
-# 버전 올리기: package.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json
+# 버전 올리기: src-tauri/Cargo.toml, src-tauri/tauri.conf.json (릴리스 워크플로가 태그와 맞는지 본다)
 git tag v0.3.0
 git push origin v0.3.0
 ```
