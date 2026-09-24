@@ -319,6 +319,12 @@ pub(crate) fn codex_turns_from_text(text: &str, ping: &str) -> Vec<TurnRow> {
                 let arg: String = arg.split('\n').next().unwrap_or("").chars().take(48).collect();
                 tools.push(if arg.is_empty() { name.to_string() } else { format!("{name} {arg}") });
             }
+            // apply_patch 같은 자유 형식 도구와 웹 검색은 따로 기록된다. 입력이 패치 본문이라
+            // 이름만 남긴다.
+            "response_item" if payload["type"] == "custom_tool_call" => {
+                tools.push(payload["name"].as_str().unwrap_or("tool").to_string());
+            }
+            "response_item" if payload["type"] == "web_search_call" => tools.push("web_search".into()),
             "event_msg" => match payload["type"].as_str().unwrap_or("") {
                 "user_message" => {
                     if let Some(m) = payload["message"].as_str() {

@@ -190,6 +190,13 @@ pub(crate) fn turn_state(file: &std::path::Path) -> Option<bool> {
                 "user_message" => return Some(true),
                 _ => continue,
             },
+            // 턴 중간에도 답글(agent_message) 뒤에 도구 호출이 이어진다. 가장 최근 기록이
+            // 도구 호출·결과면 아직 턴 안이다 — 오래 도는 명령 동안 "끝남"으로 보지 않게.
+            "response_item" => match o["payload"]["type"].as_str().unwrap_or("") {
+                "function_call" | "function_call_output" | "custom_tool_call"
+                | "custom_tool_call_output" | "web_search_call" => return Some(true),
+                _ => continue,
+            },
             _ => continue,
         }
     }
@@ -654,19 +661,37 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
                 .map(|a| a.working)
                 .unwrap_or(false);
             if wt {
-                // 완료 알림과 같은 이유로 여기서 직접 보낸다 (창이 백그라운드면 JS가 늦다)
-                let title = ACTIVITY
+                // 완료 알림과 같은 이유로 여기서 직접 보낸다 (창이 백그라운드면 JS가 늦다).
+                // 창에 포커스가 있으면 JS가 앱 안 토스트를 띄우므로 겹쳐 보내지 않는다.
+                let (agent, title) = ACTIVITY
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .get(&id)
-                    .map(|a| a.title.clone())
+                    .map(|a| (a.agent.clone(), a.title.clone()))
                     .unwrap_or_default();
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title("✋ 입력 필요")
-                    .body(if title.is_empty() { "세션" } else { &title })
-                    .show();
+                let focused = app
+                    .get_webview_window("main")
+                    .and_then(|w| w.is_focused().ok())
+                    .unwrap_or(false);
+                if focused {
+                    trace(&id, &agent, "notify", "wait:skip:focused");
+                } else {
+                    let r = app
+                        .notification()
+                        .builder()
+                        .title("✋ 입력 필요")
+                        .body(if title.is_empty() { "세션" } else { &title })
+                        .show();
+                    trace(
+                        &id,
+                        &agent,
+                        "notify",
+                        &match r {
+                            Ok(()) => "wait:sent".to_string(),
+                            Err(e) => format!("wait:err:{}", e),
+                        },
+                    );
+                }
             }
             let _ = app.emit("pty-state", PtyStateEvent { id, working, waiting: wt, notify: false });
         }
@@ -852,6 +877,14 @@ mod tests {
 {aborted}
 ")).unwrap();
         assert!(!super::turn_in_progress(&f), "중단된 턴은 작업 중이 아니다");
+
+        // 턴 중간의 답글 뒤에 도구가 돌고 있으면 아직 작업 중이다
+        let said = r#"{"type":"event_msg","payload":{"type":"agent_message"}}"#;
+        let call = r#"{"type":"response_item","payload":{"type":"function_call"}}"#;
+        std::fs::write(&f, [started, said, call, tok].join("\n")).unwrap();
+        assert!(super::turn_in_progress(&f), "답글 뒤 도구 호출이면 작업 중");
+        std::fs::write(&f, [started, call, said].join("\n")).unwrap();
+        assert!(!super::turn_in_progress(&f), "task_* 없는 끝의 답글은 예전처럼 끝남");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

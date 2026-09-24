@@ -531,6 +531,31 @@ def loading_hint_until_the_first_frame(p):
 
 
 @check
+def status_line_flag_only_for_claude(p):
+    """상태줄을 켜 두면 codex 새 세션이 '--settings'를 몰라 아예 안 뜨던 것"""
+    p.load()
+    r = p.js("""(() => {
+      statusLineOn = true; statusLinePath = 'C:/x/settings.json';
+      return [composeCommand(null, {cmd: 'claude'}), composeCommand(null, {cmd: 'codex'})];
+    })()""")
+    assert "--settings" in r[0], f"클로드에 빠졌다: {r[0]!r}"
+    assert "--settings" not in r[1], f"codex에 붙었다: {r[1]!r}"
+
+
+@check
+def manual_update_check_reports_failure(p):
+    """확인이 실패했는데 '최신 버전입니다'라고 하던 것"""
+    p.load()
+    # 새 경로도 옛 경로도 실패 (오프라인)
+    p.js("window.__updateFails = true; "
+         "window.__TAURI__.updater = { check: () => Promise.reject('offline') }; "
+         "document.querySelector('#btn-check-update').click()")
+    time.sleep(0.3)
+    txt = p.js("document.querySelector('#update-state').textContent")
+    assert "실패" in txt, f"상태 {txt!r}"
+
+
+@check
 def turn_chart_groups_thousands_of_bars(p):
     """턴 7857개를 막대 하나씩 그리느라 화면이 멈추던 것"""
     p.load()

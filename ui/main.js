@@ -1853,7 +1853,8 @@ pushKeepAlive();
 function composeCommand(resumeId, prof, force) {
   const p = prof || currentProfile();
   let cmd = resumeId && (force || p.resume !== false) ? `${p.cmd} --resume ${safeId(resumeId)}` : p.cmd;
-  if (statusLineOn && statusLinePath) cmd += ` --settings "${statusLinePath}"`;
+  // --settings는 claude만 안다. codex는 모르는 인자라 아예 뜨지 않는다.
+  if (statusLineOn && statusLinePath && agentOf(p) === "claude") cmd += ` --settings "${statusLinePath}"`;
   return envPrefix(globalEnv) + cmd;
 }
 
@@ -1883,8 +1884,12 @@ $("#btn-check-update").onclick = async (e) => {
   el.textContent = "확인 중…";
   try {
     // 저장 전이라도 지금 켜 둔 채널로 본다 — 스위치를 켜고 바로 누르는 경우가 흔하다
-    const found = await checkUpdate($("#opt-beta").checked);
+    const found = await checkUpdate($("#opt-beta").checked, true);
     el.textContent = found ? `v${found} 있음 — 창 위 버튼으로 설치` : "최신 버전입니다";
+  } catch (err) {
+    // 오프라인이나 GitHub 오류를 "최신"으로 보이면 안 된다
+    el.textContent = "확인 실패 — 잠시 후 다시";
+    el.title = String(err);
   } finally {
     btn.disabled = false;
   }
@@ -2401,7 +2406,8 @@ window.addEventListener("blur", () => setZoomWheel(false));
 let betaUpdates = localStorage.getItem("betaUpdates") === "1";
 let offeredVersion = null; // 버튼에 띄운 판 — 버튼 글자에서 다시 읽지 않는다(베타 판에는 글자가 섞인다)
 let offeredBeta = false;   // 그 판을 어느 채널에서 찾았나
-async function checkUpdate(beta = betaUpdates) {
+// loud=true(설정의 "지금 확인")면 실패를 던진다. 자동 확인은 조용히 넘긴다.
+async function checkUpdate(beta = betaUpdates, loud = false) {
   const btn = $("#btn-update");
   if (!btn.classList.contains("hidden")) {
     // 이미 같은 채널의 버튼이 떠 있으면 더 물어볼 게 없다. 채널이 바뀌었으면 앞 제안을
@@ -2439,7 +2445,9 @@ async function checkUpdate(beta = betaUpdates) {
       }
     };
     return version;
-  } catch { /* 오프라인 등 — 조용히 무시 */ }
+  } catch (e) {
+    if (loud) throw e; // 자동 확인은 오프라인 등을 조용히 무시한다
+  }
   return null;
 }
 // 예전 확인 경로(JS 업데이트 플러그인). 정식 채널만 볼 수 있다 — 안전망으로만 쓴다.

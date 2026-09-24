@@ -223,9 +223,16 @@ pub(crate) fn trace_prev_path() -> Option<PathBuf> {
 
 /// 지금 파일을 prev로 민다. 비어 있거나 없으면 아무것도 안 한다 — 기록 없이 켰다
 /// 끈 실행이 쓸 만한 prev를 빈 파일로 덮으면 안 된다.
+/// 몇 줄 남기고 끝난 실행(업데이트 설치로 곧장 재시작, 로그오프 직전에 켠 경우 등)도
+/// prev를 덮지 않는다 — 실제로 이런 실행이 1시간짜리 기록을 밀어낸 적이 있다. 그런
+/// 기록은 버리고 prev를 그대로 둔다.
 fn rotate_trace(path: &std::path::Path) -> bool {
-    if fs::metadata(path).map(|m| m.len() == 0).unwrap_or(true) {
+    let len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if len == 0 {
         return false;
+    }
+    if len < 4096 {
+        return fs::remove_file(path).is_ok();
     }
     let Some(prev) = trace_prev_path() else { return false };
     let _ = fs::remove_file(&prev);
