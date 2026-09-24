@@ -91,6 +91,9 @@ const $ = (s) => document.querySelector(s);
 const listEl = $("#session-list");
 let kbId = null; // 사이드바에서 키보드로 고른 세션 (아래 키보드 탐색 참고)
 const entry_markers = new Map(); // 탭 id → "지금 이상해" 기록 함수 (Ctrl+Shift+M)
+// 닫은 탭의 마지막 실행 번호. 같은 세션을 곧바로 다시 열면 새 탭은 같은 id를 쓰는데,
+// 끈 프로세스가 마저 흘린 출력이 새 화면에 섞이지 않게 그 번호 이하를 버린다.
+const lastGen = new Map();
 const tabsEl = $("#tabs");
 const termArea = $("#term-area");
 const emptyState = $("#empty-state");
@@ -741,14 +744,26 @@ function scheduleWebglRebuild(why) {
 // ESC[200~로 시작해서, 조합 없이 온 "한 글자"와 구별된다(아래는 짧은 입력만 본다).
 const HANGUL = /^[ᄀ-ᇿ㄰-㆏가-힣]{1,2}$/;
 let imeRebindAt = 0;
+let imeOrphanAt = 0;
+let pasting = false; // 붙여넣기는 조합 없이 한글이 오는 정상 경로다
 function rebindIme(term) {
   const now = performance.now();
-  if (now - imeRebindAt < 3000) return; // 연달아 치는 동안 한 번이면 된다
+  // 한 번은 봐준다. 붙여넣기·음성 입력(Win+H)·자동화 도구도 조합 없이 글자를 넣는데,
+  // 그때 재연결하면 포커스가 움직여 받아쓰기가 끊긴다. 입력기가 떨어진 상태라면 계속
+  // 치게 되므로 1.5초 안에 두 번째가 곧 온다.
+  const second = now - imeOrphanAt < 1500;
+  imeOrphanAt = now;
+  if (!second || now - imeRebindAt < 3000) return; // 연달아 치는 동안 한 번이면 된다
   imeRebindAt = now;
-  invoke("rebind_ime")
-    .then(() => setTimeout(() => { try { term.focus(); } catch { /* 닫힌 탭 */ } }, 50))
-    .catch(() => {});
+  uiTrace("ime:rebind", `${Math.round(now)}`);
+  invoke("rebind_ime").catch(() => {});
+  // 포커스는 #focus-sink가 받아 곧바로 터미널로 돌려준다. 재연결은 메인 스레드에서
+  // 나중에 실행되므로 여기서 타이머로 돌려놓으면 순서가 어긋날 수 있다.
 }
+$("#focus-sink").addEventListener("focus", () => {
+  const t = terms.get(activeId);
+  if (t) { try { t.term.focus(); } catch { /* 닫힌 탭 */ } }
+});
 
 // 풀스크린 클로드는 "마우스가 움직일 때마다 알려 달라"(DEC 1003)를 켠다. 그러면 터미널
 // 위에서 마우스를 스치기만 해도 칸이 바뀔 때마다 신호가 하나씩 가고, 휠은 한 번 굴리는
@@ -759,40 +774,32 @@ function rebindIme(term) {
 const MOUSE_REPORT_GAP_MS = 50;
 function throttleMouseReports(term, container) {
   const reporting = () => term.modes.mouseTrackingMode !== "none";
-  // 휠은 버리면 안 된다 — 정밀 휠·터치패드는 작은 delta를 잘게 여러 번 보내서, 사이의
-  // 것을 버리면 스크롤이 몇 배 느려진다. 막아 둔 동안의 delta를 모아 두었다가 간격이
-  // 지나면 한 번에 보낸다. xterm은 delta를 줄 수로 바꿔 보고 하나를 만든다.
-  let lastWheel = 0;
+  // 휠: 클로드가 마우스 신호를 받는 중이면 xterm은 휠 이벤트 하나에 신호 하나를 보낸다
+  // (delta 크기는 안 본다). 그래서 모아서 한 번에 보내면 이동량이 사라진다 — 실측으로
+  // 12칸이 7칸이 됐다. 대신 "휠 한 칸에 신호 하나"로 맞춘다(Windows Terminal과 같다).
+  // 보통 마우스는 이벤트 하나가 한 칸(100px 또는 줄 단위)이라 그대로 가고, 터치패드·
+  // 부드러운 스크롤처럼 잘게 오는 것만 한 칸이 찰 때까지 모았다가 하나로 보낸다.
+  const WHEEL_NOTCH = 100;
   let wheelAcc = 0;
-  let wheelLast = null;
-  let wheelTimer = 0;
   term.attachCustomWheelEventHandler((ev) => {
-    if (ev.__deckPassed || !reporting()) return true;
-    const now = performance.now();
-    if (now - lastWheel >= MOUSE_REPORT_GAP_MS && !wheelTimer) {
-      lastWheel = now;
+    if (ev.__deckPassed || !reporting() || ev.deltaMode !== 0 || Math.abs(ev.deltaY) >= WHEEL_NOTCH) {
+      if (!ev.__deckPassed) wheelAcc = 0;
       return true;
     }
+    if (Math.sign(ev.deltaY) !== Math.sign(wheelAcc)) wheelAcc = 0; // 방향이 바뀌면 새로
     wheelAcc += ev.deltaY;
-    wheelLast = ev;
-    if (!wheelTimer) {
-      wheelTimer = setTimeout(() => {
-        wheelTimer = 0;
-        const p = wheelLast;
-        const dy = wheelAcc;
-        wheelAcc = 0;
-        wheelLast = null;
-        if (!p || !dy) return;
-        lastWheel = performance.now();
-        const again = new WheelEvent("wheel", {
-          deltaY: dy, deltaMode: p.deltaMode, clientX: p.clientX, clientY: p.clientY,
-          screenX: p.screenX, screenY: p.screenY, ctrlKey: p.ctrlKey, altKey: p.altKey,
-          shiftKey: p.shiftKey, bubbles: true, cancelable: true,
-        });
-        again.__deckPassed = true;
-        p.target.dispatchEvent(again);
-      }, Math.max(0, MOUSE_REPORT_GAP_MS - (now - lastWheel)));
-    }
+    if (Math.abs(wheelAcc) < WHEEL_NOTCH) return false;
+    // 한 칸이 찼다. 작은 원래 이벤트를 그대로 넘기면 xterm이 자기 기준(줄 수)으로 또
+    // 걸러서 신호가 안 나갈 수 있다 — 정확히 한 칸짜리를 새로 만들어 넘긴다.
+    const dir = Math.sign(wheelAcc);
+    wheelAcc -= dir * WHEEL_NOTCH;
+    const one = new WheelEvent("wheel", {
+      deltaY: dir * WHEEL_NOTCH, deltaMode: 0, clientX: ev.clientX, clientY: ev.clientY,
+      screenX: ev.screenX, screenY: ev.screenY, ctrlKey: ev.ctrlKey, altKey: ev.altKey,
+      shiftKey: ev.shiftKey, bubbles: true, cancelable: true,
+    });
+    one.__deckPassed = true;
+    ev.target.dispatchEvent(one);
     return false;
   });
   // 움직임은 xterm에 걸 고리가 없어 한 단계 위에서 가로챈다. 버튼을 누른 채 끄는
@@ -800,6 +807,12 @@ function throttleMouseReports(term, container) {
   let lastMove = 0;
   let pending = null;
   let timer = 0;
+  // 누르거나 터미널을 벗어나면 늦게 보낼 움직임을 버린다. 안 그러면 방금 멈춘 자리의
+  // 움직임이 클릭의 누르기와 떼기 사이에 끼어 "클릭 도중 버튼이 떨어졌다"로 보인다
+  // (실측: 이동 → 누름 → 옛 좌표의 움직임 → 뗌). 누르기는 자기 좌표를 싣고 간다.
+  const dropPending = () => { clearTimeout(timer); timer = 0; pending = null; };
+  container.addEventListener("mousedown", dropPending, true);
+  container.addEventListener("mouseleave", dropPending, true);
   container.addEventListener("mousemove", (ev) => {
     if (ev.__deckPassed || ev.buttons || !reporting()) return;
     const now = performance.now();
@@ -893,7 +906,7 @@ function makeTerm(id, title, cwd) {
     // 따로 확정되며, 가끔 같은 글자가 두 번 온다. 다른 창에 갔다 오면 풀리는 상태라
     // 앱이 그 재연결을 대신 한다. 그 사이 같은 글자가 거의 동시에 또 오면 버린다
     // (사람이 같은 글자를 50ms 안에 두 번 칠 수는 없다).
-    if (HANGUL.test(d) && now - lastComposing > 1000) {
+    if (!pasting && HANGUL.test(d) && now - lastComposing > 1000) {
       if (d === lastOrphan.data && now - lastOrphan.at < 50) {
         uiTrace("ime:orphan-dup", `${Math.round(now)}|${id}|${JSON.stringify(d)}`);
         return;
@@ -966,7 +979,11 @@ function makeTerm(id, title, cwd) {
     } catch {
       try { text = await navigator.clipboard.readText(); } catch { /* 클립보드 접근 실패 */ }
     }
-    if (text) term.paste(text);
+    if (text) {
+      // paste는 onData를 곧바로(동기로) 부른다 — 그동안만 입력기 검사를 끈다
+      pasting = true;
+      try { term.paste(text); } finally { pasting = false; }
+    }
   };
   const copySelection = () => {
     const sel = term.getSelection();
@@ -1004,6 +1021,7 @@ function makeTerm(id, title, cwd) {
     }
   });
 
+  if (lastGen.has(id)) entry.deadGen = lastGen.get(id);
   terms.set(id, entry);
   tabOrder.push(id);
   return entry;
@@ -1101,8 +1119,14 @@ async function openSession(meta, focus = true, opts = {}) {
 // 세션 열기·새 세션·재시작이 모두 이 경로를 쓴다.
 async function spawnInto(id, t, failLabel) {
   try {
+    // 새로 뜨는 프로세스는 아직 아무 상태도 알리지 않았다. 전 실행이 "작업 중"이나
+    // "입력 필요"에서 끝났으면 그 표시가 남아, 한가해도 영영 작업 중으로 보였다.
+    t.busy = false;
+    t.waiting = false;
+    t.attention = false;
     const gen = await invoke("spawn_pty", {
       id, cwd: t.cwd, command: t.spawnCommand || "claude", file: t.file || null, title: t.title,
+      sessionId: t.sessionId || null,
       cols: t.term.cols, rows: t.term.rows,
     });
     if (typeof gen === "number") t.gen = gen;
@@ -1225,7 +1249,7 @@ function adoptFor(meta) {
     : commandFor(meta).cmd;
   // 완료 판정을 이 세션의 상태·기록 파일로 하게 한다 (그전에는 출력 밀도 추정뿐이다)
   detach("bindSession", invoke("bind_session", {
-    id: pick, sessionId: meta.session_id, file: meta.file || "",
+    id: pick, sessionId: meta.session_id, file: meta.file || "", title: t.title || null,
   }));
   saveOpenTabs();
   renderTabs();
@@ -1374,6 +1398,7 @@ async function closeTab(id) {
   t.disposed = true;
   try { t.term.dispose(); } catch (err) { reportFatal(`term.dispose: ${err && err.stack || err}`); }
   t.container.remove();
+  if (t.gen != null) lastGen.set(id, t.gen);
   terms.delete(id);
   entry_markers.delete(id);
   tabOrder = tabOrder.filter((x) => x !== id);

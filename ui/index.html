@@ -8,6 +8,9 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- 입력기 재연결(rebind_ime)은 포커스를 WebView의 첫 요소로 옮긴다. 버튼이 첫 요소면
+       그 틈에 친 스페이스·엔터가 버튼을 누른다. 여기가 받고 곧바로 터미널로 돌려준다. -->
+  <div id="focus-sink" tabindex="0" aria-hidden="true"></div>
   <div id="app">
     <!-- 사이드바 -->
     <aside id="sidebar">

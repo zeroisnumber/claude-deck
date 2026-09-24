@@ -207,29 +207,23 @@ pub(crate) fn turn_state(file: &std::path::Path) -> Option<bool> {
 ///   Ctrl+Y(0x19)  원문 복원
 ///   Backspace(0x7f)  위에서 넣은 스페이스 제거
 pub(crate) fn send_keepalive(app: AppHandle, id: String, agent: String, message: String, draft: bool) {
-    std::thread::spawn(move || {
-        let write = |bytes: &[u8]| {
-            let state = app.state::<PtyState>();
-            let map = state.0.lock().unwrap_or_else(|e| e.into_inner());
-            match map.get(&id) {
-                Some(p) => p.input.send(bytes.to_vec()).is_ok(),
-                None => false, // 탭이 닫혔다
-            }
-        };
-        // 스페이스 → Ctrl+U 로 한 줄을 kill ring에 옮긴다. 스페이스를 먼저 넣는 건
-        // 입력이 비어 있어도 kill ring에 이번 내용이 확실히 들어가게 하고, 빈 프롬프트에서
-        // Ctrl+U가 다른 동작을 하는 것도 막기 위해서다. 여러 줄 draft는 애초에 보내지
-        // 않으므로(keepalive_pass) 한 번이면 충분하다.
-        if !write(&[b' ', 0x15]) {
-            return;
-        }
-        if !write(format!("{}\r", message).as_bytes()) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(KEEPALIVE_RESTORE_DELAY_MS));
-        write(&[0x19, 0x7f]);
-        trace(&id, &agent, "keepalive", &format!("{} (draft={})", message, draft));
-    });
+    // 세 단계를 한 번에 쓰기 스레드에 넘긴다. 순서와 사이의 기다림은 그 스레드가 지킨다.
+    // 스페이스 → Ctrl+U 로 한 줄을 kill ring에 옮긴다. 스페이스를 먼저 넣는 건 입력이
+    // 비어 있어도 kill ring에 이번 내용이 확실히 들어가게 하고, 빈 프롬프트에서 Ctrl+U가
+    // 다른 동작을 하는 것도 막기 위해서다. 여러 줄 draft는 애초에 보내지 않으므로
+    // (keepalive_candidates) 한 번이면 충분하다.
+    let state = app.state::<PtyState>();
+    let map = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(p) = map.get(&id) else { return }; // 탭이 닫혔다
+    let jobs = [
+        PtyInput::Bytes(vec![b' ', 0x15]),
+        PtyInput::Bytes(format!("{}\r", message).into_bytes()),
+        PtyInput::Pause(std::time::Duration::from_millis(KEEPALIVE_RESTORE_DELAY_MS)),
+        PtyInput::Bytes(vec![0x19, 0x7f]),
+    ];
+    let ok = jobs.into_iter().all(|j| p.input.send(j).is_ok());
+    drop(map);
+    trace(&id, &agent, "keepalive", &format!("{} (draft={}{})", message, draft, if ok { "" } else { ", 실패" }));
 }
 
 /// 남은 캐시 TTL(초)과 티어. 세션 파일에서 직접 읽으므로 프런트 폴링 상태와 무관하다.
@@ -345,10 +339,14 @@ pub(crate) fn note_draft(a: &mut Activity, bytes: &[u8]) {
 /// 임시 id로 뜬 탭이 어떤 세션이 됐는지 알려준다. 상태 파일과 기록 파일을 그때부터
 /// 그 세션 것으로 읽는다.
 #[tauri::command(async)]
-pub(crate) fn bind_session(id: String, session_id: String, file: String) {
+pub(crate) fn bind_session(id: String, session_id: String, file: String, title: Option<String>) {
     let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
     let Some(a) = act.get_mut(&id) else { return };
     a.session_id = Some(session_id);
+    // 새 세션 탭은 "프로젝트 · 새 세션"으로 떠 있다가 이름을 알게 된다 — 알림도 그 이름으로
+    if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+        a.title = t;
+    }
     let f = file.trim();
     if !f.is_empty() {
         a.file = Some(PathBuf::from(f));
@@ -781,7 +779,7 @@ mod tests {
         act.insert("new-1".to_string(), Activity { agent: "claude".into(), ..blank_activity() });
         drop(act);
 
-        bind_session("new-1".into(), "sess-9".into(), "C:/tmp/sess-9.jsonl".into());
+        bind_session("new-1".into(), "sess-9".into(), "C:/tmp/sess-9.jsonl".into(), None);
 
         let act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
         let a = act.get("new-1").expect("항목이 남아 있어야 한다");

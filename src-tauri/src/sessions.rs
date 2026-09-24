@@ -387,7 +387,9 @@ pub(crate) fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
                     meta.session_id = id.to_string();
                 }
                 if let Some(c) = obj["payload"]["cwd"].as_str() {
-                    meta.cwd = c.to_string();
+                    // 사용량 쪽(codex_entries_of_file)과 같게 \?\ 접두사를 뗀다. 한쪽만 떼면
+                    // 새 codex 탭이 자기 세션과 폴더가 달라 보여 짝을 못 찾는다.
+                    meta.cwd = strip_verbatim(c);
                 }
             }
             "event_msg" => match obj["payload"]["type"].as_str().unwrap_or("") {

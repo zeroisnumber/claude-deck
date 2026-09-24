@@ -1357,3 +1357,6 @@ kbd {
 .agent-state.ok { color: var(--text-faint); }
 .agent-state.new { color: var(--amber); }
 .agent-state.dim { color: var(--text-faint); }
+
+/* 입력기 재연결 때 포커스를 잠깐 받는 자리 — 보이지도 차지하지도 않는다 */
+#focus-sink { position: fixed; width: 0; height: 0; overflow: hidden; outline: none; }

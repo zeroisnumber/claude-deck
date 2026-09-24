@@ -11,7 +11,7 @@ pub(crate) struct PtyInstance {
     /// 쥔 채 메인 스레드에서 PTY에 직접 썼다 — 한 탭의 입력 통로가 막히면(에이전트가
     /// 입력을 안 읽는 동안 큰 붙여넣기) 창 전체와 다른 탭 입력이 같이 멈췄다.
     /// 스레드 하나가 받은 순서대로 쓰므로 키 순서는 그대로다.
-    pub(crate) input: std::sync::mpsc::Sender<Vec<u8>>,
+    pub(crate) input: std::sync::mpsc::Sender<PtyInput>,
     pub(crate) killer: Box<dyn ChildKiller + Send + Sync>,
     /// 트레이스 라벨 (claude/codex/gemini) — write_pty에서 입력 이벤트를 찍을 때 씀
     pub(crate) agent: String,
@@ -21,6 +21,14 @@ pub(crate) struct PtyInstance {
 }
 
 pub(crate) static PTY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 쓰기 스레드가 받는 일. 기다림도 쓰기 스레드가 한다 — 보내는 쪽에서 재면 "넘긴
+/// 시각"부터 세게 되어, 쓰기가 밀렸을 때 캐시 유지 핑의 세 단계(치우기·보내기·되돌리기)가
+/// 한꺼번에 들어가 되돌리기가 입력창이 비기 전에 도착한다.
+pub(crate) enum PtyInput {
+    Bytes(Vec<u8>),
+    Pause(std::time::Duration),
+}
 
 /// 프로세스 종료 처리 — 이 세대가 아직 유효할 때만 맵에서 지우고 이벤트를 보낸다.
 /// (kill_pty로 이미 정리됐거나 재시작된 경우에는 아무것도 하지 않음)
@@ -284,6 +292,9 @@ pub(crate) fn spawn_pty(
     file: Option<String>,
     // 알림에 쓸 탭 제목
     title: Option<String>,
+    // 새 세션 탭이 나중에 알게 된 진짜 세션 id. 재시작·다시 열기 때 다시 넘겨야 상태
+    // 파일·세션 인수인계 감지가 이어진다(탭 id는 "new-…"로 그대로다).
+    session_id: Option<String>,
     cols: u16,
     rows: u16,
 ) -> Result<u64, String> {
@@ -320,11 +331,16 @@ pub(crate) fn spawn_pty(
     let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let killer = child.clone_killer();
     // 쓰기 스레드 — 보내는 쪽(PtyInstance)이 사라지면 recv가 끝나 스스로 멈춘다
-    let (input, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (input, input_rx) = std::sync::mpsc::channel::<PtyInput>();
     std::thread::spawn(move || {
-        while let Ok(bytes) = input_rx.recv() {
-            if writer.write_all(&bytes).is_err() {
-                break; // 프로세스가 끝났다
+        while let Ok(job) = input_rx.recv() {
+            match job {
+                PtyInput::Bytes(bytes) => {
+                    if writer.write_all(&bytes).is_err() {
+                        break; // 프로세스가 끝났다
+                    }
+                }
+                PtyInput::Pause(d) => std::thread::sleep(d),
             }
         }
     });
@@ -336,7 +352,7 @@ pub(crate) fn spawn_pty(
     ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).insert(
         id.clone(),
         Activity {
-            session_id: None,
+            session_id: session_id.filter(|s| !s.trim().is_empty()),
             last_input: None,
             last_out: None,
             burst_start: None,
@@ -451,7 +467,7 @@ pub(crate) fn write_pty(state: State<PtyState>, id: String, data: String) -> Res
             note_draft(a, data.as_bytes());
         }
         // 넘기기만 한다 — 쓰기가 막혀도 여기(메인 스레드, 전역 잠금)는 기다리지 않는다
-        let _ = p.input.send(data.into_bytes());
+        let _ = p.input.send(PtyInput::Bytes(data.into_bytes()));
     }
     Ok(())
 }

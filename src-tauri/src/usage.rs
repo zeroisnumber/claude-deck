@@ -259,6 +259,27 @@ pub(crate) fn session_turns(file: String) -> Result<Vec<TurnRow>, String> {
     Ok(turns_from_text(&text, &ping))
 }
 
+/// codex 도구 호출에서 보여 줄 인자. 객체의 첫 문자열 값을 집으면 키가 알파벳순이라
+/// shell 호출은 명령(배열) 대신 작업 폴더(workdir)가 나왔다. 명령을 먼저 본다.
+pub(crate) fn codex_tool_arg(v: &serde_json::Value) -> String {
+    for k in ["command", "cmd", "path", "file_path", "query", "url", "prompt"] {
+        match &v[k] {
+            serde_json::Value::String(s) if !s.is_empty() => return s.clone(),
+            serde_json::Value::Array(a) if !a.is_empty() => {
+                let parts: Vec<&str> = a.iter().filter_map(|x| x.as_str()).collect();
+                // ["powershell", "-Command", "실제 명령"] 같은 모양은 마지막이 명령이다
+                if let Some(last) = parts.last() {
+                    return if parts.len() >= 3 { last.to_string() } else { parts.join(" ") };
+                }
+            }
+            _ => {}
+        }
+    }
+    v.as_object()
+        .and_then(|o| o.values().find_map(|x| x.as_str()).map(str::to_string))
+        .unwrap_or_default()
+}
+
 /// Codex rollout을 클로드와 같은 모양의 턴 목록으로. 스키마가 전혀 달라서 별도 파서다.
 ///
 /// - 토큰은 total_token_usage의 차분 (중복 이벤트가 있어 last_token_usage 합산은 부정확)
@@ -290,10 +311,7 @@ pub(crate) fn codex_turns_from_text(text: &str, ping: &str) -> Vec<TurnRow> {
                 let args = payload["arguments"].as_str().unwrap_or("");
                 let arg = serde_json::from_str::<serde_json::Value>(args)
                     .ok()
-                    .and_then(|v| {
-                        v.as_object()
-                            .and_then(|o| o.values().find_map(|x| x.as_str()).map(str::to_string))
-                    })
+                    .map(|v| codex_tool_arg(&v))
                     .unwrap_or_default();
                 let arg: String = arg.split('\n').next().unwrap_or("").chars().take(48).collect();
                 tools.push(if arg.is_empty() { name.to_string() } else { format!("{name} {arg}") });
@@ -861,6 +879,17 @@ pub(crate) fn subscription_state(force: bool) -> Option<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    /// codex shell 호출은 명령을 보여야지 작업 폴더를 보이면 안 된다
+    #[test]
+    fn codex_tool_arg_prefers_the_command() {
+        let v = serde_json::json!({"command": ["powershell", "-Command", "cargo test"], "workdir": "C:/x"});
+        assert_eq!(codex_tool_arg(&v), "cargo test");
+        let v = serde_json::json!({"command": ["ls", "-la"], "workdir": "C:/x"});
+        assert_eq!(codex_tool_arg(&v), "ls -la");
+        let v = serde_json::json!({"workdir": "C:/x", "path": "src/a.rs"});
+        assert_eq!(codex_tool_arg(&v), "src/a.rs");
+    }
+
     /// 이 기기의 전체 사용량을 실제로 집계해 본다. 걸린 시간과 합계.
     /// `cargo test -- --ignored real_usage_totals --nocapture`
     #[test]
