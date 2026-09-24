@@ -131,7 +131,7 @@ function renderDash() {
     [...byProj.entries()]
       .sort((a, b) => b[1].cost - a[1].cost)
       .slice(0, 12)
-      .map(([p, v]) => `<tr><td>${escapeHtml(String(p))}</td><td>${v.req.toLocaleString()}</td><td>${v.unpriced ? "—" : fmtCost(v.cost)}</td></tr>`)
+      .map(([p, v]) => `<tr><td>${escapeHtml(String(p))}</td><td>${v.req.toLocaleString()}</td><td>${v.unpriced ? `${fmtCost(v.cost)} <span class="dim" title="Codex처럼 단가를 모르는 사용량은 빠진 금액">(클로드만)</span>` : fmtCost(v.cost)}</td></tr>`)
       .join("") || `<tr><td colspan="3">데이터 없음</td></tr>`,
   );
 }

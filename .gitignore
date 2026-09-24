@@ -6,3 +6,4 @@ src-tauri/gen/
 *.stackdump
 /claude-deck.exe
 __pycache__/
+.claude/worktrees/

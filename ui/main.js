@@ -249,6 +249,8 @@ function sessionRow(s, child) {
   const fork = s.parent_id && !title.includes("⑂") ? `<span class="si-fork" title="포크된 세션">⑂</span>` : "";
 
   const st = sessionStatus(s, t);
+  // 사람의 답을 기다리는 세션은 줄 전체로 드러낸다 (열린 탭이든 백그라운드 잡이든)
+  if ((t && t.waiting && !t.exited) || (!t && s.bg_running && s.bg_state === "blocked")) el.classList.add("wait");
   const unread = t && t.attention && !t.exited;
   const slot = st.cls ? `<span class="si-status ${st.cls}${unread ? " unread" : ""}" title="${unread ? "응답 완료 — 아직 안 봄" : st.label}"></span>` : "";
   const pin = pins.includes(s.session_id) ? PIN_SVG : "";
@@ -658,14 +660,16 @@ function statusLabel(t) {
 }
 
 // ---------- 완료 알림 (앱 내 토스트 + OS 알림) ----------
-function showToast(title, body, onClick) {
+// kind: "wait"(사람이 답해야 함 — 호박색, 저절로 사라지지 않음) · "done"(완료 — 초록) · 없음
+function showToast(title, body, onClick, kind) {
   const el = document.createElement("div");
-  el.className = "toast";
+  el.className = "toast" + (kind ? " " + kind : "");
   el.innerHTML = `<div class="toast-title"></div><div class="toast-body"></div>`;
   el.querySelector(".toast-title").textContent = title;
   el.querySelector(".toast-body").textContent = body;
   el.onclick = () => { el.remove(); if (onClick) onClick(); };
   $("#toasts").appendChild(el);
+  if (kind === "wait") return; // 답을 기다리는 알림은 볼 때까지 남긴다
   setTimeout(() => {
     el.classList.add("fade");
     setTimeout(() => el.remove(), 400);
@@ -676,7 +680,7 @@ function notifyDone(id, t) {
   // 활성 탭 + 창 포커스 상태면 사용자가 이미 보고 있음 — 알림 불필요
   if (id === activeId && document.hasFocus()) return;
   t.attention = true;
-  showToast("✻ 응답 완료", t.title, () => activate(id));
+  showToast("✻ 응답 완료", t.title, () => activate(id), "done");
   // OS 알림은 Rust에서 보낸다. 창이 최소화되면 WebView2가 렌더러를 재워서
   // 이 코드 자체가 늦게 도는데, 알림이 필요한 순간이 정확히 그때이기 때문이다.
 }
@@ -698,7 +702,7 @@ listen("pty-state", (ev) => {
   // 권한 확인·질문으로 멈춘 세션: 보고 있지 않으면 완료 알림과 같은 방식으로 알린다
   if (t.waiting && !wasWaiting && !(id === activeId && document.hasFocus())) {
     t.attention = true;
-    showToast("✋ 입력 필요", t.title, () => activate(id));
+    showToast("✋ 입력 필요", t.title, () => activate(id), "wait");
   }
   renderTabs();
   renderSidebar();
@@ -1477,7 +1481,8 @@ function renderTabs() {
     const t = terms.get(id);
     if (!t) continue;
     const el = document.createElement("div");
-    el.className = "tab" + (id === activeId ? " active" : "") + (t.exited ? " exited" : "") + (t.attention ? " attention" : "");
+    el.className = "tab" + (id === activeId ? " active" : "") + (t.exited ? " exited" : "") +
+      (t.waiting && !t.exited ? " wait" : t.attention ? " attention" : "");
     el.dataset.id = id;
     const showBadge = t.profile && t.profile.cmd !== "claude";
     const ctxBar = t.ctxPct != null && !t.exited
@@ -1499,6 +1504,14 @@ function renderTabs() {
     if (rbtn) rbtn.onclick = (e) => { e.stopPropagation(); restartTab(id); };
     makeTabDraggable(el);
     tabsEl.appendChild(el);
+  }
+  // 칩이 먼저 줄어들고(CSS), 그래도 넘치면 보고 있지 않은 탭의 칩을 뺀다
+  tabsEl.classList.remove("compact");
+  if (tabsEl.scrollWidth > tabsEl.clientWidth) tabsEl.classList.add("compact");
+  // 한두 글자만 남은 칩("s", "ti")은 뜻이 없고 어색하다 — 잘리면 아예 숨긴다
+  for (const chip of tabsEl.querySelectorAll(".tab-proj")) {
+    chip.classList.remove("clipped");
+    if (chip.scrollWidth > chip.clientWidth + 1) chip.classList.add("clipped");
   }
 }
 
@@ -1619,7 +1632,7 @@ listen("session-moved", (ev) => {
   const bar = document.createElement("div");
   bar.className = "term-moved";
   bar.innerHTML = `<span class="moved-text"></span>
-    <button class="btn-ghost btn-sm moved-reopen">다시 열기</button>
+    <button class="btn-accent btn-sm moved-reopen">다시 열기</button>
     <button class="btn-ghost btn-sm moved-kill">그 프로세스도 종료</button>
     <button class="btn-ghost btn-sm moved-hide">닫기</button>`;
   bar.querySelector(".moved-text").innerHTML =
@@ -1631,7 +1644,7 @@ listen("session-moved", (ev) => {
   t.container.appendChild(bar);
   t.movedBar = bar;
   t.movedPid = to;
-  showToast("⚠ 세션이 옮겨갔습니다", `${t.title} — 탭에서 다시 열 수 있습니다`, () => activate(id));
+  showToast("⚠ 세션이 옮겨갔습니다", `${t.title} — 탭에서 다시 열 수 있습니다`, () => activate(id), "wait");
 });
 
 // 우리 쪽 프로세스를 정리하고 같은 세션을 다시 띄운다. 대화는 --resume으로 이어진다.
