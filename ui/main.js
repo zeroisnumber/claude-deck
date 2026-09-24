@@ -1905,6 +1905,44 @@ $("#btn-settings").onclick = () => {
   syncKaFields();
   $("#lmodal-backdrop").classList.remove("hidden");
 };
+// 새 판에 뭐가 바뀌었는지 — 설치판 다음부터 최신판까지를 버전별로 접어 보인다(최신만
+// 펼침). 한 판이 수만 자인 경우도 있어 칸 안에서 스크롤한다. 누를 때만 받아 온다.
+function changelogButton(a, box, row) {
+  const b = document.createElement("button");
+  b.className = "btn-ghost btn-sm";
+  b.textContent = "변경 내용";
+  b.onclick = async () => {
+    const open = row.nextElementSibling && row.nextElementSibling.classList.contains("agent-changes");
+    if (open) { row.nextElementSibling.remove(); b.textContent = "변경 내용"; return; }
+    const panel = document.createElement("div");
+    panel.className = "agent-changes";
+    panel.textContent = "받는 중…";
+    row.after(panel);
+    b.textContent = "접기";
+    let list;
+    try {
+      list = await invoke("agent_changelog", { name: a.name, from: a.installed, to: a.latest });
+    } catch (e) {
+      panel.textContent = "받지 못했습니다: " + e;
+      return;
+    }
+    if (!Array.isArray(list) || !list.length) { panel.textContent = "공개된 변경 내용이 없습니다"; return; }
+    panel.textContent = "";
+    list.forEach((c, i) => {
+      const d = document.createElement("details");
+      if (i === 0) d.open = true;
+      const sum = document.createElement("summary");
+      sum.textContent = "v" + c.version;
+      const body = document.createElement("div");
+      body.className = "agent-changes-body";
+      body.innerHTML = mdToHtml(c.notes || "(설명 없음)"); // mdToHtml이 먼저 이스케이프한다
+      d.append(sum, body);
+      panel.appendChild(d);
+    });
+  };
+  return b;
+}
+
 // 설정을 열 때마다 새로 본다. 에이전트마다 --version 한 번과 npm 레지스트리 한 번이라
 // 1~2초 걸리므로 창은 먼저 열고 나중에 채운다.
 async function loadAgentVersions() {
@@ -1937,6 +1975,7 @@ async function loadAgentVersions() {
       } else if (a.update_available) {
         state.textContent = `${a.latest} 있음` + (a.channel !== "latest" ? ` (${a.channel})` : "");
         state.className = "agent-state new";
+        row.appendChild(changelogButton(a, box, row));
         if (a.can_update) {
           const b = document.createElement("button");
           b.className = "btn-ghost btn-sm";

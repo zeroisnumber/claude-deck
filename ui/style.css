@@ -1411,3 +1411,22 @@ kbd {
 /* 표 안의 곁말 — "(클로드만)"처럼 금액을 보충하는 설명 */
 .dash-table .dim { color: var(--text-faint); font-size: 10.5px; }
 .tab-proj.clipped { display: none; }
+
+/* 에이전트 버전 카드 — 변경 내용. 한 판이 수만 자일 수 있어 칸 안에서 스크롤한다 */
+.agent-changes {
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 2px 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: text;
+}
+.agent-changes details + details { margin-top: 6px; }
+.agent-changes summary { cursor: pointer; color: var(--text); font-weight: 600; }
+.agent-changes-body { margin: 4px 0 0 12px; line-height: 1.55; }
+.agent-changes-body ul { padding-left: 16px; }
+.agent-row { flex-wrap: wrap; }

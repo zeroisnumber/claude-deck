@@ -190,6 +190,105 @@ pub(crate) fn agent_versions() -> Vec<AgentVersion> {
     handles.into_iter().filter_map(|h| h.join().ok()).collect()
 }
 
+#[derive(Clone, Serialize)]
+pub(crate) struct ChangeEntry {
+    pub(crate) version: String,
+    /// 마크다운 그대로 — 화면이 이스케이프한 뒤 그린다
+    pub(crate) notes: String,
+}
+
+fn http_get(url: &str) -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        // GitHub API는 User-Agent가 없으면 거절한다
+        .user_agent("cli-deck")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(url).send().map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{} — {url}", resp.status()));
+    }
+    resp.text().map_err(|e| e.to_string())
+}
+
+/// 설치판 다음부터 최신판까지(둘 다 포함하지 않는 쪽: from < v <= to).
+fn in_range(v: &str, from: &str, to: &str) -> bool {
+    is_newer(v, from) && !is_newer(v, to)
+}
+
+/// 클로드: 저장소의 CHANGELOG.md가 "## 2.1.281" 제목으로 버전을 가른다.
+fn claude_changes(from: &str, to: &str) -> Result<Vec<ChangeEntry>, String> {
+    let text = http_get("https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md")?;
+    let mut out = Vec::new();
+    for sec in text.split("\n## ").skip(1) {
+        let (head, body) = sec.split_once('\n').unwrap_or((sec, ""));
+        let Some(v) = parse_version(head) else { continue };
+        if in_range(&v, from, to) {
+            out.push(ChangeEntry { version: v, notes: body.trim().to_string() });
+        }
+    }
+    Ok(out)
+}
+
+/// codex·gemini: GitHub 릴리스 설명. 태그에 붙은 접두사(rust-v, v)는 떼고, 미리보기·
+/// 알파·nightly는 건너뛴다(앱이 비교하는 채널은 latest다).
+fn github_changes(repo: &str, from: &str, to: &str) -> Result<Vec<ChangeEntry>, String> {
+    let mut out = Vec::new();
+    // codex는 알파를 하루에도 여러 번 내서 한 쪽(100개)이 거의 알파다. 설치판보다 오래된
+    // 정식판을 만날 때까지 세 쪽까지 넘긴다.
+    for page in 1..=3 {
+        let text = http_get(&format!("https://api.github.com/repos/{repo}/releases?per_page=100&page={page}"))?;
+        let list: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let items = list.as_array().cloned().unwrap_or_default();
+        let mut passed_from = false;
+        for r in &items {
+            if r["prerelease"] == true || r["draft"] == true {
+                continue;
+            }
+            // 접두사(codex의 "rust-v", gemini의 "v")를 뗀 뒤에 앞판(-preview, -alpha)을 가린다
+            let tag = r["tag_name"].as_str().unwrap_or("");
+            let bare = tag.trim_start_matches("rust-").trim_start_matches('v');
+            if bare.contains('-') {
+                continue;
+            }
+            let Some(v) = parse_version(bare) else { continue };
+            if !is_newer(&v, from) {
+                passed_from = true;
+            }
+            if in_range(&v, from, to) {
+                let notes = r["body"].as_str().unwrap_or("").trim().to_string();
+                out.push(ChangeEntry { version: v, notes });
+            }
+        }
+        if passed_from || items.len() < 100 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// 설치판(from)과 최신판(to) 사이의 변경 내용, 새 판부터. 네트워크 호출이라 별도
+/// 스레드에서 한다(blocking reqwest를 tokio 작업 스레드에서 부르면 안 된다).
+/// 너무 많이 뒤처졌으면 최근 15개만.
+#[tauri::command(async)]
+pub(crate) fn agent_changelog(name: String, from: String, to: String) -> Result<Vec<ChangeEntry>, String> {
+    std::thread::spawn(move || {
+        let mut list = match name.as_str() {
+            "Claude Code" => claude_changes(&from, &to),
+            "Codex" => github_changes("openai/codex", &from, &to),
+            "Gemini" => github_changes("google-gemini/gemini-cli", &from, &to),
+            _ => Err(format!("모르는 에이전트: {name}")),
+        }?;
+        list.sort_by(|a, b| {
+            if is_newer(&a.version, &b.version) { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater }
+        });
+        list.truncate(15);
+        Ok(list)
+    })
+    .join()
+    .map_err(|_| "변경 내용을 읽다 멈췄습니다".to_string())?
+}
+
 /// 에이전트 CLI를 올린다. 클로드는 자체 명령(`claude update`), codex·gemini는 npm 전역
 /// 설치일 때만(agent_versions가 can_update로 알려 준다) `npm i -g <패키지>@latest`.
 /// 돌고 있는 세션은 그대로 두고 새로 여는 세션부터 새 판을 쓴다. 받는 데 시간이 걸려 5분까지 기다린다.
@@ -226,6 +325,30 @@ mod tests {
         assert_eq!(parse_version("0.52.0").as_deref(), Some("0.52.0"));
         assert_eq!(parse_version("v1.2.3").as_deref(), Some("1.2.3"));
         assert_eq!(parse_version("command not found"), None);
+    }
+
+    /// 실제 변경 내역을 받아 본다. `cargo test -- --ignored real_changelogs --nocapture`
+    #[test]
+    #[ignore]
+    fn real_changelogs() {
+        for (name, from, to) in [("Claude Code", "2.1.278", "2.1.281"), ("Codex", "0.153.4", "0.156.1"), ("Gemini", "0.52.0", "0.61.0")] {
+            match agent_changelog(name.into(), from.into(), to.into()) {
+                Ok(list) => {
+                    let vs: Vec<_> = list.iter().map(|e| format!("{}({}자)", e.version, e.notes.chars().count())).collect();
+                    eprintln!("{name}: {}", vs.join(" "));
+                }
+                Err(e) => eprintln!("{name}: 실패 {e}"),
+            }
+        }
+    }
+
+    /// 범위는 설치판 다음부터 최신판까지다
+    #[test]
+    fn changelog_range_excludes_installed_and_includes_latest() {
+        assert!(!in_range("2.1.278", "2.1.278", "2.1.281"));
+        assert!(in_range("2.1.279", "2.1.278", "2.1.281"));
+        assert!(in_range("2.1.281", "2.1.278", "2.1.281"));
+        assert!(!in_range("2.1.282", "2.1.278", "2.1.281"));
     }
 
     /// 이 기기에서 실제로 읽어 본다. `cargo test -- --ignored real_versions --nocapture`

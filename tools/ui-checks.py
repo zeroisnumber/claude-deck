@@ -772,13 +772,13 @@ def agent_versions_card_updates_what_the_app_can(p):
         r.querySelector('.agent-ver').textContent, r.querySelector('.agent-state').textContent,
         [...r.querySelectorAll('button')].map(b => b.textContent + '|' + b.title)])""")
     assert got == [
-        ["2.1.0", "2.2.0 있음", ["업데이트|"]],
-        ["0.9.0", "1.0.0 있음", ["업데이트|"]],
-        ["0.5.0", "0.6.0 있음", ["명령 복사|npm i -g @google/gemini-cli@latest"]],
+        ["2.1.0", "2.2.0 있음", ["변경 내용|", "업데이트|"]],
+        ["0.9.0", "1.0.0 있음", ["변경 내용|", "업데이트|"]],
+        ["0.5.0", "0.6.0 있음", ["변경 내용|", "명령 복사|npm i -g @google/gemini-cli@latest"]],
         ["—", "설치 안 됨", []],
         ["3.0.0", "최신", []],
     ], f"버전 카드 {got}"
-    p.js("window.__calls = []; document.querySelectorAll('#agent-versions .agent-row')[1].querySelector('button').click()")
+    p.js("window.__calls = []; [...document.querySelectorAll('#agent-versions .agent-row')[1].querySelectorAll('button')].find(b => b.textContent === '업데이트').click()")
     time.sleep(0.3)
     calls = p.js("window.__calls.map(c => [c[0], c[1] && c[1].name])")
     assert calls[:1] == [["update_agent", "Codex"]], f"업데이트 뒤 {calls}"
@@ -885,6 +885,28 @@ def rename_starts_from_the_shown_name_and_keeps_it_untouched(p):
     p.js("document.querySelector('.si-rename').blur()")
     time.sleep(0.2)
     assert p.js(f"JSON.parse(localStorage.getItem('aliases') || '{{}}')[{json.dumps(sid)}]") is None, "그대로 나갔는데 별칭이 생겼다"
+
+
+@check
+def agent_changelog_opens_newest_first_and_escapes(p):
+    """변경 내용: 설치판~최신판을 버전별로 접어 보이고 최신만 펼친다. 마크다운은 이스케이프한다."""
+    agents = [{"name": "Codex", "installed": "0.9.0", "latest": "1.1.0", "update_available": True,
+               "can_update": True, "channel": "latest", "update_cmd": "npm i -g @openai/codex@latest"}]
+    notes = [{"version": "1.1.0", "notes": "- **새 기능** <img src=x onerror=alert(1)>"},
+             {"version": "1.0.0", "notes": "- 고친 것"}]
+    p.load(replies={"agent_versions": agents, "agent_changelog": notes})
+    p.js("document.querySelector('#btn-settings').click()")
+    time.sleep(0.3)
+    p.js("[...document.querySelectorAll('#agent-versions button')].find(b => b.textContent === '변경 내용').click()")
+    time.sleep(0.3)
+    call = p.js("window.__calls.find(c => c[0] === 'agent_changelog')[1]")
+    assert call == {"name": "Codex", "from": "0.9.0", "to": "1.1.0"}, call
+    got = p.js("[...document.querySelectorAll('.agent-changes details')].map(d => [d.querySelector('summary').textContent, d.open])")
+    assert got == [["v1.1.0", True], ["v1.0.0", False]], got
+    assert not p.js("!!document.querySelector('.agent-changes img')"), "마크다운 속 태그가 그대로 들어갔다"
+    assert "새 기능" in p.js("document.querySelector('.agent-changes strong')?.textContent || ''"), "굵게가 안 그려졌다"
+    p.js("[...document.querySelectorAll('#agent-versions button')].find(b => b.textContent === '접기').click()")
+    assert not p.js("!!document.querySelector('.agent-changes')"), "접기가 안 된다"
 
 
 # ---------------------------------------------------------------- 실행
