@@ -872,6 +872,19 @@ def update_check_falls_back_to_the_old_path(p):
     assert p.js("checkUpdate(true)") is None, "베타 확인 실패에 정식 경로 결과를 내밀었다"
 
 
+@check
+def rename_starts_from_the_shown_name_and_keeps_it_untouched(p):
+    """이름 바꾸기가 클로드가 붙인 이름(title)을 건너뛰어 빈 칸으로 열리고, 그냥 나가면 덮어쓰던 버그"""
+    sess = fake_sessions(1, {0: {"title": "보스전 리팩터링", "summary": None, "first_prompt": "첫 질문"}})
+    p.load(sessions=sess)
+    sid = sess[0]["session_id"]
+    p.js(f"startRename(sessions[0], document.querySelector('.session-item'))")
+    assert p.js("document.querySelector('.si-rename').value") == "보스전 리팩터링", p.js("document.querySelector('.si-rename').value")
+    p.js("document.querySelector('.si-rename').blur()")
+    time.sleep(0.2)
+    assert p.js(f"JSON.parse(localStorage.getItem('aliases') || '{{}}')[{json.dumps(sid)}]") is None, "그대로 나갔는데 별칭이 생겼다"
+
+
 # ---------------------------------------------------------------- 실행
 
 def main():

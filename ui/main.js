@@ -461,7 +461,10 @@ function startRename(s, itemEl) {
   const span = itemEl.querySelector(".si-title-text");
   const input = document.createElement("input");
   input.className = "si-rename";
-  input.value = aliases[s.session_id] || s.summary || s.first_prompt || "";
+  // 보이는 이름 그대로로 시작한다 — 클로드가 붙인 이름(s.title)을 건너뛰면 칸이 비어 보이고,
+  // 뭔가 치고 나가면 그 이름을 덮어썼다.
+  const original = sessionTitle(s);
+  input.value = original;
   span.replaceWith(input);
   isRenaming = true; // 재렌더가 이 input을 지워버리지 않게 (20초 폴링이 있어 확정적으로 발생)
   input.focus();
@@ -471,8 +474,8 @@ function startRename(s, itemEl) {
     isRenaming = false;
     if (save) {
       const v = input.value.trim();
-      if (v) aliases[s.session_id] = v;
-      else delete aliases[s.session_id];
+      if (!v) delete aliases[s.session_id];
+      else if (v !== original) aliases[s.session_id] = v; // 그대로 두고 나가면 별칭을 만들지 않는다
       localStorage.setItem("aliases", JSON.stringify(aliases));
     }
     renderSidebar();
@@ -627,7 +630,7 @@ function schedulePreview(el, s) {
     if (token !== previewToken) return; // 응답을 기다리는 사이 다른 항목으로 이동함
     if (!pv || (!pv.last_text && !pv.recent.length && !s.first_prompt)) return;
     previewCard.innerHTML = `<div class="pv-title"></div><div class="pv-body"></div><div class="pv-meta"></div>`;
-    previewCard.querySelector(".pv-title").textContent = aliases[s.session_id] || s.summary || s.first_prompt || "";
+    previewCard.querySelector(".pv-title").textContent = sessionTitle(s);
     const body = previewCard.querySelector(".pv-body");
     if (pv.recent && pv.recent.length) {
       body.innerHTML = pv.recent
@@ -1913,6 +1916,7 @@ async function loadAgentVersions() {
     box.textContent = "확인하지 못했습니다: " + e;
     return;
   }
+  if (!Array.isArray(list)) list = []; // 응답 모양이 다르면 빈 카드로 멈추지 않게
   box.innerHTML = "";
   for (const a of list) {
     const row = document.createElement("div");
@@ -2209,6 +2213,7 @@ function handleShortcut(e) {
   if (e.shiftKey && e.code === "KeyM") {
     const mark = activeId && entry_markers.get(activeId);
     if (!traceOn) showToast("진단 기록이 꺼져 있습니다", "설정에서 켜야 남습니다");
+    else if (!mark) showToast("열린 탭이 없습니다", "탭에서 이상할 때 누르세요");
     else if (mark) { mark(); showToast("지금 화면을 기록했습니다", "언제 찍었는지 알려 주세요"); }
     return true;
   }

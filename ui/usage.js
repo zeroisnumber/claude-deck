@@ -136,15 +136,22 @@ function renderDash() {
   );
 }
 
+// 기간을 빠르게 바꾸면 늦게 온 옛 응답이 새 결과를 덮었다(전체가 켜져 있는데 오늘 것만).
+// 마지막으로 보낸 요청의 답만 그린다.
+let dashToken = 0;
 async function loadDash() {
+  const token = ++dashToken;
   $("#dash-tiles").innerHTML = `<div class="tile"><div class="tile-v">…</div><div class="tile-l">집계 중</div></div>`;
+  let rows;
   try {
     // dashDays가 0이면 전체 기간. Rust는 파일 mtime으로 먼저 거르므로
     // 넓은 범위를 고르면 다시 불러와야 오래된 파일이 들어온다.
-    dashRows = await invoke("usage_stats", { days: dashDays || 0 });
+    rows = await invoke("usage_stats", { days: dashDays || 0 });
   } catch {
-    dashRows = [];
+    rows = [];
   }
+  if (token !== dashToken) return;
+  dashRows = Array.isArray(rows) ? rows : [];
   renderDash();
 }
 
