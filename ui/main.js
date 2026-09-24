@@ -90,6 +90,7 @@ try {
 const $ = (s) => document.querySelector(s);
 const listEl = $("#session-list");
 let kbId = null; // 사이드바에서 키보드로 고른 세션 (아래 키보드 탐색 참고)
+const entry_markers = new Map(); // 탭 id → "지금 이상해" 기록 함수 (Ctrl+Shift+M)
 const tabsEl = $("#tabs");
 const termArea = $("#term-area");
 const emptyState = $("#empty-state");
@@ -899,6 +900,30 @@ function makeTerm(id, title, cwd) {
     if (!traceOn || performance.now() - lastComposing >= 500) return;
     imeTrace("input", `${JSON.stringify(e.data || "")} composing=${e.isComposing} ${e.inputType || ""}`);
   });
+  // 백스페이스·엔터를 실제로 몇 번 눌렀는지. 조합을 백스페이스로 지운 뒤 0.03~0.19초
+  // 만에 DEL이 한 번 더 나간 게 13번 중 7번 있었다 — 두 번 누른 건지, 한 번 눌렀는데
+  // 두 번 처리된 건지는 누른 횟수를 봐야 갈린다. 조합 직후에만 남긴다.
+  term.textarea.addEventListener("keydown", (e) => {
+    if (!traceOn || performance.now() - lastComposing >= 1500) return;
+    if (e.key !== "Backspace" && e.key !== "Enter" && e.keyCode !== 229) return;
+    imeTrace("key", `${e.key} code=${e.keyCode} composing=${e.isComposing} repeat=${e.repeat}`);
+  }, true);
+  entry_markers.set(id, () => {
+    // "지금 이상해" — 그 순간 화면에 실제로 그려진 입력 줄과 조합창 상태를 남긴다.
+    // 클로드가 "두두"를 그렸는지(두 번 받았거나 두 번 그렸다), 조합창이 겹쳐 보인
+    // 것인지가 여기서 갈린다.
+    const b = term.buffer.active;
+    const lines = [];
+    for (let y = Math.max(0, b.cursorY - 2); y <= Math.min(term.rows - 1, b.cursorY + 1); y++) {
+      const line = b.getLine(b.viewportY + y);
+      lines.push(`${y === b.cursorY ? ">" : " "}${line ? line.translateToString(true) : ""}`);
+    }
+    const comp = term.element.querySelector(".composition-view");
+    uiTrace("mark", `${Math.round(performance.now())}|${id}|cursor=${b.cursorX},${b.cursorY} ` +
+      `ta=${JSON.stringify(term.textarea.value)} comp=${JSON.stringify(comp ? comp.textContent : "")}` +
+      `${comp && comp.classList.contains("active") ? "(active)" : ""} ${imeGap()} ` +
+      `lines=${JSON.stringify(lines)}`);
+  });
 
   // Ctrl+V / Shift+Insert = Tauri 클립보드로 붙여넣기 (WebView2 네이티브 paste 미동작 대응.
   // preventDefault로 keydown을 완전히 가로채므로 이중 붙여넣기도 발생하지 않음)
@@ -1321,6 +1346,7 @@ async function closeTab(id) {
   try { t.term.dispose(); } catch (err) { reportFatal(`term.dispose: ${err && err.stack || err}`); }
   t.container.remove();
   terms.delete(id);
+  entry_markers.delete(id);
   tabOrder = tabOrder.filter((x) => x !== id);
   glOrder = glOrder.filter((x) => x !== id);
   saveOpenTabs();
@@ -2021,6 +2047,13 @@ function handleShortcut(e) {
   }
   if (e.shiftKey && e.code === "KeyB") {
     setSidebarCollapsed(!sideCollapsed);
+    return true;
+  }
+  // Ctrl+Shift+M: 입력이 이상할 때 그 순간을 진단 기록에 찍는다
+  if (e.shiftKey && e.code === "KeyM") {
+    const mark = activeId && entry_markers.get(activeId);
+    if (!traceOn) showToast("진단 기록이 꺼져 있습니다", "설정에서 켜야 남습니다");
+    else if (mark) { mark(); showToast("지금 화면을 기록했습니다", "언제 찍었는지 알려 주세요"); }
     return true;
   }
   if (!e.shiftKey && e.code === "KeyK") {
