@@ -51,9 +51,13 @@ pub(crate) fn run_statusline_tap() {
     }
     // 화면은 원래대로: 사용자 명령이 있으면 같은 stdin으로 실행해 출력을 그대로 넘긴다
     if let Some(cmd) = user_statusline_command() {
+        use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
+        // 릴리스 빌드는 창 서브시스템이라 콘솔이 없다. 그대로 cmd.exe를 띄우면 상태줄이
+        // 갱신될 때마다 새 콘솔 창이 번쩍인다 (agents.rs와 같은 플래그).
         if let Ok(mut child) = Command::new("cmd.exe")
             .args(["/c", &cmd])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
