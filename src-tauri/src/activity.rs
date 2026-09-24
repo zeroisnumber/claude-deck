@@ -391,6 +391,11 @@ pub(crate) fn scan_session_status() -> (HashMap<String, (bool, bool)>, HashMap<S
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as f64)
         .unwrap_or(0.0);
+    // 클로드 내부 형식이라 언제든 바뀔 수 있다. 바뀌면 여기는 오류 없이 빈 결과를 내고,
+    // 작업 판정은 조용히 출력량 추측으로 물러난다. 파일은 있는데 하나도 못 알아보면
+    // 기록에 한 번 남겨 "형식이 바뀌었다"를 알 수 있게 한다.
+    static DRIFT_REPORTED: AtomicBool = AtomicBool::new(false);
+    let (mut files, mut recognized, mut with_status) = (0u32, 0u32, 0u32);
     for e in entries.flatten() {
         let p = e.path();
         if p.extension().map(|x| x != "json").unwrap_or(true) {
@@ -398,7 +403,12 @@ pub(crate) fn scan_session_status() -> (HashMap<String, (bool, bool)>, HashMap<S
         }
         let Ok(text) = fs::read_to_string(&p) else { continue };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        files += 1;
         let Some(sid) = v["sessionId"].as_str() else { continue };
+        recognized += 1;
+        if v["status"].is_string() {
+            with_status += 1;
+        }
         // 주인 판정은 status가 없는 파일도 센다. 세션을 이어받은 프로세스가 status 없이
         // 파일만 올려 둔 채 굳어 있는 것을 실제로 봤다(updatedAt이 80분 전에 멈춤).
         // 그 파일을 건너뛰면 정작 잡아야 할 인수인계를 통째로 놓친다.
@@ -435,6 +445,20 @@ pub(crate) fn scan_session_status() -> (HashMap<String, (bool, bool)>, HashMap<S
                 latest.insert(sid.to_string(), updated);
                 out.insert(sid.to_string(), (working, waiting));
             }
+        }
+    }
+    // 세션 id를 하나도 못 찾았거나, 여럿인데 상태 칸이 하나도 없으면 형식이 바뀐 것이다
+    // (상태 없는 파일 하나는 실제로 있었다 — 굳은 프로세스. 그래서 둘 이상일 때만 본다).
+    let drift = if files > 0 && recognized == 0 {
+        Some("sessionId 없음")
+    } else if recognized >= 2 && with_status == 0 {
+        Some("status 없음")
+    } else {
+        None
+    };
+    if let Some(why) = drift {
+        if !DRIFT_REPORTED.swap(true, Ordering::Relaxed) {
+            trace_always("app", "", "format", &format!("~/.claude/sessions/*.json {why} ({files}개) — 클로드 형식이 바뀐 듯"));
         }
     }
     (out, owner)

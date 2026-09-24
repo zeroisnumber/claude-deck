@@ -1150,7 +1150,10 @@ function showLoading(t) {
   hideLoading(t);
   const el = document.createElement("div");
   el.className = "term-loading";
-  el.textContent = "불러오는 중 — 먼저 입력하셔도 그대로 전달됩니다";
+  // 뜨는 동안 친 글자를 버리지 않는다는 건 클로드로만 확인했다(claude_typeahead).
+  // 다른 에이전트에는 약속하지 않는다.
+  const agent = t.agent || agentOf(t.profile);
+  el.textContent = agent === "claude" ? "불러오는 중 — 먼저 입력하셔도 그대로 전달됩니다" : "불러오는 중…";
   t.container.appendChild(el);
   t.loadingEl = el;
   t.loadingTimer = setTimeout(() => hideLoading(t), 20000);
@@ -1563,6 +1566,7 @@ function makeTabDraggable(el) {
         const id = el.dataset.id;
         tabOrder = tabOrder.filter((x) => x !== id);
         tabOrder.splice(newIndex, 0, id);
+        saveOpenTabs();                     // 안 하면 다음에 켤 때 옛 순서로 돌아간다
         suppressClick = true;               // 드래그 직후의 click은 무시
         setTimeout(() => (suppressClick = false), 0);
       }
