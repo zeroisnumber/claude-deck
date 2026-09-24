@@ -1945,17 +1945,17 @@ async function loadAgentVersions() {
             b.disabled = true;
             b.textContent = "받는 중…";
             try {
-              const out = await invoke("update_claude");
-              showToast("클로드 업데이트", out || "완료 — 새로 여는 세션부터 새 판을 씁니다");
+              const out = await invoke("update_agent", { name: a.name });
+              showToast(`${a.name} 업데이트`, out || "완료 — 새로 여는 세션부터 새 판을 씁니다", null, "done");
             } catch (e) {
-              showToast("⚠ 클로드 업데이트 실패", String(e));
+              showToast(`⚠ ${a.name} 업데이트 실패`, String(e));
             }
             loadAgentVersions();
           };
           row.appendChild(b);
         } else {
-          // npm으로 깔았는지 다른 길로 깔았는지 앱은 모른다. 대신 올려 주지 않고
-          // 흔한 명령을 복사해 준다.
+          // npm 전역 설치가 아니면(설치 프로그램·winget 등) 앱이 올리지 않는다 — npm으로
+          // 올리면 두 벌이 생길 수 있다. 흔한 명령을 복사해 준다.
           const b = document.createElement("button");
           b.className = "btn-ghost btn-sm";
           b.textContent = "명령 복사";

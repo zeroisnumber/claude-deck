@@ -160,7 +160,7 @@ fn main() {
             pty::create_dir,
             pty::kill_session_owner,
             agents::agent_versions,
-            agents::update_claude,
+            agents::update_agent,
             sessions::list_sessions,
             delete_session,
             sessions::session_preview,

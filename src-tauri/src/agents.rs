@@ -15,7 +15,7 @@ pub(crate) struct AgentVersion {
     pub(crate) latest: Option<String>,
     /// 최신판을 고른 배포 채널 (클로드는 사용자 설정을 따른다)
     pub(crate) channel: String,
-    /// 앱에서 바로 올릴 수 있는가 — 클로드만 자체 업데이트 명령이 있다
+    /// 앱에서 바로 올릴 수 있는가 — 클로드는 자체 명령, codex·gemini는 npm 전역 설치일 때만
     pub(crate) can_update: bool,
     /// 직접 올릴 때 쓸 명령 (안내용)
     pub(crate) update_cmd: String,
@@ -42,6 +42,60 @@ pub(crate) fn is_newer(latest: &str, installed: &str) -> bool {
         s.split(['.', '-']).take(3).map(|p| p.parse().unwrap_or(0)).collect()
     };
     nums(latest) > nums(installed)
+}
+
+/// cmd.exe로 돌리고 끝나기를 기다린다. 출력은 따로 읽는다 — 안 읽으면 출력이 파이프
+/// 버퍼(약 4KB)를 넘을 때 자식이 쓰다 멈춰 영영 안 끝난다(npm은 출력이 많다).
+fn run(args: &[&str], secs: u64) -> Option<(bool, String, String)> {
+    use std::io::Read as _;
+    let mut child = std::process::Command::new("cmd.exe")
+        .arg("/c")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let read = |mut r: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = r.read_to_end(&mut b);
+            String::from_utf8_lossy(&b).into_owned()
+        })
+    };
+    let out = read(Box::new(child.stdout.take()?));
+    let err = read(Box::new(child.stderr.take()?));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100))
+            }
+            _ => {
+                let _ = child.kill();
+                return None;
+            }
+        }
+    };
+    Some((status.success(), out.join().unwrap_or_default(), err.join().unwrap_or_default()))
+}
+
+/// npm 전역 설치 폴더 (%APPDATA%\npm 같은 곳)
+fn npm_prefix() -> Option<String> {
+    let (ok, out, _) = run(&["npm", "prefix", "-g"], 10)?;
+    let p = out.trim().to_string();
+    (ok && !p.is_empty()).then_some(p)
+}
+
+/// 이 CLI가 npm 전역으로 깔려 있는가. PATH에서 먼저 잡히는 실행 파일이 npm 전역 폴더
+/// 안이면 그렇다. 다른 길(설치 프로그램, winget 등)로 깐 것을 npm으로 올리면 두 벌이
+/// 생기거나 PATH 순서 때문에 안 올라간 것처럼 보이므로, 확실할 때만 앱이 올린다.
+fn installed_via_npm(cmd: &str, prefix: &str) -> bool {
+    let Some((true, out, _)) = run(&["where", cmd], 5) else { return false };
+    let first = out.lines().next().unwrap_or("").trim().to_lowercase();
+    !first.is_empty() && first.starts_with(&prefix.trim_end_matches('\\').to_lowercase())
 }
 
 fn installed_version(cmd: &str) -> Option<String> {
@@ -101,16 +155,20 @@ fn claude_channel() -> String {
 /// 설정 창을 열 때 한 번 부른다. 에이전트마다 프로세스 하나와 요청 하나라 나란히 돌린다.
 #[tauri::command(async)]
 pub(crate) fn agent_versions() -> Vec<AgentVersion> {
+    let prefix = npm_prefix();
     let specs = [
-        ("Claude Code", "claude", "@anthropic-ai/claude-code", claude_channel(), true, "claude update"),
-        ("Codex", "codex", "@openai/codex", "latest".into(), false, "npm i -g @openai/codex@latest"),
-        ("Gemini", "gemini", "@google/gemini-cli", "latest".into(), false, "npm i -g @google/gemini-cli@latest"),
+        ("Claude Code", "claude", "@anthropic-ai/claude-code", claude_channel(), "claude update"),
+        ("Codex", "codex", "@openai/codex", "latest".into(), "npm i -g @openai/codex@latest"),
+        ("Gemini", "gemini", "@google/gemini-cli", "latest".into(), "npm i -g @google/gemini-cli@latest"),
     ];
     let handles: Vec<_> = specs
         .into_iter()
-        .map(|(name, cmd, pkg, channel, can_update, update_cmd)| {
+        .map(|(name, cmd, pkg, channel, update_cmd)| {
+            let prefix = prefix.clone();
             std::thread::spawn(move || {
                 let installed = installed_version(cmd);
+                let can_update = cmd == "claude"
+                    || (installed.is_some() && prefix.as_deref().map(|p| installed_via_npm(cmd, p)).unwrap_or(false));
                 // 설치 안 된 걸 굳이 물어보지 않는다
                 let latest = installed.as_ref().and_then(|_| latest_version(pkg, &channel));
                 let update_available = match (&latest, &installed) {
@@ -132,22 +190,29 @@ pub(crate) fn agent_versions() -> Vec<AgentVersion> {
     handles.into_iter().filter_map(|h| h.join().ok()).collect()
 }
 
-/// 클로드만 앱에서 올린다(`claude update`). 돌고 있는 세션은 그대로 두고, 새로 여는
-/// 세션부터 새 판을 쓴다. 결과 문구를 그대로 돌려준다.
+/// 에이전트 CLI를 올린다. 클로드는 자체 명령(`claude update`), codex·gemini는 npm 전역
+/// 설치일 때만(agent_versions가 can_update로 알려 준다) `npm i -g <패키지>@latest`.
+/// 돌고 있는 세션은 그대로 두고 새로 여는 세션부터 새 판을 쓴다. 받는 데 시간이 걸려 5분까지 기다린다.
 #[tauri::command(async)]
-pub(crate) fn update_claude() -> Result<String, String> {
-    let out = std::process::Command::new("cmd.exe")
-        .args(["/c", "claude", "update"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if out.status.success() {
-        Ok(text)
-    } else {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(if err.is_empty() { text } else { err })
+pub(crate) fn update_agent(name: String) -> Result<String, String> {
+    let args: &[&str] = match name.as_str() {
+        "Claude Code" => &["claude", "update"],
+        "Codex" => &["npm", "i", "-g", "@openai/codex@latest"],
+        "Gemini" => &["npm", "i", "-g", "@google/gemini-cli@latest"],
+        _ => return Err(format!("모르는 에이전트: {name}")),
+    };
+    let (ok, out, err) = run(args, 300).ok_or("5분 안에 끝나지 않아 멈췄습니다")?;
+    if ok {
+        return Ok(out.trim().lines().last().unwrap_or("").to_string());
     }
+    // 돌고 있는 CLI의 실행 파일은 윈도우가 잠가서 npm이 못 바꾼다
+    if err.contains("EBUSY") || err.contains("EPERM") {
+        return Err(format!("{name}이(가) 실행 중이라 바꿀 수 없습니다 — 그 탭을 닫고 다시 시도하세요"));
+    }
+    let msg = if err.trim().is_empty() { out } else { err };
+    // 마지막 몇 줄에 이유가 있다 (npm은 앞에 진행 표시를 길게 쓴다)
+    let lines: Vec<&str> = msg.trim().lines().collect();
+    Err(lines[lines.len().saturating_sub(3)..].join("\n"))
 }
 
 #[cfg(test)]
@@ -168,7 +233,7 @@ mod tests {
     #[ignore]
     fn real_versions() {
         for a in agent_versions() {
-            eprintln!("{:<12} 설치 {:?}  최신 {:?} ({})", a.name, a.installed, a.latest, a.channel);
+            eprintln!("{:<12} 설치 {:?}  최신 {:?} ({})  앱이 올림 {}", a.name, a.installed, a.latest, a.channel, a.can_update);
         }
     }
 

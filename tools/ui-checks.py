@@ -750,21 +750,22 @@ def dashboard_names_models_formats_cost_and_switches_period(p):
 
 
 @check
-def agent_versions_card_offers_update_only_for_claude(p):
-    """클로드만 앱이 올려 주고, 나머지는 명령을 복사하게 한다. 없는 것·확인 실패는 글로."""
+def agent_versions_card_updates_what_the_app_can(p):
+    """앱이 올릴 수 있는 것(클로드, npm 전역 설치)은 업데이트 버튼, 아니면 명령 복사.
+    없는 것·확인 실패는 글로. 버튼은 그 에이전트 이름으로 update_agent를 부른다."""
     agents = [
         {"name": "Claude Code", "installed": "2.1.0", "latest": "2.2.0", "update_available": True,
          "can_update": True, "channel": "latest", "update_cmd": "claude update"},
-        {"name": "Codex", "installed": "0.9.0", "latest": "1.0.0-beta", "update_available": True,
-         "can_update": False, "channel": "next", "update_cmd": "npm i -g @openai/codex@next"},
-        {"name": "Gemini", "installed": None, "latest": "1.0.0", "update_available": False,
-         "can_update": False, "channel": "latest", "update_cmd": "npm i -g @google/gemini-cli"},
-        {"name": "Other", "installed": "1.0.0", "latest": None, "update_available": False,
+        {"name": "Codex", "installed": "0.9.0", "latest": "1.0.0", "update_available": True,
+         "can_update": True, "channel": "latest", "update_cmd": "npm i -g @openai/codex@latest"},
+        {"name": "Gemini", "installed": "0.5.0", "latest": "0.6.0", "update_available": True,
+         "can_update": False, "channel": "latest", "update_cmd": "npm i -g @google/gemini-cli@latest"},
+        {"name": "Other", "installed": None, "latest": "1.0.0", "update_available": False,
          "can_update": False, "channel": "latest", "update_cmd": ""},
         {"name": "Fresh", "installed": "3.0.0", "latest": "3.0.0", "update_available": False,
          "can_update": False, "channel": "latest", "update_cmd": ""},
     ]
-    p.load(replies={"agent_versions": agents, "update_claude": "updated"})
+    p.load(replies={"agent_versions": agents, "update_agent": "updated"})
     p.js("document.querySelector('#btn-settings').click()")
     time.sleep(0.3)
     got = p.js("""[...document.querySelectorAll('#agent-versions .agent-row')].map(r => [
@@ -772,17 +773,18 @@ def agent_versions_card_offers_update_only_for_claude(p):
         [...r.querySelectorAll('button')].map(b => b.textContent + '|' + b.title)])""")
     assert got == [
         ["2.1.0", "2.2.0 있음", ["업데이트|"]],
-        ["0.9.0", "1.0.0-beta 있음 (next)", ["명령 복사|npm i -g @openai/codex@next"]],
+        ["0.9.0", "1.0.0 있음", ["업데이트|"]],
+        ["0.5.0", "0.6.0 있음", ["명령 복사|npm i -g @google/gemini-cli@latest"]],
         ["—", "설치 안 됨", []],
-        ["1.0.0", "최신판 확인 실패", []],
         ["3.0.0", "최신", []],
     ], f"버전 카드 {got}"
-    p.js("window.__calls = []; document.querySelector('#agent-versions .agent-row button').click()")
+    p.js("window.__calls = []; document.querySelectorAll('#agent-versions .agent-row')[1].querySelector('button').click()")
     time.sleep(0.3)
-    names = p.js("window.__calls.map(c => c[0])")
-    assert names[:2] == ["update_claude", "agent_versions"], f"업데이트 뒤 {names}"
+    calls = p.js("window.__calls.map(c => [c[0], c[1] && c[1].name])")
+    assert calls[:1] == [["update_agent", "Codex"]], f"업데이트 뒤 {calls}"
+    assert "agent_versions" in [c[0] for c in calls], "올린 뒤 다시 확인하지 않았다"
     toast = p.js("[...document.querySelectorAll('.toast')].map(t => t.textContent)")
-    assert any("클로드 업데이트" in t and "updated" in t for t in toast), f"알림 {toast}"
+    assert any("Codex 업데이트" in t and "updated" in t for t in toast), f"알림 {toast}"
 
 
 @check
