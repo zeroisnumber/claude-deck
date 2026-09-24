@@ -456,7 +456,20 @@ pub(crate) fn scan_session_status() -> (HashMap<String, (bool, bool)>, HashMap<S
     } else {
         None
     };
-    if let Some(why) = drift {
+    // 한 번 본 것으로는 알리지 않는다. 클로드는 막 뜰 때 파일을 먼저 만들고 status는
+    // 조금 뒤에 채운다 — 앱을 켜자마자 거짓 경보가 났다(실측: 켜고 5초). 형식이 정말
+    // 바뀌었다면 계속 그 상태이므로 1분 넘게 이어질 때만 남긴다.
+    static DRIFT_SINCE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let lasting = {
+        let mut since = DRIFT_SINCE.lock().unwrap_or_else(|e| e.into_inner());
+        if drift.is_none() {
+            *since = None;
+            false
+        } else {
+            since.get_or_insert_with(std::time::Instant::now).elapsed() >= std::time::Duration::from_secs(60)
+        }
+    };
+    if let (Some(why), true) = (drift, lasting) {
         if !DRIFT_REPORTED.swap(true, Ordering::Relaxed) {
             trace_always("app", "", "format", &format!("~/.claude/sessions/*.json {why} ({files}개) — 클로드 형식이 바뀐 듯"));
         }
