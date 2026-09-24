@@ -24,6 +24,7 @@ localStorage.setItem('webgl', %(webgl)s);
 %(extra_storage)s
 window.__calls = []; window.__sent = []; window.__handlers = {}; window.__gen = 0;
 const __SESS = %(sessions)s;
+const __REPLIES = %(replies)s; // 검사마다 정한 명령 응답 (없으면 null)
 window.__TAURI__ = {
   core: { invoke: (c, a) => {
     window.__calls.push([c, a]);
@@ -31,6 +32,7 @@ window.__TAURI__ = {
     if (c === 'list_sessions') return Promise.resolve(__SESS);
     if (c === 'trace_enabled') return Promise.resolve(%(trace)s);
     if (c === 'spawn_pty') return new Promise(r => setTimeout(() => r(++window.__gen), 20));
+    if (c in __REPLIES) return Promise.resolve(__REPLIES[c]);
     return Promise.resolve(null);
   } },
   event: { listen: (name, fn) => { window.__handlers[name] = fn; return Promise.resolve(() => {}); } },
@@ -70,14 +72,15 @@ class Page:
             raise AssertionError("페이지 오류: " + str(r["exceptionDetails"].get("exception", {}).get("description", r))[:400])
         return r["result"].get("value")
 
-    def load(self, sessions=None, open_tabs=(), webgl=False, trace=False, extra_storage=""):
+    def load(self, sessions=None, open_tabs=(), webgl=False, trace=False, extra_storage="", replies=None):
         # 앞 검사의 가짜 앱을 떼고 새로 붙인다 (쌓이면 앞 것이 먼저 돌아 뒤섞인다)
         if getattr(self, "_stub", None):
             self.cdp("Page.removeScriptToEvaluateOnNewDocument", identifier=self._stub)
         self._stub = self.cdp("Page.addScriptToEvaluateOnNewDocument", source=STUB % {
             "open_tabs": json.dumps(list(open_tabs)), "webgl": json.dumps("1" if webgl else "0"),
             "sessions": json.dumps(sessions or [], ensure_ascii=False), "trace": "true" if trace else "false",
-            "extra_storage": extra_storage})["identifier"]
+            "extra_storage": extra_storage,
+            "replies": json.dumps(replies or {}, ensure_ascii=False)})["identifier"]
         self.cdp("Page.navigate", url=PAGE)
         time.sleep(2.5)
 
@@ -411,6 +414,361 @@ def webgl_is_kept_on_recent_tabs_only(p):
     p.js("activate('t0')")
     time.sleep(0.4)
     assert p.js("!!terms.get('t0').webgl"), "다시 본 탭에 GPU가 안 붙었다"
+
+
+def calls(p, name):
+    return p.js(f"window.__calls.filter(c => c[0] === {json.dumps(name)}).map(c => c[1])")
+
+
+def rows(p):
+    return p.js("[...document.querySelectorAll('.session-item')].map(e => e.dataset.id)")
+
+
+def store(p, key):
+    return p.js(f"localStorage.getItem({json.dumps(key)})")
+
+
+@check
+def settings_save_persists_and_cancel_discards(p):
+    """설정 저장은 프로필·전역 env·토글을 남기고 캐시 유지를 Rust로 보낸다. 취소는 아무것도 안 남긴다."""
+    p.load(sessions=fake_sessions(1))
+    p.term()
+    p.js("document.querySelector('#btn-settings').click()")
+    time.sleep(0.3)
+    assert p.js("document.querySelectorAll('#profile-list .lrow').length") == 3, "기본 프로필 셋이 안 보인다"
+    p.js("""(() => {
+      document.querySelector('#profile-add').click();
+      const r = [...document.querySelectorAll('#profile-list .lrow')].pop();
+      r.querySelector('.l-name').value = '프록시';
+      r.querySelector('.l-cmd').value = 'my-proxy run claude';
+      r.querySelector('.l-resume input').checked = false;
+      r.querySelector('.l-active input').checked = true;
+      document.querySelector('#profile-list .l-del').click(); // 첫 줄(Claude)을 지운다
+      document.querySelector('#global-env').value = '  PYTHONUTF8=1;FORCE_COLOR=1  ';
+      document.querySelector('#opt-restore-ask').checked = false;
+      document.querySelector('#opt-webgl').checked = true;
+      const ka = document.querySelector('#opt-keepalive');
+      ka.checked = true; ka.dispatchEvent(new Event('change'));
+      document.querySelector('#ka-threshold').value = '0.1';   // 0.5분 아래는 0.5분으로
+      document.querySelector('#ka-message').value = '   ';      // 비우면 기본 메시지
+      window.__calls = [];
+      document.querySelector('#lmodal-save').click();
+    })()""")
+    time.sleep(0.2)
+    prof = json.loads(store(p, "profiles"))
+    assert [x["name"] for x in prof] == ["Codex", "Gemini", "프록시"], prof
+    assert prof[2] == {"name": "프록시", "cmd": "my-proxy run claude", "resume": False}, prof[2]
+    assert store(p, "profileSel") == "2", f"고른 프로필 {store(p, 'profileSel')}"
+    assert store(p, "globalEnv") == "PYTHONUTF8=1;FORCE_COLOR=1", store(p, "globalEnv")
+    assert store(p, "restoreAsk") == "0" and store(p, "webgl") == "1", (store(p, "restoreAsk"), store(p, "webgl"))
+    ka = calls(p, "set_keepalive")
+    assert ka == [{"enabled": True, "thresholdSecs": 30, "message": 'reply "." only'}], f"set_keepalive {ka}"
+    assert json.loads(store(p, "keepAlive"))["thresholdSecs"] == 30
+    assert "프록시" in p.js("document.querySelector('#foot-count').textContent"), "고른 프로필이 아래 줄에 없다"
+    assert p.js("currentProfile().cmd") == "my-proxy run claude"
+    assert p.js("document.querySelector('#lmodal-backdrop').classList.contains('hidden')"), "저장 뒤에도 창이 떠 있다"
+    got = p.js("document.activeElement.className")
+    assert got == "xterm-helper-textarea", f"닫은 뒤 포커스가 터미널로 안 갔다 ({got})"
+    # 다시 열면 저장한 값이 보이고, 고친 뒤 취소하면 아무것도 안 바뀐다
+    p.js("document.querySelector('#btn-settings').click()")
+    time.sleep(0.3)
+    shown = p.js("""[document.querySelector('#global-env').value, document.querySelector('#opt-restore-ask').checked,
+                     document.querySelector('#ka-threshold').value, document.querySelectorAll('#profile-list .lrow').length]""")
+    assert shown == ["PYTHONUTF8=1;FORCE_COLOR=1", False, "0.5", 3], f"다시 연 설정 {shown}"
+    before = p.js("JSON.stringify(localStorage)")
+    p.js("""document.querySelector('#global-env').value = 'X=1';
+            document.querySelector('#opt-restore-ask').checked = true;
+            document.querySelector('#profile-list .l-del').click();
+            window.__calls = [];
+            document.querySelector('#lmodal-cancel').click()""")
+    time.sleep(0.1)
+    assert p.js("JSON.stringify(localStorage)") == before, "취소했는데 설정이 바뀌었다"
+    assert not calls(p, "set_keepalive"), "취소했는데 캐시 유지를 보냈다"
+    assert p.js("globalEnv") == "PYTHONUTF8=1;FORCE_COLOR=1" and p.js("profiles.length") == 3
+
+
+@check
+def restore_opens_without_asking_when_opted_out(p):
+    """'다음부터 묻지 않기'를 골랐으면 카드 없이 지난 탭을 바로 연다"""
+    sess = fake_sessions(2)
+    p.load(sessions=sess, open_tabs=[s["session_id"] for s in sess],
+           extra_storage="localStorage.setItem('restoreAsk', '0');")
+    assert not p.js("!!document.querySelector('.restore-card')"), "묻지 않기로 했는데 물었다"
+    time.sleep(0.3)
+    spawned = [c["id"] for c in calls(p, "spawn_pty")]
+    assert spawned == [s["session_id"] for s in sess], f"띄운 것 {spawned}"
+    assert p.js("activeId") == sess[0]["session_id"], "첫 탭이 앞에 오지 않았다"
+
+
+@check
+def sidebar_status_and_agent_filters(p):
+    """검색 앞 기호(! @ # &)는 상태 필터, 뒤 글자는 검색어. 에이전트 버튼은 그 에이전트만."""
+    sess = fake_sessions(5, {
+        1: {"agent": "codex", "bg_state": "working", "bg_running": True},
+        2: {"bg_state": "blocked", "bg_running": True},
+        3: {"agent": "gemini", "bg_state": "failed"},
+        4: {"bg_state": "done"},
+    })
+    ids = [s["session_id"] for s in sess]
+    p.load(sessions=sess)
+    p.term(ids[0], "D:/work/proj0")
+    p.term(ids[4], "D:/work/proj4")
+    p.js(f"terms.get('{ids[0]}').busy = true; terms.get('{ids[4]}').attention = true")
+
+    def search(q):
+        p.js(f"document.querySelector('#search').value = {json.dumps(q)}; renderSidebar()")
+        return rows(p)
+    assert search("") == ids, "빈 검색에 전부가 안 보인다"
+    assert search("!") == [ids[0], ids[1]], f"! 작업 중: {rows(p)}"
+    assert search("@") == [ids[2], ids[4]], f"@ 입력 필요·안 본 완료: {rows(p)}"
+    assert search("#") == [ids[0], ids[4]], f"# 열린 탭: {rows(p)}"
+    assert search("&") == [ids[3]], f"& 실패: {rows(p)}"
+    assert search("! proj1") == [ids[1]], f"기호 뒤 검색어: {rows(p)}"
+    assert search("PROJ3") == [ids[3]], f"대소문자 무시 검색: {rows(p)}"
+    search("")
+    p.js("document.querySelector('.af[data-agent=\"codex\"]').click()")
+    assert rows(p) == [ids[1]], f"Codex 버튼: {rows(p)}"
+    on = p.js("[...document.querySelectorAll('#agent-filter .af.on')].map(b => b.dataset.agent)")
+    assert on == ["codex"], f"켜진 버튼 {on}"
+    assert search("&") == [], "에이전트 필터와 상태 필터가 겹치지 않는다"
+    search("")
+    p.js("document.querySelector('.af[data-agent=\"all\"]').click()")
+    assert rows(p) == ids, "전체로 돌아오지 않았다"
+    assert "세션 5개" in p.js("document.querySelector('#foot-count').textContent")
+
+
+@check
+def rename_survives_rerender_and_saves_on_blur(p):
+    """이름 바꾸기 중 폴링이 입력창을 지우지 않고, 포커스를 잃으면 저장, Esc는 취소"""
+    sess = fake_sessions(2)
+    sid = sess[0]["session_id"]
+    p.load(sessions=sess)
+    start = f"startRename(sessions[0], document.querySelector('.session-item[data-id=\"{sid}\"]'))"
+    p.js(start)
+    p.js("renderSidebar()")   # 20초 폴링
+    assert p.js("!!document.querySelector('.si-rename')"), "다시 그리니 입력창이 사라졌다"
+    p.js("{ const i = document.querySelector('.si-rename'); i.value = '  새 이름  '; i.blur() }")
+    time.sleep(0.1)
+    assert not p.js("!!document.querySelector('.si-rename')"), "저장 뒤에도 입력창이 남았다"
+    title = f"document.querySelector('.session-item[data-id=\"{sid}\"] .si-title-text').textContent"
+    assert p.js(title) == "새 이름", p.js(title)
+    assert json.loads(store(p, "aliases")) == {sid: "새 이름"}, store(p, "aliases")
+    p.js(start)
+    p.js("{ const i = document.querySelector('.si-rename'); i.value = '버릴 이름'; "
+         "i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true})) }")
+    time.sleep(0.1)
+    assert p.js(title) == "새 이름", f"Esc가 저장했다: {p.js(title)}"
+    assert not p.js("!!document.querySelector('.si-rename')"), "Esc 뒤에도 입력창이 남았다"
+    p.js(start)
+    p.js("{ const i = document.querySelector('.si-rename'); i.value = ''; "
+         "i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})) }")
+    time.sleep(0.1)
+    assert p.js(title) == "세션 0", f"비우면 원래 이름이어야 한다: {p.js(title)}"
+    assert json.loads(store(p, "aliases")) == {}, store(p, "aliases")
+
+
+@check
+def pin_moves_to_top_and_unpin_restores(p):
+    """핀 고정은 맨 위로 올리고 기억한다. 해제하면 최근 순으로 돌아간다."""
+    sess = fake_sessions(3)
+    ids = [s["session_id"] for s in sess]
+    p.load(sessions=sess)
+
+    def toggle_pin():
+        p.js(f"""(() => {{
+          const el = document.querySelector('.session-item[data-id="{ids[2]}"]');
+          showCtxMenu({{clientX: 10, clientY: 10, preventDefault() {{}}}}, sessions[2], el);
+          [...document.querySelectorAll('#ctx-menu .ctx-item')].find(d => d.textContent.includes('핀')).click();
+        }})()""")
+    toggle_pin()
+    assert rows(p) == [ids[2], ids[0], ids[1]], f"핀 고정 뒤 순서 {rows(p)}"
+    assert p.js(f"!!document.querySelector('.session-item[data-id=\"{ids[2]}\"] .si-pin')"), "핀 표시가 없다"
+    assert json.loads(store(p, "pins")) == [ids[2]], store(p, "pins")
+    p.js("sessions[0].mtime += 100; renderSidebar()")   # 다른 세션이 새로 쓰여도 핀이 위
+    assert rows(p)[0] == ids[2], f"핀이 밀려났다 {rows(p)}"
+    toggle_pin()
+    assert rows(p) == ids, f"핀 해제 뒤 순서 {rows(p)}"
+    assert json.loads(store(p, "pins")) == [], store(p, "pins")
+
+
+@check
+def close_tab_activates_neighbor_and_restart_resumes(p):
+    """탭을 닫으면 kill_pty 후 남은 탭으로, 끝난 탭의 ↻는 같은 세션을 재개한다"""
+    sess = fake_sessions(2)
+    a, b = sess[0]["session_id"], sess[1]["session_id"]
+    p.load(sessions=sess)
+    p.js("(async () => { await openSession(sessions[0]); await openSession(sessions[1]); })()")
+    time.sleep(0.3)
+    assert json.loads(store(p, "openTabs")) == [a, b]
+    p.js("window.__calls = []")
+    p.js(f"document.querySelector('.tab[data-id=\"{b}\"] .tab-close').click()")
+    time.sleep(0.3)
+    assert [c["id"] for c in calls(p, "kill_pty")] == [b], "닫기가 프로세스를 끄지 않았다"
+    assert p.js("activeId") == a and p.js("[...terms.keys()]") == [a], "남은 탭으로 가지 않았다"
+    assert json.loads(store(p, "openTabs")) == [a], store(p, "openTabs")
+    assert p.js("document.querySelectorAll('.tab').length") == 1
+    assert not p.js("!!document.querySelector('.tab-restart')"), "살아 있는 탭에 재시작 단추"
+    p.js(f"window.__handlers['pty-exit']({{payload: {{id: '{a}'}}}})")
+    time.sleep(0.1)
+    assert p.js("document.querySelector('.tab').classList.contains('exited')"), "끝난 탭 표시가 없다"
+    p.js("window.__calls = []; document.querySelector('.tab-restart').click()")
+    time.sleep(0.3)
+    sp = calls(p, "spawn_pty")
+    assert len(sp) == 1 and sp[0]["id"] == a and f"--resume {a}" in sp[0]["command"], f"재시작 {sp}"
+    assert p.js(f"terms.get('{a}').deadGen") == 1, "끈 실행의 출력을 버릴 번호가 없다"
+    assert not p.js("document.querySelector('.tab').classList.contains('exited')")
+    p.js(f"closeTab('{a}')")
+    time.sleep(0.2)
+    assert not p.js("document.querySelector('#empty-state').classList.contains('hidden')"), "탭이 없는데 빈 화면이 안 보인다"
+    assert json.loads(store(p, "openTabs")) == []
+
+
+@check
+def new_session_asks_before_creating_a_missing_folder(p):
+    """없는 폴더면 띄우지 않고 묻는다. 경로를 고치면 안내를 거두고, '만들고 시작'은 만든 뒤 띄운다."""
+    p.load()
+    p.js("document.querySelector('#btn-new').click()")
+    assert not p.js("document.querySelector('#modal-backdrop').classList.contains('hidden')")
+    p.js("document.querySelector('#modal-path').value = '\"D:\\\\nope\\\\typo\"'; document.querySelector('#modal-ok').click()")
+    time.sleep(0.2)
+    assert calls(p, "dir_exists") == [{"path": "D:\\nope\\typo"}], f"따옴표를 안 벗겼다 {calls(p, 'dir_exists')}"
+    assert not p.js("document.querySelector('#modal-missing').classList.contains('hidden')"), "없다는 안내가 없다"
+    assert "D:\\nope\\typo" in p.js("document.querySelector('#modal-missing-text').textContent")
+    assert not calls(p, "spawn_pty") and not calls(p, "create_dir"), "묻기 전에 띄웠거나 만들었다"
+    p.js("{ const i = document.querySelector('#modal-path'); i.value += 'x'; i.dispatchEvent(new Event('input')) }")
+    assert p.js("document.querySelector('#modal-missing').classList.contains('hidden')"), "경로를 고쳤는데 안내가 남았다"
+    p.js("document.querySelector('#modal-path').value = 'D:\\\\nope\\\\typo'; document.querySelector('#modal-ok').click()")
+    time.sleep(0.2)
+    p.js("document.querySelector('#modal-create').click()")
+    time.sleep(0.3)
+    assert calls(p, "create_dir") == [{"path": "D:\\nope\\typo"}], calls(p, "create_dir")
+    sp = calls(p, "spawn_pty")
+    assert len(sp) == 1 and sp[0]["cwd"] == "D:\\nope\\typo", f"띄운 것 {sp}"
+    order = p.js("window.__calls.map(c => c[0]).filter(c => c === 'create_dir' || c === 'spawn_pty')")
+    assert order == ["create_dir", "spawn_pty"], order
+    assert p.js("document.querySelector('#modal-backdrop').classList.contains('hidden')"), "창이 안 닫혔다"
+    assert json.loads(store(p, "recentDirs")) == ["D:\\nope\\typo"], store(p, "recentDirs")
+
+
+@check
+def dashboard_names_models_formats_cost_and_switches_period(p):
+    """대시보드: 모델은 읽는 이름, 비용은 쉼표, 코덱스는 금액 대신 —, 기간 단추는 다시 불러온다"""
+    import datetime
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    old = (today - datetime.timedelta(days=20)).isoformat()
+    row = lambda **kw: {"date": today.isoformat(), "model": "claude-opus-5-5", "agent": "claude", "project": "deck",
+                        "cwd": "D:\\deck", "input": 0, "output": 0, "cache_read": 0, "cache_5m": 0, "cache_1h": 0,
+                        "requests": 1, **kw}
+    stats = [row(input=1_000_000_000, requests=1234),                                   # $5,000.00
+             row(model="gpt-5-codex", agent="codex", project="cx", input=10, output=10),
+             row(date=old, project="oldproj", output=1_000_000)]
+    p.load(replies={"usage_stats": stats})
+    p.js("document.querySelector('#btn-dash').click()")
+    time.sleep(0.3)
+    assert calls(p, "usage_stats") == [{"days": 7}], calls(p, "usage_stats")
+    tiles = p.js("[...document.querySelectorAll('#dash-tiles .tile')].map(t => t.textContent.trim())")
+    assert tiles[0].startswith("$5,000.00") and "(클로드만)" in tiles[0], f"비용 칸 {tiles[0]!r}"
+    assert tiles[1].startswith("1,235"), f"요청 칸 {tiles[1]!r}"
+    models = p.js("[...document.querySelectorAll('#dash-models tbody tr')].map(r => [...r.cells].map(c => c.textContent))")
+    assert models[0][0] == "Opus 5.5" and models[0][-1] == "$5,000.00", f"모델 표 {models}"
+    assert models[1][0] == "gpt-5-codex" and models[1][-1] == "—", f"코덱스 줄 {models[1]}"
+    projs = p.js("[...document.querySelectorAll('#dash-projects tbody tr')].map(r => r.cells[0].textContent)")
+    assert "oldproj" not in projs, f"7일 밖 줄이 섞였다 {projs}"
+    p.js("document.querySelector('.dp[data-days=\"0\"]').click()")
+    time.sleep(0.3)
+    assert calls(p, "usage_stats")[-1] == {"days": 0}, "전체 기간을 다시 불러오지 않았다"
+    assert p.js("document.querySelector('.dp.on').dataset.days") == "0"
+    projs = p.js("[...document.querySelectorAll('#dash-projects tbody tr')].map(r => r.cells[0].textContent)")
+    assert "oldproj" in projs, f"전체 기간에 옛 줄이 없다 {projs}"
+    assert p.js("document.querySelector('#dash-tiles .tile-v').textContent") == "$5,025.00"
+
+
+@check
+def agent_versions_card_offers_update_only_for_claude(p):
+    """클로드만 앱이 올려 주고, 나머지는 명령을 복사하게 한다. 없는 것·확인 실패는 글로."""
+    agents = [
+        {"name": "Claude Code", "installed": "2.1.0", "latest": "2.2.0", "update_available": True,
+         "can_update": True, "channel": "latest", "update_cmd": "claude update"},
+        {"name": "Codex", "installed": "0.9.0", "latest": "1.0.0-beta", "update_available": True,
+         "can_update": False, "channel": "next", "update_cmd": "npm i -g @openai/codex@next"},
+        {"name": "Gemini", "installed": None, "latest": "1.0.0", "update_available": False,
+         "can_update": False, "channel": "latest", "update_cmd": "npm i -g @google/gemini-cli"},
+        {"name": "Other", "installed": "1.0.0", "latest": None, "update_available": False,
+         "can_update": False, "channel": "latest", "update_cmd": ""},
+        {"name": "Fresh", "installed": "3.0.0", "latest": "3.0.0", "update_available": False,
+         "can_update": False, "channel": "latest", "update_cmd": ""},
+    ]
+    p.load(replies={"agent_versions": agents, "update_claude": "updated"})
+    p.js("document.querySelector('#btn-settings').click()")
+    time.sleep(0.3)
+    got = p.js("""[...document.querySelectorAll('#agent-versions .agent-row')].map(r => [
+        r.querySelector('.agent-ver').textContent, r.querySelector('.agent-state').textContent,
+        [...r.querySelectorAll('button')].map(b => b.textContent + '|' + b.title)])""")
+    assert got == [
+        ["2.1.0", "2.2.0 있음", ["업데이트|"]],
+        ["0.9.0", "1.0.0-beta 있음 (next)", ["명령 복사|npm i -g @openai/codex@next"]],
+        ["—", "설치 안 됨", []],
+        ["1.0.0", "최신판 확인 실패", []],
+        ["3.0.0", "최신", []],
+    ], f"버전 카드 {got}"
+    p.js("window.__calls = []; document.querySelector('#agent-versions .agent-row button').click()")
+    time.sleep(0.3)
+    names = p.js("window.__calls.map(c => c[0])")
+    assert names[:2] == ["update_claude", "agent_versions"], f"업데이트 뒤 {names}"
+    toast = p.js("[...document.querySelectorAll('.toast')].map(t => t.textContent)")
+    assert any("클로드 업데이트" in t and "updated" in t for t in toast), f"알림 {toast}"
+
+
+@check
+def mark_shortcut_warns_when_trace_is_off(p):
+    """Ctrl+Shift+M은 진단 기록이 꺼져 있으면 알려만 주고, 켜져 있으면 한 번만 찍는다"""
+    marks = "window.__calls.filter(c => c[0] === 'trace_ui' && c[1].kind === 'mark').length"
+    toasts = "[...document.querySelectorAll('.toast-title')].map(t => t.textContent)"
+    p.load()
+    p.term()
+    p.key("M", "KeyM", 77, modifiers=10)
+    time.sleep(0.2)
+    assert p.js(marks) == 0, "꺼져 있는데 기록을 보냈다"
+    assert p.js(toasts) == ["진단 기록이 꺼져 있습니다"], p.js(toasts)
+    p.load(trace=True)
+    p.term()
+    p.key("M", "KeyM", 77, modifiers=10)
+    time.sleep(0.2)
+    assert p.js(marks) == 1, f"기록 {p.js(marks)}번"
+    assert p.js(toasts) == ["지금 화면을 기록했습니다"], p.js(toasts)
+    assert p.js("window.__sent") == [], f"단축키가 터미널로 샜다 {p.js('window.__sent')}"
+
+
+@check
+def ctrl_wheel_changes_font_size(p):
+    """Ctrl+휠은 글자 크기를 바꾸고 기억한다. Ctrl 없는 휠은 크기를 건드리지 않는다."""
+    p.load()
+    p.term()
+    r = p.rect(".term-container.visible .xterm")
+    x, y = r["x"] + 100, r["y"] + 100
+    ctrl = lambda down: p.cdp("Input.dispatchKeyEvent", type="rawKeyDown" if down else "keyUp", key="Control",
+                              code="ControlLeft", windowsVirtualKeyCode=17, modifiers=2 if down else 0)
+    wheel = lambda dy, mods=2: p.cdp("Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y, deltaX=0, deltaY=dy, modifiers=mods)
+    ctrl(True)
+    p.js("window.__calls = []")
+    for dy in (-100, -100, 100):
+        wheel(dy)
+        time.sleep(0.05)
+    ctrl(False)
+    assert p.js("fontSize") == 14.5, f"13.5 +1 +1 -1 → {p.js('fontSize')}"
+    assert store(p, "fontSize") == "14.5" and p.js("terms.get('t').term.options.fontSize") == 14.5
+    assert calls(p, "resize_pty"), "크기를 바꾸고 PTY 크기를 다시 알리지 않았다"
+    for _ in range(3):
+        wheel(-100, 0)
+        time.sleep(0.05)
+    assert p.js("fontSize") == 14.5, "Ctrl 없는 휠이 크기를 바꿨다"
+    p.js("fontSize = 21.5")
+    ctrl(True)
+    for _ in range(3):
+        wheel(-100)
+        time.sleep(0.05)
+    ctrl(False)
+    assert p.js("fontSize") == 22, f"상한 22를 넘었다: {p.js('fontSize')}"
 
 
 # ---------------------------------------------------------------- 실행
