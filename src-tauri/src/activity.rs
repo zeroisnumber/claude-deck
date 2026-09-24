@@ -143,12 +143,20 @@ pub(crate) fn read_tail(path: &std::path::Path, limit: u64) -> Option<String> {
 /// 오류·한도 초과·중단은 종류를 열거할 수 없고(실측에서 stop_sequence로 끝난
 /// 한도 초과 턴이 나왔다), 열거를 놓치면 탭이 영영 작업중으로 남는다.
 pub(crate) fn turn_in_progress(file: &std::path::Path) -> bool {
+    turn_state(file).unwrap_or(false)
+}
+
+/// turn_in_progress와 같지만 "판단할 기록을 못 찾음"을 None으로 돌려준다. 끝부분이 큰
+/// 도구 결과 한 줄 안에 걸리면 읽은 조각에 온전한 레코드가 하나도 없다(1MB가 넘는 줄이
+/// 실제로 있다). 작업 판정은 그때 "끝남"으로 봐도 침묵 타임아웃이 받쳐 주지만, 캐시
+/// 유지 핑은 모르면 보내면 안 된다.
+pub(crate) fn turn_state(file: &std::path::Path) -> Option<bool> {
     // Gemini는 턴마다 append하지 않고 통짜 JSON을 다시 쓰므로 신호가 없다.
     // 이런 탭은 침묵 타임아웃에만 의존한다.
     if file.extension().map(|e| e != "jsonl").unwrap_or(true) {
-        return false;
+        return Some(false);
     }
-    let Some(text) = read_tail(file, 32 * 1024) else { return false };
+    let text = read_tail(file, 32 * 1024)?;
     for line in text.lines().rev() {
         let line = line.trim();
         if line.is_empty() {
@@ -162,30 +170,30 @@ pub(crate) fn turn_in_progress(file: &std::path::Path) -> bool {
             "assistant" => {
                 // 툴 호출로 끝났으면 결과를 기다리는 중 = 진행 중.
                 // end_turn·stop_sequence·그 밖의 무엇이든 턴은 끝난 것으로 본다.
-                return o["message"]["stop_reason"] == "tool_use";
+                return Some(o["message"]["stop_reason"] == "tool_use");
             }
             "user" => {
                 let txt = extract_text(&o["message"]["content"]);
                 if txt.trim().starts_with("[Request interrupted") {
-                    return false; // 사용자가 중단함
+                    return Some(false); // 사용자가 중단함
                 }
                 // 프롬프트 제출 또는 tool_result → 에이전트 차례
-                return true;
+                return Some(true);
             }
             // codex는 턴의 시작과 끝을 직접 기록한다 — 화면 출력을 눈치로 읽을 필요가 없다.
             // task_complete / turn_aborted 뒤에 token_count가 더 붙으므로 그건 건너뛴다.
             "event_msg" => match o["payload"]["type"].as_str().unwrap_or("") {
-                "task_started" => return true,
-                "task_complete" | "turn_aborted" | "error" => return false,
+                "task_started" => return Some(true),
+                "task_complete" | "turn_aborted" | "error" => return Some(false),
                 // 예전 rollout에는 task_* 이벤트가 없어 메시지로 판단한다
-                "agent_message" => return false,
-                "user_message" => return true,
+                "agent_message" => return Some(false),
+                "user_message" => return Some(true),
                 _ => continue,
             },
             _ => continue,
         }
     }
-    false
+    None
 }
 
 
@@ -237,6 +245,47 @@ pub(crate) fn cache_ttl_remaining(file: &PathBuf) -> Option<(f64, u32)> {
         .ok()?
         .as_secs_f64();
     Some((last + f64::from(ttl) - now, ttl))
+}
+
+/// 이 쓰기가 사람이 친 것인가. 터미널은 사람 몰래도 많이 보낸다 — 마우스 신호(풀스크린
+/// 클로드는 스치기만 해도 받는다), 포커스 알림, 질의에 대한 자동 응답. 이것까지 "방금
+/// 입력함"으로 치면, 마우스를 올려 둔 탭의 출력이 전부 타이핑 에코로 빠져 작업 판정이
+/// 멎고, 캐시 유지도 "방금 타이핑했다"며 계속 건너뛴다. 실측에서 보낸 입력의 88%가
+/// 마우스 신호였다.
+/// 섞여 있으면(자동 응답 + 글자) 사람의 입력으로 본다.
+pub(crate) fn is_user_input(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'[') {
+            // CSI: 파라미터·중간 바이트 뒤 종료 바이트(0x40~0x7e)
+            let start = i + 2;
+            let mut j = start;
+            while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                j += 1;
+            }
+            let Some(&fin) = bytes.get(j) else { return true };
+            let params = &bytes[start..j];
+            let auto = match fin {
+                // SGR 마우스 (ESC[<b;x;yM / m)
+                b'M' | b'm' => params.first() == Some(&b'<'),
+                // 포커스 들어옴/나감 (ESC[I / ESC[O)
+                b'I' | b'O' => params.is_empty(),
+                // 장치 속성 응답 (ESC[?..c / ESC[>..c), 커서 위치 보고 (ESC[r;cR)
+                b'c' => matches!(params.first(), Some(b'?') | Some(b'>')),
+                b'R' => !params.is_empty() && params.contains(&b';'),
+                // 모드 보고 (ESC[?..$y)
+                b'y' => params.last() == Some(&b'$'),
+                _ => false,
+            };
+            if !auto {
+                return true;
+            }
+            i = j + 1;
+        } else {
+            return true;
+        }
+    }
+    false
 }
 
 /// 사용자가 입력창에 뭔가 써 뒀는지 추적한다. 내용은 알 필요 없고 있는지만 알면 된다.
@@ -357,6 +406,12 @@ pub(crate) fn scan_session_status() -> (HashMap<String, (bool, bool)>, HashMap<S
         // 그 파일을 건너뛰면 정작 잡아야 할 인수인계를 통째로 놓친다.
         let pid = v["pid"].as_u64().unwrap_or(0) as u32;
         let stamp = v["updatedAt"].as_f64().or_else(|| v["startedAt"].as_f64()).unwrap_or(0.0);
+        // 강제로 끝난 프로세스는 파일을 못 지운다. 그 파일을 믿으면 새로 연 탭이 죽은
+        // 프로세스의 "작업 중"을 물려받고, 주인이 바뀐 것처럼 보인다.
+        let proc_start = v["procStart"].as_str().and_then(|s| s.parse::<u64>().ok());
+        if pid != 0 && !process_is(pid, proc_start) {
+            continue;
+        }
         if pid != 0 && now_ms - stamp <= 6.0 * 3600.0 * 1000.0 {
             match owner_latest.get(sid) {
                 Some(&t) if t >= stamp => {}
@@ -588,14 +643,24 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
                 .get_webview_window("main")
                 .and_then(|w| w.is_focused().ok())
                 .unwrap_or(false);
-            let (agent, title) = {
+            let (agent, title, waiting, ping_turn) = {
                 let act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
                 let a = act.get(&id);
                 (
                     a.map(|a| a.agent.clone()).unwrap_or_default(),
                     a.map(|a| a.title.clone()).unwrap_or_default(),
+                    a.map(|a| a.waiting).unwrap_or(false),
+                    a.map(ping_turn).unwrap_or(false),
                 )
             };
+            // 작업이 멈춘 이유가 "사람의 답을 기다림"이면 끝난 게 아니다. 이미 "입력 필요"를
+            // 알렸고, 여기서 waiting:false를 실어 보내면 그 표시까지 지워 버린다.
+            // 캐시 유지 핑이 일으킨 턴도 사용자에게 알릴 일이 아니다(8시간 동안 매번 뜬다).
+            if waiting || ping_turn {
+                trace(&id, &agent, "notify", if waiting { "skip:waiting" } else { "skip:ping" });
+                let _ = app.emit("pty-state", PtyStateEvent { id, working: false, waiting, notify: false });
+                continue;
+            }
             if focused {
                 trace(&id, &agent, "notify", "skip:focused");
             } else {
@@ -623,15 +688,21 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
     });
 }
 
-/// 만료가 임박한 세션에 캐시 유지 핑을 보낸다.
-pub(crate) fn keepalive_pass(app: &AppHandle, now: std::time::Instant) {
-    let cfg = KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if !cfg.enabled {
-        return;
+/// 방금 끝난 턴이 캐시 유지 핑으로 시작된 것인가. 핑은 write_pty를 거치지 않으므로
+/// last_input을 건드리지 않는다 — 핑 이후에 사람이 친 게 없으면 핑의 턴이다.
+const PING_TURN_WINDOW_MS: u128 = 10 * 60 * 1000;
+pub(crate) fn ping_turn(a: &Activity) -> bool {
+    let Some(p) = a.last_ping else { return false };
+    if p.elapsed().as_millis() > PING_TURN_WINDOW_MS {
+        return false;
     }
-    let ms = |a: std::time::Instant| now.duration_since(a).as_millis() as u64;
+    a.last_input.map(|i| i < p).unwrap_or(true)
+}
 
-    // 잠금 안에서는 후보만 고른다 (파일 파싱은 잠금 밖에서)
+/// 핑을 보낼 수 있는 탭 — 잠금 안에서는 여기까지만 고른다 (파일 파싱은 잠금 밖에서)
+pub(crate) fn keepalive_candidates() -> Vec<(String, String, PathBuf, bool, u32)> {
+    let now = std::time::Instant::now();
+    let ms = |a: std::time::Instant| now.duration_since(a).as_millis() as u64;
     let mut candidates: Vec<(String, String, PathBuf, bool, u32)> = Vec::new();
     {
         let act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
@@ -640,8 +711,17 @@ pub(crate) fn keepalive_pass(app: &AppHandle, now: std::time::Instant) {
             if a.working {
                 continue; // 작업 중이면 애초에 캐시가 살아 있다
             }
-            // 쓰다 만 입력이 있어도 보낸다 — 전송 시퀀스가 Ctrl+U로 kill ring에
-            // 옮겼다가 Ctrl+Y로 되돌린다. draft 여부는 트레이스에만 남긴다.
+            // 권한 확인·질문 창이 떠 있으면 절대 보내지 않는다. 핑 끝의 Enter가 떠 있는
+            // 선택지를 그대로 고른다 — 자리를 비운 사이 도구 실행을 승인해 버린다.
+            if a.waiting {
+                continue;
+            }
+            // 쓰다 만 한 줄은 보낸다 — 전송 시퀀스가 Ctrl+U로 kill ring에 옮겼다가
+            // Ctrl+Y로 되돌린다. 여러 줄은 Ctrl+U가 마지막 줄만 치우므로 앞줄이 핑과 함께
+            // 실제 질문으로 나간다. 그래서 건너뛴다.
+            if a.draft_lines > 0 {
+                continue;
+            }
             if a.last_input.map(|t| ms(t) < KEEPALIVE_INPUT_QUIET_MS).unwrap_or(false) {
                 continue; // 방금 타이핑했다
             }
@@ -651,14 +731,34 @@ pub(crate) fn keepalive_pass(app: &AppHandle, now: std::time::Instant) {
             candidates.push((id.clone(), a.agent.clone(), file, a.draft, a.draft_lines));
         }
     }
+    candidates
+}
+
+/// 만료가 임박한 세션에 캐시 유지 핑을 보낸다.
+pub(crate) fn keepalive_pass(app: &AppHandle, now: std::time::Instant) {
+    let cfg = KEEPALIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if !cfg.enabled {
+        return;
+    }
+    let ms = |a: std::time::Instant| now.duration_since(a).as_millis() as u64;
+    let candidates = keepalive_candidates();
 
     for (id, agent, file, draft, _lines) in candidates {
+        // 상태 파일이 없는 에이전트(codex·gemini)나 상태를 늦게 쓰는 경우를 위한 두 번째
+        // 확인: 기록상 턴이 아직 안 끝났으면(도구 결과·권한을 기다림) 보내지 않는다.
+        if turn_state(&file) != Some(false) {
+            continue;
+        }
         let Some((remain, ttl)) = cache_ttl_remaining(&file) else { continue };
         if remain <= 0.0 || remain > cfg.threshold_secs as f64 {
             continue; // 이미 만료됐거나 아직 여유 있음
         }
         let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
         let Some(a) = act.get_mut(&id) else { continue };
+        // 후보를 고른 뒤 파일을 읽는 사이에 권한 창이 떴을 수 있다 — 보내기 직전에 다시 본다
+        if a.waiting || a.working || a.draft_lines > 0 {
+            continue;
+        }
         // 자기가 보낸 핑이 파일에 반영되기 전에 또 쏘지 않도록
         if a.last_ping.map(|t| ms(t) < keepalive_cooldown_ms(ttl)).unwrap_or(false) {
             continue;
@@ -817,6 +917,57 @@ mod tests {
         let mut b = blank_activity();
         note_draft(&mut b, b"hello\r");
         assert!(!b.draft);
+    }
+
+    /// 이 기기의 상태 파일로 실제로 본다. `cargo test -- --ignored real_session_owners --nocapture`
+    #[test]
+    #[ignore]
+    fn real_session_owners() {
+        let (status, owner) = scan_session_status();
+        eprintln!("살아 있는 주인 {:?}", owner);
+        eprintln!("상태 {:?}", status);
+    }
+
+    /// 사람이 친 것과 터미널이 알아서 보낸 것을 가른다. 실제 기록에 나온 모양들이다.
+    #[test]
+    fn auto_reports_are_not_user_input() {
+        // 마우스 움직임·휠, 포커스, 장치 속성 응답, 커서 위치 보고, 여러 개가 한 번에
+        for s in [
+            "\x1b[<35;110;6M", "\x1b[<64;10;5M", "\x1b[<0;3;4m", "\x1b[I", "\x1b[O",
+            "\x1b[?1;2c", "\x1b[>0;276;0c", "\x1b[12;40R", "\x1b[?2026;2$y",
+            "\x1b[<35;1;1M\x1b[<35;2;1M",
+        ] {
+            assert!(!is_user_input(s.as_bytes()), "{s:?}");
+        }
+        // 글자, 한글, 엔터, 방향키, Ctrl+C, 붙여넣기, 자동 응답 뒤에 섞인 글자
+        for s in ["a", "한", "\r", "\x1b[A", "\x03", "\x1b[200~hi\x1b[201~", "\x1b[Ix", "\x1b"] {
+            assert!(is_user_input(s.as_bytes()), "{s:?}");
+        }
+    }
+
+    /// 권한 확인 창이 떠 있는 세션에는 핑을 보내지 않는다. 끝의 Enter가 떠 있는 선택지를
+    /// 고르면 사람 없이 도구 실행이 승인된다.
+    #[test]
+    fn keepalive_never_targets_a_waiting_or_multiline_session() {
+        let dir = std::env::temp_dir().join(format!("deck-ka-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s.jsonl");
+        std::fs::write(&file, "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n").unwrap();
+        let id = format!("ka-test-{}", std::process::id());
+        let picked = |a: Activity| {
+            ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), a);
+            let c = keepalive_candidates();
+            ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+            c.iter().any(|x| x.0 == id)
+        };
+        let base = || Activity { agent: "claude".into(), file: Some(file.clone()), ..blank_activity() };
+        assert!(picked(base()), "대기 중이 아닌 한가한 세션은 후보다");
+        assert!(!picked(Activity { waiting: true, ..base() }), "권한 창");
+        assert!(!picked(Activity { draft_lines: 2, draft: true, ..base() }), "여러 줄 초안");
+        // 기록상 도구 결과를 기다리는 턴이면 상태 파일이 없어도 보내지 않는다
+        std::fs::write(&file, "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"tool_use\"}}\n").unwrap();
+        assert_eq!(turn_state(&file), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 세션이 다른 프로세스로 넘어간 것과, 넘기는 도중 잠깐 두 파일이 겹친 것을

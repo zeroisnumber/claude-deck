@@ -45,16 +45,37 @@ pub(crate) fn is_newer(latest: &str, installed: &str) -> bool {
 }
 
 fn installed_version(cmd: &str) -> Option<String> {
-    // npm 전역 설치는 .cmd 껍데기라 cmd.exe를 거쳐야 PATH에서 찾는다
-    let out = std::process::Command::new("cmd.exe")
+    use std::io::Read as _;
+    // npm 전역 설치는 .cmd 껍데기라 cmd.exe를 거쳐야 PATH에서 찾는다.
+    // 처음 실행이라 뭔가를 물어보며 멈추는 CLI도 있다 — 설정 창이 영영 "확인 중"에
+    // 머물지 않게 5초 안에 답이 없으면 끊는다.
+    let mut child = std::process::Command::new("cmd.exe")
         .args(["/c", cmd, "--version"])
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !out.status.success() {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            _ => {
+                let _ = child.kill();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
         return None;
     }
-    parse_version(&String::from_utf8_lossy(&out.stdout))
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    parse_version(&out)
 }
 
 fn latest_version(package: &str, channel: &str) -> Option<String> {

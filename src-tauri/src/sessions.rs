@@ -88,6 +88,9 @@ pub(crate) fn parser_for(path: &std::path::Path) -> fn(&PathBuf) -> Option<Sessi
 /// 호버 시점에만 호출 — 대개 목록 스캔이 이미 채워둔 캐시에서 바로 나온다.
 #[tauri::command(async)]
 pub(crate) fn session_preview(file: String) -> Option<SessionPreview> {
+    // 세션 저장소 밖의 아무 파일이나 읽어 돌려주지 않는다. 캐시 열쇠는 목록 스캔 때의
+    // 원래 경로 문자열이라, 검사만 하고 경로는 그대로 쓴다(정규화된 경로로 바꾸면 캐시를 못 탄다).
+    session_file_in_store(&file).ok()?;
     let p = PathBuf::from(&file);
     let m = cached_meta(&p, parser_for(&p))?;
     Some(SessionPreview { last_text: m.last_text, recent: m.recent })
@@ -135,9 +138,28 @@ pub(crate) fn read_head_tail(path: &std::path::Path, limit: u64) -> Option<Strin
     let half = limit / 2;
     let mut head = vec![0u8; half as usize];
     f.read_exact(&mut head).ok()?;
-    f.seek(SeekFrom::End(-(half as i64))).ok()?;
-    let mut tail = Vec::new();
-    f.read_to_end(&mut tail).ok()?;
+    // 끝부분에 온전한 사용량 줄이 하나는 있어야 한다. 도구 결과 한 줄이 1MB를 넘기도
+    // 해서(실측 최대 1.35MB), 고정 크기로 자르면 조각 안에 온전한 줄이 하나도 없다.
+    // 그러면 컨텍스트·모델·캐시 시각이 세션 첫머리 값으로 나오고, 캐시 유지가 이미
+    // 만료된 줄 안다. 찾을 때까지 두 배씩 넓힌다(최대 8MB).
+    let mut want = half;
+    let tail = loop {
+        let n = want.min(size - half);
+        f.seek(SeekFrom::End(-(n as i64))).ok()?;
+        let mut tail = Vec::with_capacity(n as usize);
+        (&mut f).take(n).read_to_end(&mut tail).ok()?;
+        let whole_lines = match tail.iter().position(|&b| b == b'\n') {
+            Some(i) => &tail[i + 1..],
+            None => &[][..],
+        };
+        let has_usage = whole_lines
+            .split(|&b| b == b'\n')
+            .any(|l| l.ends_with(b"}") && l.windows(6).any(|w| w == b"usage\""));
+        if has_usage || n >= size - half || want >= 8 * 1024 * 1024 {
+            break tail;
+        }
+        want *= 2;
+    };
     Some(format!(
         "{}\n{}",
         String::from_utf8_lossy(&head),
@@ -644,6 +666,28 @@ pub(crate) fn list_sessions() -> Vec<SessionMeta> {
 
 #[cfg(test)]
 mod tests {
+    /// 끝이 1MB 넘는 도구 결과 한 줄이어도, 그 앞의 사용량 줄을 찾아 읽는다.
+    #[test]
+    fn tail_reaches_past_one_huge_line() {
+        let dir = std::env::temp_dir().join(format!("deck-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("s.jsonl");
+        let mut body = String::new();
+        for i in 0..20000 {
+            body.push_str(&format!("{{\"type\":\"user\",\"n\":{i},\"pad\":\"{}\"}}
+", "x".repeat(200)));
+        }
+        body.push_str("{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":42}}}
+");
+        body.push_str(&format!("{{\"type\":\"user\",\"toolUseResult\":\"{}\"}}
+", "y".repeat(1_500_000)));
+        std::fs::write(&p, &body).unwrap();
+        let text = read_head_tail(&p, 512 * 1024).unwrap();
+        assert!(text.contains("\"input_tokens\":42"), "사용량 줄을 못 읽었다");
+        assert!(text.len() < body.len(), "파일 전체를 읽으면 안 된다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     /// 실제 홈 디렉터리를 훑어 폴링 한 번의 비용을 잰다 (`cargo test -- --ignored scan_cost --nocapture`)

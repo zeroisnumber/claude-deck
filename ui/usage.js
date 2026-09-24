@@ -118,7 +118,7 @@ function renderDash() {
       .map(([m, v]) => {
         const denom = v.cacheRead + v.cacheW + v.input;
         const hit = denom > 0 ? Math.round((v.cacheRead / denom) * 100) : 0;
-        return `<tr><td>${m}</td><td>${v.req.toLocaleString()}</td><td>${fmtTok(v.tok)}</td><td>${fmtTok(v.out)}</td><td>${hit}%</td><td>${v.unpriced ? "—" : fmtCost(v.cost)}</td></tr>`;
+        return `<tr><td>${escapeHtml(String(m))}</td><td>${v.req.toLocaleString()}</td><td>${fmtTok(v.tok)}</td><td>${fmtTok(v.out)}</td><td>${hit}%</td><td>${v.unpriced ? "—" : fmtCost(v.cost)}</td></tr>`;
       })
       .join("") || `<tr><td colspan="6">데이터 없음</td></tr>`,
   );
@@ -128,7 +128,7 @@ function renderDash() {
     [...byProj.entries()]
       .sort((a, b) => b[1].cost - a[1].cost)
       .slice(0, 12)
-      .map(([p, v]) => `<tr><td>${p}</td><td>${v.req.toLocaleString()}</td><td>${v.unpriced ? "—" : fmtCost(v.cost)}</td></tr>`)
+      .map(([p, v]) => `<tr><td>${escapeHtml(String(p))}</td><td>${v.req.toLocaleString()}</td><td>${v.unpriced ? "—" : fmtCost(v.cost)}</td></tr>`)
       .join("") || `<tr><td colspan="3">데이터 없음</td></tr>`,
   );
 }
@@ -594,8 +594,8 @@ function limitRow(label, w) {
   const cls = pct >= 90 ? "hot" : pct >= 70 ? "warm" : "";
   const remain = w.resets_at ? fmtRemain(w.resets_at) : "";
   return `
-    <div class="limit-row" title="${label} 한도 ${pct}% 사용 · 리셋: ${w.resets_at || "?"}">
-      <span class="limit-label">${label}</span>
+    <div class="limit-row" title="${escapeHtml(label)} 한도 ${pct}% 사용 · 리셋: ${escapeHtml(String(w.resets_at || "?"))}">
+      <span class="limit-label">${escapeHtml(label)}</span>
       <span class="limit-bar"><span class="limit-fill ${cls}" style="width:${Math.min(100, pct)}%"></span></span>
       <span class="limit-txt">${pct}%${remain ? ` · ${remain}` : ""}</span>
     </div>`;

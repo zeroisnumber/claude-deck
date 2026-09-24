@@ -192,6 +192,29 @@ fn process_start(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> 
     Some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
 }
 
+/// 이 번호의 프로세스가 지금 살아 있고, 상태 파일이 적어 둔 그 프로세스가 맞는가.
+/// 우리가 탭을 끌 때는 클로드를 강제로 끝내므로 클로드가 자기 상태 파일을 못 지운다.
+/// 그 파일을 주인으로 믿으면 다시 연 탭에 "세션이 옮겨갔습니다"가 거짓으로 뜨고,
+/// 그 띠의 종료 버튼이 우리 쪽 클로드를 끈다.
+pub(crate) fn process_is(pid: u32, proc_start: Option<u64>) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let started = process_start(h);
+        CloseHandle(h);
+        match (proc_start, started) {
+            (Some(want), Some(got)) => want == got,
+            // 파일에 시작 시각이 없으면(옛 판) 살아 있는 것만 본다
+            (None, Some(_)) => true,
+            _ => false,
+        }
+    }
+}
+
 /// 세션을 가져간 프로세스를 끝낸다. 우리가 띄우지 않은 프로세스라, 사용자가 띠에서
 /// 직접 누를 때만 부른다. 번호 하나로 아무 프로세스나 끄게 두지 않는다 — 클로드가 쓴
 /// 상태 파일이 "그 프로세스가 이 탭의 세션을 쥐고 있다"고 말하고, 그 파일이 적어 둔
@@ -400,7 +423,9 @@ pub(crate) fn write_pty(state: State<PtyState>, id: String, data: String) -> Res
     if let Some(p) = map.get_mut(&id) {
         trace(&id, &p.agent, "in", &data.len().to_string());
         if let Some(a) = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
-            a.last_input = Some(std::time::Instant::now());
+            if is_user_input(data.as_bytes()) {
+                a.last_input = Some(std::time::Instant::now());
+            }
             note_draft(a, data.as_bytes());
         }
         p.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
@@ -550,7 +575,7 @@ mod tests {
         let mut cmd = CommandBuilder::new("cmd.exe");
         // ping은 오래 살아 있고 부모가 없어도 계속 돈다 — 손자가 남는지 보기 좋다
         cmd.args(["/c", "ping", "-n", "60", "127.0.0.1"]);
-        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        let child = pair.slave.spawn_command(cmd).unwrap();
         drop(pair.slave);
         let cmd_pid = child.process_id().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1500));

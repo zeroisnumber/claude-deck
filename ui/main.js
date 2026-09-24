@@ -180,7 +180,9 @@ function sessionStatus(s, t) {
   if (t) return { cls: statusClass(t), label: statusLabel(t), badge: null };
   if (!s.bg_state) return { cls: "", label: "", badge: null };
   if (s.bg_running) {
-    const bg = BG_STATE[s.bg_state] || { cls: "run", label: s.bg_state };
+    // 모르는 값은 잡 폴더의 state.json에서 온 날것이다 — 이 문자열은 사이드바 innerHTML에
+    // 들어가므로 이스케이프한다(CSP가 없어 스크립트가 실행되면 탭을 띄울 수도 있다).
+    const bg = BG_STATE[s.bg_state] || { cls: "run", label: escapeHtml(String(s.bg_state)) };
     return { cls: "bg-" + bg.cls, label: `백그라운드 · ${bg.label}`, badge: bg };
   }
   const bg = s.bg_state === "failed" ? BG_STATE.failed : { cls: "done", label: "완료" };
@@ -222,7 +224,7 @@ function sessionRow(s, child) {
   const unread = t && t.attention && !t.exited;
   const slot = st.cls ? `<span class="si-status ${st.cls}${unread ? " unread" : ""}" title="${unread ? "응답 완료 — 아직 안 봄" : st.label}"></span>` : "";
   const pin = pins.includes(s.session_id) ? PIN_SVG : "";
-  const glyph = `<span class="si-agent ${s.agent}" title="${s.agent}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
+  const glyph = `<span class="si-agent ${escapeHtml(s.agent)}" title="${escapeHtml(s.agent)}">${AGENT_GLYPH[s.agent] || "•"}</span>`;
   const badge = st.badge ? `<span class="si-bg ${st.badge.cls}" title="${st.label}">${st.badge.label}</span>` : "";
   const expEpoch = s.cache_last_ts && s.cache_ttl_secs ? s.cache_last_ts + s.cache_ttl_secs : null;
   const ttl = expEpoch ? `<span class="si-ttl" data-exp="${expEpoch}" title="프롬프트 캐시 남은 TTL"></span>` : "<span></span>";
@@ -721,13 +723,41 @@ function scheduleWebglRebuild(why) {
 const MOUSE_REPORT_GAP_MS = 50;
 function throttleMouseReports(term, container) {
   const reporting = () => term.modes.mouseTrackingMode !== "none";
+  // 휠은 버리면 안 된다 — 정밀 휠·터치패드는 작은 delta를 잘게 여러 번 보내서, 사이의
+  // 것을 버리면 스크롤이 몇 배 느려진다. 막아 둔 동안의 delta를 모아 두었다가 간격이
+  // 지나면 한 번에 보낸다. xterm은 delta를 줄 수로 바꿔 보고 하나를 만든다.
   let lastWheel = 0;
-  term.attachCustomWheelEventHandler(() => {
-    if (!reporting()) return true;
+  let wheelAcc = 0;
+  let wheelLast = null;
+  let wheelTimer = 0;
+  term.attachCustomWheelEventHandler((ev) => {
+    if (ev.__deckPassed || !reporting()) return true;
     const now = performance.now();
-    if (now - lastWheel < MOUSE_REPORT_GAP_MS) return false;
-    lastWheel = now;
-    return true;
+    if (now - lastWheel >= MOUSE_REPORT_GAP_MS && !wheelTimer) {
+      lastWheel = now;
+      return true;
+    }
+    wheelAcc += ev.deltaY;
+    wheelLast = ev;
+    if (!wheelTimer) {
+      wheelTimer = setTimeout(() => {
+        wheelTimer = 0;
+        const p = wheelLast;
+        const dy = wheelAcc;
+        wheelAcc = 0;
+        wheelLast = null;
+        if (!p || !dy) return;
+        lastWheel = performance.now();
+        const again = new WheelEvent("wheel", {
+          deltaY: dy, deltaMode: p.deltaMode, clientX: p.clientX, clientY: p.clientY,
+          screenX: p.screenX, screenY: p.screenY, ctrlKey: p.ctrlKey, altKey: p.altKey,
+          shiftKey: p.shiftKey, bubbles: true, cancelable: true,
+        });
+        again.__deckPassed = true;
+        p.target.dispatchEvent(again);
+      }, Math.max(0, MOUSE_REPORT_GAP_MS - (now - lastWheel)));
+    }
+    return false;
   });
   // 움직임은 xterm에 걸 고리가 없어 한 단계 위에서 가로챈다. 버튼을 누른 채 끄는
   // 것(선택·드래그)은 건드리지 않는다. 멈춘 자리는 꼭 알려야 해서 마지막 것은 늦게라도 보낸다.
@@ -871,7 +901,9 @@ function makeTerm(id, title, cwd) {
   };
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
-    if (handleShortcut(e)) return false;
+    // xterm은 false를 받아도 이벤트를 멈추지 않는다 — 그대로 window까지 올라가 거기
+    // 리스너가 같은 단축키를 한 번 더 실행했다(Ctrl+Tab이 두 칸, Ctrl+Shift+B가 제자리).
+    if (handleShortcut(e)) { e.stopPropagation(); return false; }
     if ((e.ctrlKey && !e.shiftKey && e.code === "KeyV") || (e.shiftKey && e.code === "Insert")) {
       e.preventDefault();
       pasteFromClipboard();
@@ -901,10 +933,20 @@ function makeTerm(id, title, cwd) {
   return entry;
 }
 
+// 세션 id는 cmd.exe /c 명령줄에 그대로 붙는다. 클로드 id는 파일 이름에서, codex·gemini
+// id는 기록 파일 안에서 온다 — 파일 이름에는 &도 쓸 수 있어서, 그런 이름의 파일 하나가
+// 누르는 순간 명령을 실행시킬 수 있다. 실제 id는 영숫자와 -뿐이다.
+function safeId(x) {
+  const s = String(x || "");
+  if (/^[A-Za-z0-9_-]{1,80}$/.test(s)) return s;
+  showToast("⚠ 열 수 없는 세션", `세션 id에 쓸 수 없는 글자가 있습니다: ${s.slice(0, 40)}`);
+  throw new Error("unsafe session id: " + s);
+}
+
 // 에이전트별 실행 명령. claude는 프로필 시스템, codex/gemini는 각자 CLI의 재개 방식
 function commandFor(meta) {
   if (meta.agent === "codex") {
-    return { cmd: `codex resume ${meta.session_id}`, profile: { name: "Codex", cmd: "codex" } };
+    return { cmd: `codex resume ${safeId(meta.session_id)}`, profile: { name: "Codex", cmd: "codex" } };
   }
   if (meta.agent === "gemini") {
     // gemini CLI는 세션 ID 재개가 없어 프로젝트별 최신 세션만 --resume latest 가능
@@ -926,7 +968,7 @@ function commandFor(meta) {
 function attachCommand(short) {
   const p = currentProfile();
   const base = /(^|\s)claude$/.test(p.cmd.trim()) ? p.cmd.trim() : "claude";
-  return envPrefix(globalEnv) + `${base} attach ${short}`;
+  return envPrefix(globalEnv) + `${base} attach ${safeId(short)}`;
 }
 
 async function openSession(meta, focus = true, opts = {}) {
@@ -948,10 +990,19 @@ async function openSession(meta, focus = true, opts = {}) {
   // 복사본은 아직 자기 세션 id가 없다. 새 세션과 같은 임시 id로 띄우고, 자기 기록
   // 파일이 생기면 adoptFor가 붙여 준다.
   const tabId = forking ? "new-" + Date.now() : id;
+  // 명령부터 만든다. 세션 id가 명령줄에 넣을 수 없는 모양이면 여기서 멈춰야 한다 —
+  // 탭을 먼저 만들면 프로세스도 재시작 길도 없는 빈 탭이 남는다.
+  const spec = commandFor(meta);
+  const attach = !forking && meta.agent === "claude" && meta.bg_running && meta.bg_short;
+  const spawnCommand = attach
+    ? attachCommand(meta.bg_short)
+    // --fork-session은 --resume과 짝이다. 프로필에서 재개를 꺼 놨으면 그대로는
+    // 아무것도 갈라져 나오지 않으므로 여기서는 강제로 붙인다.
+    : forking ? `${composeCommand(id, spec.profile, true)} --fork-session`
+    : spec.cmd;
   const entry = makeTerm(tabId, title, meta.cwd);
   entry.name = shown;
   entry.proj = basename(meta.cwd);
-  const spec = commandFor(meta);
   entry.profile = spec.profile;
   if (forking) {
     entry.agent = meta.agent || "claude";
@@ -961,13 +1012,7 @@ async function openSession(meta, focus = true, opts = {}) {
     // 같은 폴더에서 새 세션 탭과 복사본 탭이 함께 떠 있을 때 둘을 가르는 근거다.
     entry.forkOf = { id, firstPrompt: meta.first_prompt || "" };
   }
-  const attach = !forking && meta.agent === "claude" && meta.bg_running && meta.bg_short;
-  entry.spawnCommand = attach
-    ? attachCommand(meta.bg_short)
-    // --fork-session은 --resume과 짝이다. 프로필에서 재개를 꺼 놨으면 그대로는
-    // 아무것도 갈라져 나오지 않으므로 여기서는 강제로 붙인다.
-    : forking ? `${composeCommand(id, spec.profile, true)} --fork-session`
-    : spec.cmd;
+  entry.spawnCommand = spawnCommand;
   entry.file = forking ? null : meta.file;
   if (focus) activate(tabId);
   else renderTabs();
@@ -1596,7 +1641,7 @@ pushKeepAlive();
 // 세션을 여는 방식에 대한 것이고, 이미 그 세션이 된 탭을 다시 띄우는 것과는 다르다.
 function composeCommand(resumeId, prof, force) {
   const p = prof || currentProfile();
-  let cmd = resumeId && (force || p.resume !== false) ? `${p.cmd} --resume ${resumeId}` : p.cmd;
+  let cmd = resumeId && (force || p.resume !== false) ? `${p.cmd} --resume ${safeId(resumeId)}` : p.cmd;
   if (statusLineOn && statusLinePath) cmd += ` --settings "${statusLinePath}"`;
   return envPrefix(globalEnv) + cmd;
 }

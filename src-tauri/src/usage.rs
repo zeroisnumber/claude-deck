@@ -52,7 +52,15 @@ pub(crate) fn usage_entries_of_file(path: &PathBuf) -> Vec<UsageEntry> {
     // 같은 usage를 가진 assistant 줄을 여러 개 쓴다. 줄마다 더하면 같은 토큰을 여러 번
     // 세게 된다 (실측: 한 세션에서 비용 80% 과다). message.id로 한 번만 센다.
     let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 줄마다 JSON 전체를 푸는 게 비용의 대부분이다(237MB 파일에서 771ms, 글자 찾기만 하면
+    // 34ms). 응답 줄만 풀고 나머지는 건너뛴다. 클로드는 공백 없는 JSON을 쓰지만, 표기가
+    // 바뀌어 이 글자가 한 번도 안 나오면 예전처럼 전부 푼다 — 비용이 0으로 사라지지 않게.
+    const ASSISTANT: &str = "\"type\":\"assistant\"";
+    let prefilter = text.contains(ASSISTANT);
     for line in text.lines() {
+        if prefilter && !cwd.is_empty() && !line.contains(ASSISTANT) {
+            continue;
+        }
         let Ok(obj) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
         if cwd.is_empty() {
             if let Some(c) = obj["cwd"].as_str() {
@@ -575,7 +583,7 @@ pub(crate) fn codex_rollout_files() -> Vec<PathBuf> {
 
 /// 파일별 집계 캐시 — 대시보드를 열 때마다 최근 N일치 jsonl을 전량 다시 읽지 않도록
 /// mtime이 그대로면 재사용한다 (세션 목록의 META_CACHE와 같은 전략).
-pub(crate) static USAGE_FILE_CACHE: LazyLock<Mutex<HashMap<String, (f64, Vec<UsageEntry>)>>> =
+pub(crate) static USAGE_FILE_CACHE: LazyLock<Mutex<HashMap<String, (f64, std::sync::Arc<Vec<UsageEntry>>)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 대시보드용: 최근 N일간 (날짜, 모델, 프로젝트)별 토큰 집계
@@ -602,33 +610,47 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
     let mut all: Vec<PathBuf> = Vec::new();
     if let Ok(dirs_iter) = fs::read_dir(&projects) {
         for proj in dirs_iter.flatten() {
-            if let Ok(files) = fs::read_dir(proj.path()) {
-                all.extend(files.flatten().map(|f| f.path()));
+            let Ok(files) = fs::read_dir(proj.path()) else { continue };
+            for f in files.flatten() {
+                let p = f.path();
+                // 서브에이전트(Task·Explore)는 <세션id>/subagents/agent-*.jsonl에 따로 쓴다.
+                // 부모 기록에는 그 응답이 없어서, 여기를 안 보면 서브에이전트 사용량이
+                // 통째로 빠진다(이 기기에서 출력 토큰의 약 8%).
+                if p.is_dir() {
+                    if let Ok(subs) = fs::read_dir(p.join("subagents")) {
+                        all.extend(subs.flatten().map(|s| s.path()));
+                    }
+                } else {
+                    all.push(p);
+                }
             }
         }
     }
     all.extend(codex_rollout_files());
+    // 파일 정보는 한 번만 읽는다(정렬 비교마다 stat하면 파일 수 × log 번 읽는다)
+    let mut all: Vec<(PathBuf, f64, Option<std::time::SystemTime>)> = all
+        .into_iter()
+        .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
+        .map(|p| {
+            let modified = fs::metadata(&p).and_then(|m| m.modified()).ok();
+            let mtime = file_mtime(&p);
+            (p, mtime, modified)
+        })
+        .collect();
     // 원본이 사본보다 먼저 오도록 오래된 파일부터 — 중복은 나중에 만난 쪽을 버린다
-    all.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
+    all.sort_by(|a, b| a.2.cmp(&b.2));
 
     {
-        for p in all {
-            if !p.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                continue;
-            }
+        for (p, mtime, modified) in all {
+            let key = p.to_string_lossy().to_string();
+            // 기간 밖 파일도 캐시에는 남긴다 — 7일에서 전체로 바꿀 때 전부 다시 읽지 않게
+            seen.insert(key.clone());
             // 추가 기록은 mtime을 갱신하므로 오래된 파일은 통째로 건너뜀
             if let Some(cutoff) = cutoff {
-                if fs::metadata(&p)
-                    .and_then(|m| m.modified())
-                    .map(|t| t < cutoff)
-                    .unwrap_or(true)
-                {
+                if modified.map(|t| t < cutoff).unwrap_or(true) {
                     continue;
                 }
             }
-            let key = p.to_string_lossy().to_string();
-            let mtime = file_mtime(&p);
-            seen.insert(key.clone());
             let cached = {
                 let cache = USAGE_FILE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
                 match cache.get(&key) {
@@ -638,28 +660,28 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
             };
             let entries = cached.unwrap_or_else(|| {
                 let is_codex = p.components().any(|c| c.as_os_str() == ".codex");
-                let rows = if is_codex {
+                let rows = std::sync::Arc::new(if is_codex {
                     codex_entries_of_file(&p)
                 } else {
                     usage_entries_of_file(&p)
-                };
+                });
                 USAGE_FILE_CACHE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(key, (mtime, rows.clone()));
                 rows
             });
-            for e in entries {
+            for e in entries.iter() {
                 // 포크·재개는 부모의 기록을 그대로 복사해 온다. 같은 응답 id를
                 // 다시 만나면 버린다 — 파일을 오래된 순으로 도니 원본이 남는다.
                 if !counted.insert(e.id.clone()) {
                     continue;
                 }
-                all_entries.push(e);
+                all_entries.push(e.clone());
             }
         }
     }
-    // 기간 밖으로 밀려났거나 삭제된 파일의 캐시는 버린다
+    // 삭제된 파일의 캐시만 버린다
     USAGE_FILE_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -696,7 +718,14 @@ pub(crate) fn oauth_token() -> Option<String> {
     Some(token)
 }
 
+/// reqwest의 blocking 클라이언트는 tokio 작업 스레드 안에서 부르면 안 된다(디버그
+/// 빌드에서는 런타임을 만들었다 버리며 패닉한다). 이 함수는 async 명령에서 불리므로
+/// 요청은 별도 스레드에서 한다.
 pub(crate) fn fetch_usage_direct() -> Option<serde_json::Value> {
+    std::thread::spawn(fetch_usage_direct_blocking).join().ok().flatten()
+}
+
+fn fetch_usage_direct_blocking() -> Option<serde_json::Value> {
     let token = oauth_token()?;
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -832,6 +861,20 @@ pub(crate) fn subscription_state(force: bool) -> Option<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    /// 이 기기의 전체 사용량을 실제로 집계해 본다. 걸린 시간과 합계.
+    /// `cargo test -- --ignored real_usage_totals --nocapture`
+    #[test]
+    #[ignore]
+    fn real_usage_totals() {
+        for round in 0..2 {
+            let t = std::time::Instant::now();
+            let rows = usage_stats(0);
+            let out: u64 = rows.iter().map(|r| r.output).sum();
+            let req: u64 = rows.iter().map(|r| r.requests).sum();
+            eprintln!("{round}: {:.0}ms  요청 {req}  출력 토큰 {out}", t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
     use super::*;
 
     /// 응답 하나가 텍스트 블록과 도구 호출 블록으로 쪼개져 여러 줄로 기록될 때,

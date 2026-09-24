@@ -617,14 +617,16 @@ html, body {
   min-height: 0;
 }
 
+/* 여백은 바깥 칸이 아니라 .xterm에 둔다. FitAddon은 부모 높이에서 .xterm 자신의
+   여백만 빼고 행 수를 정하는데, 여백이 부모에 있으면 그만큼(14px) 행을 더 잡는다.
+   창 높이에 따라 한 줄이 창 밖으로 2~8px 넘쳐 잘렸다(높이 54가지 중 21가지). */
 .term-container {
   position: absolute;
   inset: 0;
-  padding: 8px 4px 6px 10px;
   display: none;
 }
 .term-container.visible { display: block; }
-.term-container .xterm { height: 100%; }
+.term-container .xterm { height: 100%; padding: 8px 4px 6px 10px; }
 
 /* 세션이 다른 프로세스로 넘어갔을 때 그 탭 위에 띄우는 띠.
    터미널 위에 겹쳐 둔다 — 화면은 이미 주인을 잃어 더 그려지지 않는다. */
