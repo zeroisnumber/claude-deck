@@ -331,7 +331,7 @@ mod tests {
     #[test]
     #[ignore]
     fn real_changelogs() {
-        for (name, from, to) in [("Claude Code", "2.1.278", "2.1.281"), ("Codex", "0.153.4", "0.156.1"), ("Gemini", "0.52.0", "0.61.0")] {
+        for (name, from, to) in [("Claude Code", "2.1.278", "2.1.281"), ("Claude Code", "", "2.1.281"), ("Codex", "0.153.4", "0.156.1"), ("Gemini", "0.52.0", "0.61.0")] {
             match agent_changelog(name.into(), from.into(), to.into()) {
                 Ok(list) => {
                     let vs: Vec<_> = list.iter().map(|e| format!("{}({}자)", e.version, e.notes.chars().count())).collect();

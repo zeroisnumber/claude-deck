@@ -1907,13 +1907,16 @@ $("#btn-settings").onclick = () => {
 };
 // 새 판에 뭐가 바뀌었는지 — 설치판 다음부터 최신판까지를 버전별로 접어 보인다(최신만
 // 펼침). 한 판이 수만 자인 경우도 있어 칸 안에서 스크롤한다. 누를 때만 받아 온다.
-function changelogButton(a, box, row) {
+// recent=true면 최신판을 쓰고 있을 때 — 새로 받을 건 없지만 지금 판까지 무엇이
+// 바뀌었는지는 볼 수 있어야 한다. 설치판까지의 최근 판들(백엔드가 15개, 여기서 5개)을 보인다.
+function changelogButton(a, box, row, recent = false) {
+  const label = recent ? "최근 변경" : "변경 내용";
   const b = document.createElement("button");
   b.className = "btn-ghost btn-sm";
-  b.textContent = "변경 내용";
+  b.textContent = label;
   b.onclick = async () => {
     const open = row.nextElementSibling && row.nextElementSibling.classList.contains("agent-changes");
-    if (open) { row.nextElementSibling.remove(); b.textContent = "변경 내용"; return; }
+    if (open) { row.nextElementSibling.remove(); b.textContent = label; return; }
     const panel = document.createElement("div");
     panel.className = "agent-changes";
     panel.textContent = "받는 중…";
@@ -1921,7 +1924,10 @@ function changelogButton(a, box, row) {
     b.textContent = "접기";
     let list;
     try {
-      list = await invoke("agent_changelog", { name: a.name, from: a.installed, to: a.latest });
+      list = await invoke("agent_changelog", recent
+        ? { name: a.name, from: "", to: a.installed }
+        : { name: a.name, from: a.installed, to: a.latest });
+      if (recent && Array.isArray(list)) list = list.slice(0, 5);
     } catch (e) {
       panel.textContent = "받지 못했습니다: " + e;
       return;
@@ -2010,6 +2016,7 @@ async function loadAgentVersions() {
       } else {
         state.textContent = "최신";
         state.className = "agent-state ok";
+        row.appendChild(changelogButton(a, box, row, true));
       }
     }
     box.appendChild(row);

@@ -776,7 +776,7 @@ def agent_versions_card_updates_what_the_app_can(p):
         ["0.9.0", "1.0.0 있음", ["변경 내용|", "업데이트|"]],
         ["0.5.0", "0.6.0 있음", ["변경 내용|", "명령 복사|npm i -g @google/gemini-cli@latest"]],
         ["—", "설치 안 됨", []],
-        ["3.0.0", "최신", []],
+        ["3.0.0", "최신", ["최근 변경|"]],
     ], f"버전 카드 {got}"
     p.js("window.__calls = []; [...document.querySelectorAll('#agent-versions .agent-row')[1].querySelectorAll('button')].find(b => b.textContent === '업데이트').click()")
     time.sleep(0.3)
@@ -907,6 +907,22 @@ def agent_changelog_opens_newest_first_and_escapes(p):
     assert "새 기능" in p.js("document.querySelector('.agent-changes strong')?.textContent || ''"), "굵게가 안 그려졌다"
     p.js("[...document.querySelectorAll('#agent-versions button')].find(b => b.textContent === '접기').click()")
     assert not p.js("!!document.querySelector('.agent-changes')"), "접기가 안 된다"
+
+
+@check
+def up_to_date_agent_shows_recent_changes(p):
+    """최신판이어도 지금 판까지 무엇이 바뀌었는지 본다 — 설치판까지, 최근 5개"""
+    agents = [{"name": "Claude Code", "installed": "2.1.281", "latest": "2.1.281", "update_available": False,
+               "can_update": True, "channel": "latest", "update_cmd": "claude update"}]
+    notes = [{"version": f"2.1.{281 - i}", "notes": f"- 변경 {i}"} for i in range(8)]
+    p.load(replies={"agent_versions": agents, "agent_changelog": notes})
+    p.js("document.querySelector('#btn-settings').click()")
+    time.sleep(0.3)
+    p.js("[...document.querySelectorAll('#agent-versions button')].find(b => b.textContent === '최근 변경').click()")
+    time.sleep(0.3)
+    call = p.js("window.__calls.find(c => c[0] === 'agent_changelog')[1]")
+    assert call == {"name": "Claude Code", "from": "", "to": "2.1.281"}, call
+    assert p.js("document.querySelectorAll('.agent-changes details').length") == 5, "최근 5개가 아니다"
 
 
 # ---------------------------------------------------------------- 실행
