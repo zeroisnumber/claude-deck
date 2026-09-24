@@ -5,3 +5,4 @@ dist/
 src-tauri/gen/
 *.stackdump
 /claude-deck.exe
+__pycache__/
