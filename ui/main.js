@@ -1142,6 +1142,24 @@ async function openSession(meta, focus = true, opts = {}) {
 
 // 탭에 붙은 명령을 PTY로 띄운다. 실패하면 탭을 "종료됨"으로 두고 사유를 터미널과 토스트에 남긴다.
 // 세션 열기·새 세션·재시작이 모두 이 경로를 쓴다.
+// 에이전트가 기록을 읽는 동안(큰 세션은 3~5초) 탭이 비어 있어 입력이 안 먹는 것처럼
+// 보였다. 실제로는 그 사이 친 글자를 클로드가 버리지 않는다(claude_typeahead로 확인 —
+// 첫 화면이 뜨면 입력창에 그대로 있다). 그걸 알려 준다. 첫 화면이 오면 거두고, 늦어도
+// 20초 뒤엔 거둔다(첫 화면이 작게 오는 에이전트도 있다).
+function showLoading(t) {
+  hideLoading(t);
+  const el = document.createElement("div");
+  el.className = "term-loading";
+  el.textContent = "불러오는 중 — 먼저 입력하셔도 그대로 전달됩니다";
+  t.container.appendChild(el);
+  t.loadingEl = el;
+  t.loadingTimer = setTimeout(() => hideLoading(t), 20000);
+}
+function hideLoading(t) {
+  clearTimeout(t.loadingTimer);
+  if (t.loadingEl) { t.loadingEl.remove(); t.loadingEl = null; }
+}
+
 async function spawnInto(id, t, failLabel) {
   try {
     // 새로 뜨는 프로세스는 아직 아무 상태도 알리지 않았다. 전 실행이 "작업 중"이나
@@ -1149,6 +1167,7 @@ async function spawnInto(id, t, failLabel) {
     t.busy = false;
     t.waiting = false;
     t.attention = false;
+    showLoading(t);
     const gen = await invoke("spawn_pty", {
       id, cwd: t.cwd, command: t.spawnCommand || "claude", file: t.file || null, title: t.title,
       sessionId: t.sessionId || null,
@@ -1157,6 +1176,7 @@ async function spawnInto(id, t, failLabel) {
     if (typeof gen === "number") t.gen = gen;
     return true;
   } catch (err) {
+    hideLoading(t);
     t.exited = true;
     t.term.write(`
 [31m${failLabel}: ${err}[0m
@@ -1570,7 +1590,10 @@ listen("pty-output", (ev) => {
   if (t && t.deadGen != null && generation <= t.deadGen) return;
   if (t) {
     const t0 = performance.now();
-    t.term.write(b64ToBytes(data));
+    const bytes = b64ToBytes(data);
+    // 클로드가 첫 화면을 그리면(한 번에 1KB 넘게 온다) 안내를 거둔다
+    if (t.loadingEl && bytes.length > 1000) hideLoading(t);
+    t.term.write(bytes);
     const d = performance.now() - t0;
     if (d > 5) uiTrace("term-write", d);
   }
@@ -1636,6 +1659,7 @@ listen("pty-exit", (ev) => {
   const t = terms.get(id);
   if (t) {
     t.exited = true;
+    hideLoading(t);
     t.term.write("\r\n\x1b[38;5;244m── 프로세스가 종료되었습니다 ──\x1b[0m\r\n");
     renderTabs();
     renderSidebar();

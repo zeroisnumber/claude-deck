@@ -1366,3 +1366,17 @@ kbd {
 
 /* 입력기 재연결 때 포커스를 잠깐 받는 자리 — 보이지도 차지하지도 않는다 */
 #focus-sink { position: fixed; width: 0; height: 0; overflow: hidden; outline: none; }
+
+/* 에이전트가 뜨는 동안의 안내 — 터미널 위에 흐리게, 클릭은 통과시킨다 */
+.term-loading {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  z-index: 4;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-size: 12px;
+  pointer-events: none;
+}

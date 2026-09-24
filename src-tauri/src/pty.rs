@@ -500,6 +500,81 @@ pub(crate) fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    /// 클로드가 뜨는 동안 친 글자를 버리는가. 빈 임시 폴더에서 새 세션을 띄우고, 첫 화면
+    /// 전에 글자를 보낸 뒤, 화면이 뜨고 나서 입력창에 남아 있는지 본다. 제출하지 않으므로
+    /// 요청은 나가지 않는다. `cargo test -- --ignored claude_typeahead --nocapture`
+    #[test]
+    #[ignore]
+    fn claude_typeahead() {
+        // 이미 믿는 폴더(이 저장소) 안이어야 "이 폴더를 믿겠냐" 창이 안 뜬다. target은 git이 무시한다.
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("deck-typeahead");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "claude"]);
+        cmd.cwd(&dir);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() { break; }
+            }
+        });
+        let t0 = std::time::Instant::now();
+        let mut screen = Vec::new();
+        let mut sent = false;
+        let mut first_big = None;
+        while t0.elapsed() < std::time::Duration::from_secs(25) {
+            if let Ok(c) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                // 터미널 질의에 답한다 (xterm처럼) — 안 하면 뜨는 게 늦어진다
+                if c.windows(3).any(|w| w == b"[c ") || String::from_utf8_lossy(&c).contains("[c") {
+                    let _ = writer.write_all(b"[?1;2c");
+                }
+                if c.len() > 1500 && first_big.is_none() {
+                    first_big = Some(t0.elapsed().as_millis());
+                }
+                screen.extend_from_slice(&c);
+            }
+            // 띄우고 0.3초 뒤, 첫 화면 전에 글자를 친다
+            if !sent && t0.elapsed() > std::time::Duration::from_millis(300) {
+                let _ = writer.write_all(b"typeahead");
+                sent = true;
+                eprintln!("글자 보냄 {}ms (첫 큰 화면 전: {})", t0.elapsed().as_millis(), first_big.is_none());
+            }
+            if let Some(fb) = first_big {
+                if t0.elapsed().as_millis() > fb + 3000 { break; }
+            }
+        }
+        let text = String::from_utf8_lossy(&screen);
+        // 이스케이프를 걷어 사람이 보는 글자만 — typeahead 앞뒤로 무엇이 그려졌는지
+        let mut plain = String::new();
+        let mut esc = false;
+        for ch in text.chars() {
+            if esc { if ch.is_ascii_alphabetic() || ch == '~' { esc = false; } continue; }
+            if ch == '\x1b' { esc = true; continue; }
+            if ch == '\r' { continue; }
+            plain.push(ch);
+        }
+        if let Some(i) = plain.find("typeahead") {
+            let lo = plain[..i].char_indices().rev().nth(200).map(|x| x.0).unwrap_or(0);
+            let hi = (i + 300).min(plain.len());
+            let hi = (hi..=plain.len()).find(|&k| plain.is_char_boundary(k)).unwrap_or(plain.len());
+            eprintln!("--- typeahead 주변 ---\n{}\n---", &plain[lo..hi]);
+        }
+        eprintln!("--- 마지막 화면 ---\n{}\n---", plain.chars().rev().take(600).collect::<String>().chars().rev().collect::<String>());
+        eprintln!("첫 큰 화면 {:?}ms, 화면에 typeahead가 {}", first_big,
+                  if text.contains("typeahead") { "보인다(버리지 않음)" } else { "없다(버림)" });
+        let _ = child.kill();
+        drop(pair.master);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     /// 풀스크린 클로드가 보내던 크기(약 10KB)의 전체 화면을 쉬지 않고 쏟아낼 때
