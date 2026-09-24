@@ -666,6 +666,28 @@ pub(crate) fn list_sessions() -> Vec<SessionMeta> {
 
 #[cfg(test)]
 mod tests {
+    /// 앱을 켤 때 첫 목록 읽기가 1.9초 걸렸다. 어디서 걸리는지 나눠 잰다.
+    /// `cargo test -- --ignored real_list_cost --nocapture`
+    #[test]
+    #[ignore]
+    fn real_list_cost() {
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let t = std::time::Instant::now();
+        let mut v = Vec::new();
+        scan_codex(&mut v);
+        eprintln!("codex {:.0}ms ({}개)", ms(t), v.len());
+        let t = std::time::Instant::now();
+        let mut g = Vec::new();
+        scan_gemini(&mut g);
+        eprintln!("gemini {:.0}ms ({}개)", ms(t), g.len());
+        let t = std::time::Instant::now();
+        let all = list_sessions();
+        eprintln!("전체(두 번째 codex·gemini는 캐시) {:.0}ms ({}개)", ms(t), all.len());
+        let t = std::time::Instant::now();
+        let _ = list_sessions();
+        eprintln!("캐시 찬 뒤 {:.0}ms", ms(t));
+    }
+
     /// 끝이 1MB 넘는 도구 결과 한 줄이어도, 그 앞의 사용량 줄을 찾아 읽는다.
     #[test]
     fn tail_reaches_past_one_huge_line() {
