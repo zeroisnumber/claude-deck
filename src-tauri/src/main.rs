@@ -20,6 +20,7 @@ use tauri_plugin_notification::NotificationExt;
 
 mod agents;
 mod diag;
+mod endsession;
 mod statusline;
 mod activity;
 mod pty;
@@ -31,6 +32,15 @@ use activity::*;
 use pty::*;
 use sessions::*;
 use usage::*;
+
+/// 열려 있는 PTY 자식 프로세스를 모두 끝낸다 (창 닫기, 세션 종료 때).
+fn kill_all_ptys(app: &AppHandle) {
+    let state = app.state::<PtyState>();
+    let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
+    for (_, mut p) in map.drain() {
+        let _ = p.killer.kill();
+    }
+}
 
 /// 세션 프로젝트 폴더를 탐색기로 연다
 #[tauri::command(async)]
@@ -206,6 +216,8 @@ fn main() {
                 .build(app)?;
 
             spawn_state_monitor(app.handle().clone());
+            // 로그오프/종료 때 tao가 패닉하지 않게 (endsession.rs 참고)
+            endsession::install(app.handle());
 
             // WebView2 초기 IME 바인딩 버그 우회: 시작 직후 포커스를 프로그램적으로
             // 재이동시켜 "다른 창 갔다 오기"와 동일한 재바인딩을 강제한다.
@@ -236,11 +248,7 @@ fn main() {
             // X 버튼 = 완전 종료. 창을 닫기 전에 열려 있는 PTY 자식 프로세스를
             // 먼저 정리해 고아 프로세스로 남지 않게 한다.
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                let state = window.app_handle().state::<PtyState>();
-                let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
-                for (_, mut p) in map.drain() {
-                    let _ = p.killer.kill();
-                }
+                kill_all_ptys(window.app_handle());
             }
         })
         .run(tauri::generate_context!())

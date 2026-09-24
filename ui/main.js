@@ -1711,6 +1711,32 @@ const ro = new ResizeObserver(() => {
 });
 ro.observe(termArea);
 
+// 배율이 다른 모니터로 옮기면 창의 CSS 크기는 거의 그대로라 위 ResizeObserver가 안 불린다.
+// xterm은 스스로 글자를 다시 재고 선명하게 그리지만(matchMedia resolution + resize),
+// WebGL은 글자 폭을 기기 픽셀에 맞춰 반올림하므로 칸의 CSS 폭이 바뀐다(125%: 7→7.2px).
+// 칸 수를 다시 맞추지 않으면 오른쪽 열이 창 밖으로 잘리고 PTY는 옛 크기로 남는다.
+// xterm의 리스너가 먼저 돌아 치수를 갱신하도록 한 프레임 뒤에 맞춘다.
+let lastDpr = window.devicePixelRatio;
+function onDprMaybeChanged() {
+  if (window.devicePixelRatio === lastDpr) return;
+  lastDpr = window.devicePixelRatio;
+  requestAnimationFrame(() => {
+    const t = activeId && terms.get(activeId);
+    if (!t || t.disposed) return;
+    const { cols, rows } = t.term;
+    t.fit.fit();
+    if (t.term.cols !== cols || t.term.rows !== rows) {
+      invoke("resize_pty", { id: activeId, cols: t.term.cols, rows: t.term.rows });
+    }
+  });
+}
+(function watchDpr() {
+  // 쿼리는 현재 배율에만 맞으므로 바뀔 때마다 새로 건다.
+  matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
+    "change", () => { onDprMaybeChanged(); watchDpr(); }, { once: true });
+})();
+window.addEventListener("resize", onDprMaybeChanged);
+
 // ---------- 실행 프로필 (설정 창에서 관리) ----------
 const DEFAULT_PROFILES = [
   { name: "Claude", cmd: "claude", resume: true },

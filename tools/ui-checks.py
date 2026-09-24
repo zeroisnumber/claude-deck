@@ -14,7 +14,8 @@ import websocket
 CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PAGE = "file:///" + os.path.join(ROOT, "ui", "index.html").replace("\\", "/")
-PORT = 9471
+# 여러 작업 트리에서 동시에 돌리면 같은 포트의 남의 크롬에 붙는다 — 그럴 땐 바꿔 준다.
+PORT = int(os.environ.get("UI_CHECKS_PORT", "9471"))
 
 # 앱 명령을 흉내 낸다. 부른 것은 window.__calls에, PTY로 보낸 것은 window.__sent에 쌓인다.
 STUB = r"""
@@ -287,6 +288,38 @@ def terminal_rows_fit_at_every_window_height(p):
             bad.append(h)
     p.cdp("Emulation.clearDeviceMetricsOverride")
     assert not bad, f"넘친 창 높이: {bad}"
+
+
+@check
+def terminal_refits_when_the_monitor_scale_changes(p):
+    """배율이 다른 모니터로 옮기면 창의 CSS 크기는 그대로라 ResizeObserver가 안 불린다.
+    xterm은 글자 크기를 다시 재지만 칸 수는 그대로여서 WebGL에선 오른쪽 열이 잘렸다.
+    헤드리스의 배율 흉내는 matchMedia/resize 이벤트를 안 보내므로 resize를 직접 쏜다
+    (실제 창에서는 둘 다 온다 — xterm도 이 둘로 배율 변화를 안다)."""
+    p.load(webgl=True)
+    p.term()
+    if not p.js("!!terms.get('t').webgl"):
+        return "skip: 이 크롬에서 WebGL을 못 씀"
+    p.cdp("Emulation.setDeviceMetricsOverride", width=1280, height=720, deviceScaleFactor=1, mobile=False)
+    time.sleep(0.4)
+    p.js("(() => { const t = terms.get('t'); t.fit.fit(); })()")
+    bad = []
+    for dsf in (1.25, 1.5, 1.75, 2, 1):
+        p.cdp("Emulation.setDeviceMetricsOverride", width=1280, height=720, deviceScaleFactor=dsf, mobile=False)
+        time.sleep(0.3)
+        p.js("dispatchEvent(new Event('resize'))")
+        time.sleep(0.4)
+        r = p.js("(() => { const t = terms.get('t'); const d = t.fit.proposeDimensions(); "
+                 "const s = t.term.element.querySelector('.xterm-screen').getBoundingClientRect(); "
+                 "const a = document.querySelector('#term-area').getBoundingClientRect(); "
+                 "const last = window.__calls.filter(c => c[0] === 'resize_pty').pop(); "
+                 "return {dpr: devicePixelRatio, cols: t.term.cols, rows: t.term.rows, want: [d.cols, d.rows], "
+                 "right: Math.round(s.right) <= Math.round(a.right), bottom: Math.round(s.bottom) <= Math.round(a.bottom), "
+                 "pty: last && [last[1].cols, last[1].rows]} })()")
+        if [r["cols"], r["rows"]] != r["want"] or not (r["right"] and r["bottom"]) or r["pty"] != [r["cols"], r["rows"]]:
+            bad.append((dsf, r))
+    p.cdp("Emulation.clearDeviceMetricsOverride")
+    assert not bad, f"배율 바뀐 뒤 안 맞음: {bad}"
 
 
 @check

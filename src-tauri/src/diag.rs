@@ -25,6 +25,11 @@ pub(crate) fn install_panic_hook() {
                 }
             }
         }
+        // 로그오프/종료 중이면 창을 띄우지 않는다 — 모달 창이 종료를 붙잡는다.
+        if crate::endsession::SESSION_ENDING.load(Ordering::SeqCst) {
+            default_hook(info);
+            return;
+        }
         rfd::MessageDialog::new()
             .set_title("CLI Deck 오류")
             .set_description(format!(
