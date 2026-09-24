@@ -210,9 +210,9 @@ pub(crate) fn send_keepalive(app: AppHandle, id: String, agent: String, message:
     std::thread::spawn(move || {
         let write = |bytes: &[u8]| {
             let state = app.state::<PtyState>();
-            let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
-            match map.get_mut(&id) {
-                Some(p) => p.writer.write_all(bytes).is_ok(),
+            let map = state.0.lock().unwrap_or_else(|e| e.into_inner());
+            match map.get(&id) {
+                Some(p) => p.input.send(bytes.to_vec()).is_ok(),
                 None => false, // 탭이 닫혔다
             }
         };

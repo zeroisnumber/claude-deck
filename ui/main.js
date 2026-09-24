@@ -1025,10 +1025,11 @@ async function openSession(meta, focus = true, opts = {}) {
 // 세션 열기·새 세션·재시작이 모두 이 경로를 쓴다.
 async function spawnInto(id, t, failLabel) {
   try {
-    await invoke("spawn_pty", {
+    const gen = await invoke("spawn_pty", {
       id, cwd: t.cwd, command: t.spawnCommand || "claude", file: t.file || null, title: t.title,
       cols: t.term.cols, rows: t.term.rows,
     });
+    if (typeof gen === "number") t.gen = gen;
     return true;
   } catch (err) {
     t.exited = true;
@@ -1070,6 +1071,7 @@ async function openNewSession(cwd, prof) {
 async function restartTab(id) {
   const t = terms.get(id);
   if (!t || !t.exited) return;
+  if (t.gen != null) t.deadGen = t.gen;
   t.exited = false;
   t.attention = false;
   t.term.write("\r\n\x1b[38;5;244m── 재시작 ──\x1b[0m\r\n\r\n");
@@ -1431,8 +1433,11 @@ function makeTabDraggable(el) {
 
 // ---------- PTY 이벤트 ----------
 listen("pty-output", (ev) => {
-  const { id, data } = ev.payload;
+  const { id, data, generation } = ev.payload;
   const t = terms.get(id);
+  // 다시 열거나 재시작한 탭에는 끈 프로세스가 마저 흘린 출력이 늦게 도착한다.
+  // 실행 번호는 계속 커지므로, 끈 실행의 번호 이하는 버린다.
+  if (t && t.deadGen != null && generation <= t.deadGen) return;
   if (t) {
     const t0 = performance.now();
     t.term.write(b64ToBytes(data));
@@ -1477,6 +1482,7 @@ async function reopenMoved(id) {
   const t = terms.get(id);
   if (!t) return;
   if (t.movedBar) { t.movedBar.remove(); t.movedBar = null; }
+  if (t.gen != null) t.deadGen = t.gen;
   await invoke("kill_pty", { id });
   t.exited = false;
   t.term.write("\r\n\x1b[38;5;244m── 다시 열기 ──\x1b[0m\r\n\r\n");

@@ -7,7 +7,11 @@ use std::sync::{Arc, Condvar};
 
 pub(crate) struct PtyInstance {
     pub(crate) master: Box<dyn MasterPty + Send>,
-    pub(crate) writer: Box<dyn Write + Send>,
+    /// 입력은 탭마다 따로 도는 쓰기 스레드로 보낸다. 예전에는 전 탭이 같이 쓰는 잠금을
+    /// 쥔 채 메인 스레드에서 PTY에 직접 썼다 — 한 탭의 입력 통로가 막히면(에이전트가
+    /// 입력을 안 읽는 동안 큰 붙여넣기) 창 전체와 다른 탭 입력이 같이 멈췄다.
+    /// 스레드 하나가 받은 순서대로 쓰므로 키 순서는 그대로다.
+    pub(crate) input: std::sync::mpsc::Sender<Vec<u8>>,
     pub(crate) killer: Box<dyn ChildKiller + Send + Sync>,
     /// 트레이스 라벨 (claude/codex/gemini) — write_pty에서 입력 이벤트를 찍을 때 씀
     pub(crate) agent: String,
@@ -40,6 +44,9 @@ pub(crate) struct PtyState(pub(crate) Mutex<HashMap<String, PtyInstance>>);
 pub(crate) struct PtyOutput {
     pub(crate) id: String,
     pub(crate) data: String, // base64
+    /// 어느 실행에서 나온 출력인가. 탭을 다시 열면 같은 id로 새 프로세스가 뜨는데,
+    /// 끈 프로세스의 리더 스레드가 남은 출력을 마저 흘려서 새 화면에 섞였다.
+    pub(crate) generation: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -152,9 +159,9 @@ impl OutPipe {
     }
 }
 
-fn emit_output(app: &AppHandle, id: &str, data: &[u8]) {
+fn emit_output(app: &AppHandle, id: &str, generation: u64, data: &[u8]) {
     let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-    let _ = app.emit("pty-output", PtyOutput { id: id.to_string(), data: encoded });
+    let _ = app.emit("pty-output", PtyOutput { id: id.to_string(), data: encoded, generation });
 }
 
 /// 새 세션 창에서 시작 전에 폴더가 있는지 본다. 네트워크 드라이브면 stat도 멈출 수
@@ -277,10 +284,10 @@ pub(crate) fn spawn_pty(
     title: Option<String>,
     cols: u16,
     rows: u16,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    if map.contains_key(&id) {
-        return Ok(()); // 이미 실행 중
+    if let Some(p) = map.get(&id) {
+        return Ok(p.generation); // 이미 실행 중
     }
     // 없는 폴더를 홈으로 바꿔 띄우면 안 된다. 사용자는 C:\workspace\game에서 시작한 줄
     // 아는데 에이전트는 홈에서 돌고, 세션 기록도 홈 프로젝트로 쌓여 탭과 짝이 안 맞는다.
@@ -308,8 +315,17 @@ pub(crate) fn spawn_pty(
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let killer = child.clone_killer();
+    // 쓰기 스레드 — 보내는 쪽(PtyInstance)이 사라지면 recv가 끝나 스스로 멈춘다
+    let (input, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        while let Ok(bytes) = input_rx.recv() {
+            if writer.write_all(&bytes).is_err() {
+                break; // 프로세스가 끝났다
+            }
+        }
+    });
     let generation = PTY_GENERATION.fetch_add(1, Ordering::Relaxed);
 
     let agent = trace_agent_label(&claude_cmd);
@@ -354,7 +370,7 @@ pub(crate) fn spawn_pty(
     let flushing = Arc::new(AtomicBool::new(true));
     let flush_flag = flushing.clone();
     std::thread::spawn(move || {
-        let emit = |d: &[u8]| emit_output(&flush_app, &flush_id, d);
+        let emit = |d: &[u8]| emit_output(&flush_app, &flush_id, generation, d);
         while flush_flag.load(Ordering::Relaxed) {
             // 모인 게 없으면 깨울 때까지 잔다 — 탭마다 초당 수십 번씩 헛깨는 타이머는 두지 않는다
             if !flush_pipe.wait_for_data(std::time::Duration::from_millis(500)) {
@@ -386,13 +402,13 @@ pub(crate) fn spawn_pty(
                     }
                     note_output(&id2);
                     pipe.write(std::time::Instant::now(), &buf[..n], &|d: &[u8]| {
-                        emit_output(&app2, &id2, d)
+                        emit_output(&app2, &id2, generation, d)
                     });
                 }
             }
         }
         // 남은 것을 마저 비우고 배출 스레드를 세운다
-        pipe.drain(&|d: &[u8]| emit_output(&app2, &id2, d));
+        pipe.drain(&|d: &[u8]| emit_output(&app2, &id2, generation, d));
         flushing.store(false, Ordering::Relaxed);
         pipe.wake();
         trace(&id2, &agent2, "exit", "");
@@ -413,8 +429,8 @@ pub(crate) fn spawn_pty(
         finish_pty(&app3, &id3, generation);
     });
 
-    map.insert(id, PtyInstance { master: pair.master, writer, killer, agent, generation });
-    Ok(())
+    map.insert(id, PtyInstance { master: pair.master, input, killer, agent, generation });
+    Ok(generation)
 }
 
 #[tauri::command]
@@ -428,7 +444,8 @@ pub(crate) fn write_pty(state: State<PtyState>, id: String, data: String) -> Res
             }
             note_draft(a, data.as_bytes());
         }
-        p.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+        // 넘기기만 한다 — 쓰기가 막혀도 여기(메인 스레드, 전역 잠금)는 기다리지 않는다
+        let _ = p.input.send(data.into_bytes());
     }
     Ok(())
 }
@@ -446,11 +463,16 @@ pub(crate) fn resize_pty(state: State<PtyState>, id: String, cols: u16, rows: u1
 
 #[tauri::command]
 pub(crate) fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String> {
-    let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(mut p) = map.remove(&id) {
+    let removed = {
+        let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        let removed = map.remove(&id);
+        ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        removed
+    };
+    // 끄고 치우는 건 잠금 밖에서 한다 (PTY를 닫는 동안 다른 탭이 기다리지 않게)
+    if let Some(mut p) = removed {
         let _ = p.killer.kill();
     }
-    ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     Ok(())
 }
 
