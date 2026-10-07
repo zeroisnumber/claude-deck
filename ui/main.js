@@ -1624,12 +1624,14 @@ function applyPanes() {
       termArea.appendChild(el);
     });
   }
+  // 탭이 하나도 없으면 빈 화면(안내·복원 카드)이 그대로 보여야 한다 — 칸 장식은 끈다
+  const on = n > 1 && terms.size > 0;
   const gx = $("#gutter-x"), gy = $("#gutter-y");
-  gx.classList.toggle("hidden", !(n > 1 && layout !== "v2"));
-  gy.classList.toggle("hidden", !(n > 1 && layout !== "h2"));
+  gx.classList.toggle("hidden", !(on && layout !== "v2"));
+  gy.classList.toggle("hidden", !(on && layout !== "h2"));
   gx.style.left = `calc(${split.x * 100}% - 2px)`;
   gy.style.top = `calc(${split.y * 100}% - 2px)`;
-  termArea.classList.toggle("split", n > 1);
+  termArea.classList.toggle("split", on);
   markPaneFocus();
   document.querySelectorAll("#layout-btns button").forEach((b) =>
     b.classList.toggle("on", b.dataset.layout === layout));
@@ -1672,6 +1674,12 @@ function arrangeSavedPanes() {
   });
   focusPane = Math.max(0, panes.indexOf(activeId));
   fillEmptyPanes();
+  // 처음 연 탭이 지난번엔 화면에 없었으면 자리를 내줬다 — 입력은 보이는 탭으로 옮긴다
+  if (activeId && !isShown(activeId) && panes.some(Boolean)) {
+    focusTab(panes.find(Boolean));
+    renderTabs();
+    renderSidebar();
+  }
 }
 
 function setLayout(next) {

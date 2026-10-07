@@ -812,6 +812,23 @@ def split_layout_is_restored(p):
 
 
 @check
+def split_restore_keeps_input_on_screen(p):
+    """지난번 화면에 없던 탭이 먼저 열리면 자리를 내준다 — 입력이 안 보이는 탭에 남으면 안 된다.
+    탭이 없을 때(복원 카드)는 칸 장식이 보이지 않아야 한다."""
+    s = fake_sessions(4)
+    ids = [x["session_id"] for x in s]
+    p.load(sessions=s, extra_storage="localStorage.setItem('layout', 'h2'); "
+                                     f"localStorage.setItem('panes', JSON.stringify(['{ids[2]}', '{ids[3]}']));")
+    assert not p.js("document.querySelector('#term-area').classList.contains('split')"), "탭 없이 칸 배경"
+    assert p.js("document.querySelector('#gutter-x').classList.contains('hidden')"), "탭 없이 경계 막대"
+    p.js("openRestored(sessions.slice(0, 4))")
+    time.sleep(0.8)
+    st = pane_state(p)
+    assert st["panes"] == [ids[2], ids[3]], st
+    assert st["activeId"] in st["panes"], f"입력이 안 보이는 탭에 있다 {st}"
+
+
+@check
 def webgl_is_kept_on_recent_tabs_only(p):
     """탭마다 WebGL을 붙이면 16개쯤에서 브라우저가 컨텍스트를 버린다"""
     p.load(webgl=True)
