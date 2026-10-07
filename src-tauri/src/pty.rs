@@ -232,6 +232,51 @@ pub(crate) fn process_is(pid: u32, proc_start: Option<u64>) -> bool {
     }
 }
 
+/// 지금 떠 있는 프로세스 전부의 부모 번호 (자식 → 부모). 새 세션 탭이 어느 클로드를
+/// 띄웠는지 가를 때만 쓴다 — 몇 ms 걸리므로 늘 부르지 않는다.
+pub(crate) fn process_parents() -> HashMap<u32, u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    let mut map = HashMap::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return map;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut e);
+        while ok != 0 {
+            map.insert(e.th32ProcessID, e.th32ParentProcessID);
+            ok = Process32NextW(snap, &mut e);
+        }
+        CloseHandle(snap);
+    }
+    map
+}
+
+/// pid가 root 아래(자식·손자…)에서 나왔는가. 번호가 재사용돼 고리가 생겨도 멈추게
+/// 몇 단계만 올라간다(탭 → cmd.exe → claude 는 한두 단계다).
+pub(crate) fn descends_from(pid: u32, root: u32, parents: &HashMap<u32, u32>) -> bool {
+    if pid == root {
+        return true;
+    }
+    let mut cur = pid;
+    for _ in 0..8 {
+        let Some(&p) = parents.get(&cur) else { return false };
+        if p == root {
+            return true;
+        }
+        if p == 0 || p == cur {
+            return false;
+        }
+        cur = p;
+    }
+    false
+}
+
 /// 세션을 가져간 프로세스를 끝낸다. 우리가 띄우지 않은 프로세스라, 사용자가 띠에서
 /// 직접 누를 때만 부른다. 번호 하나로 아무 프로세스나 끄게 두지 않는다 — 클로드가 쓴
 /// 상태 파일이 "그 프로세스가 이 탭의 세션을 쥐고 있다"고 말하고, 그 파일이 적어 둔
@@ -325,6 +370,7 @@ pub(crate) fn spawn_pty(
     cmd.cwd(&workdir);
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let root_pid = child.process_id().unwrap_or(0);
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -374,6 +420,10 @@ pub(crate) fn spawn_pty(
             owner_pid: None,
             moved: false,
             moved_seen: None,
+            root_pid,
+            pid_tries: 0,
+            pid_found: 0,
+            pid_session: None,
         },
     );
 
@@ -500,6 +550,100 @@ pub(crate) fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    /// 탭(cmd.exe 10) 아래의 클로드(12)만 그 탭 것이다. 다른 탭(20)의 것, 고리가 생긴
+    /// 번호(재사용), 모르는 번호는 아니다.
+    #[test]
+    fn descends_only_from_its_own_tab() {
+        let parents: std::collections::HashMap<u32, u32> =
+            [(10, 1), (11, 10), (12, 11), (20, 1), (21, 20), (30, 31), (31, 30)].into();
+        assert!(super::descends_from(12, 10, &parents));
+        assert!(super::descends_from(11, 10, &parents));
+        assert!(!super::descends_from(21, 10, &parents));
+        assert!(!super::descends_from(30, 10, &parents), "고리에서 멈춰야 한다");
+        assert!(!super::descends_from(99, 10, &parents));
+    }
+
+    /// 지금 이 테스트 프로세스는 자기 부모 아래에 있다 — 실제 프로세스 목록으로 본다
+    #[test]
+    fn process_list_knows_this_process() {
+        let parents = super::process_parents();
+        let me = std::process::id();
+        let parent = *parents.get(&me).expect("자기 자신이 목록에 없다");
+        assert!(super::descends_from(me, parent, &parents));
+    }
+
+    /// 새 세션 탭의 클로드를 pid로 찾을 수 있는가: 상태 파일이 언제 생기고, 그 pid가
+    /// 탭의 cmd.exe 아래에 있는가. 제출하지 않으므로 요청은 나가지 않는다.
+    /// `cargo test -- --ignored new_tab_session_by_pid --nocapture`
+    #[test]
+    #[ignore]
+    fn new_tab_session_by_pid() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("deck-typeahead");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "claude"]);
+        cmd.cwd(&dir);
+        // 이 테스트를 클로드 안에서 돌리면 "자식 세션" 표시가 따라가 기록·상태 파일을
+        // 안 쓴다. 앱이 띄울 때와 같게 걷어 낸다.
+        for (k, _) in std::env::vars() {
+            if k.starts_with("CLAUDE") || k == "AI_AGENT" {
+                cmd.env_remove(k);
+            }
+        }
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        let root = child.process_id().unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() { break; }
+            }
+        });
+        let t0 = std::time::Instant::now();
+        let mut found = None;
+        let mut screen: Vec<u8> = Vec::new();
+        while t0.elapsed() < std::time::Duration::from_secs(45) && found.is_none() {
+            if let Ok(c) = rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                screen.extend_from_slice(&c);
+                if String::from_utf8_lossy(&c).contains("[c") {
+                    let _ = writer.write_all(b"\x1b[?1;2c");
+                }
+            }
+            let (_, owner) = crate::activity::scan_session_status();
+            let parents = super::process_parents();
+            let mine: Vec<_> = owner.iter().filter(|(_, &pid)| super::descends_from(pid, root, &parents)).collect();
+            if !mine.is_empty() {
+                eprintln!("{}ms 뒤 찾음: {:?} (전체 주인 {}개)", t0.elapsed().as_millis(), mine, owner.len());
+                found = Some(mine.len());
+            }
+        }
+        if found.is_none() {
+            let t = String::from_utf8_lossy(&screen);
+            let plain: String = t.chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect();
+            let tail: String = plain.chars().rev().take(500).collect::<Vec<_>>().into_iter().rev().collect();
+            eprintln!("화면 끝: {tail}");
+            let parents = super::process_parents();
+            let (_, owner) = crate::activity::scan_session_status();
+            eprintln!("root {root} 의 자식들: {:?}", parents.iter().filter(|(_, &p)| p == root).collect::<Vec<_>>());
+            for (sid, pid) in &owner {
+                let mut chain = vec![*pid];
+                while let Some(&p) = parents.get(chain.last().unwrap()) {
+                    if chain.len() > 6 || p == 0 { break; }
+                    chain.push(p);
+                }
+                eprintln!("{sid} {chain:?}");
+            }
+        }
+        let _ = child.kill();
+        assert_eq!(found, Some(1), "탭 아래의 클로드 세션을 못 찾았다");
+    }
+
     /// 클로드가 뜨는 동안 친 글자를 버리는가. 빈 임시 폴더에서 새 세션을 띄우고, 첫 화면
     /// 전에 글자를 보낸 뒤, 화면이 뜨고 나서 입력창에 남아 있는지 본다. 제출하지 않으므로
     /// 요청은 나가지 않는다. `cargo test -- --ignored claude_typeahead --nocapture`

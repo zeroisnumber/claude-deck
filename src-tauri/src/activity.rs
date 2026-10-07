@@ -111,6 +111,15 @@ pub(crate) struct Activity {
     pub(crate) moved: bool,
     /// 옮겨간 후보를 처음 본 시각 — 잠깐 스쳐 가는 값으로 오판하지 않으려고 한 번 더 본다
     pub(crate) moved_seen: Option<(u32, std::time::Instant)>,
+    /// 이 탭이 띄운 첫 프로세스(cmd.exe). 새 세션 탭의 클로드가 어느 세션을 잡았는지
+    /// 상태 파일의 pid에서 거슬러 올라가 맞춘다. 0이면 모름.
+    pub(crate) root_pid: u32,
+    /// 그렇게 찾아본 횟수(1초에 한 번). 찾았거나 1분이 지나면 그만 본다 —
+    /// 클로드는 뜨고 몇 초 안에 상태 파일을 쓴다.
+    pub(crate) pid_tries: u8,
+    /// 찾은 클로드의 pid와 그때 잡고 있던 세션 (0/None = 아직 못 찾음)
+    pub(crate) pid_found: u32,
+    pub(crate) pid_session: Option<String>,
 }
 
 pub(crate) static ACTIVITY: LazyLock<Mutex<HashMap<String, Activity>>> =
@@ -535,6 +544,87 @@ pub(crate) fn check_owner(
     }
 }
 
+const PID_TRIES_MAX: u8 = 60;
+
+#[derive(Clone, Serialize)]
+pub(crate) struct PtySessionEvent {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+}
+
+/// 새 세션 탭이 띄운 클로드가 어느 세션을 잡았는지. 클로드는 뜨자마자 상태 파일에
+/// 자기 pid와 세션 id를 적는다 — 그 pid가 어느 탭의 프로세스 아래에서 나왔는지 보면
+/// 같은 폴더에 새 탭을 여럿 띄워도 헷갈리지 않는다(기록 파일이 생긴 순서로는 못 가린다:
+/// 기록은 첫 메시지를 보낼 때 생기므로 먼저 띄운 탭이 먼저 만든다는 보장이 없다).
+/// 묶는 건 프런트가 한다(bind_session) — 복사본(--fork-session)은 처음에 원본 id를 적을
+/// 수 있어서 여기서 단정하지 않는다. 묶일 때까지는 계속 보고, /clear 등으로 그 클로드의
+/// 세션이 바뀌면 다시 알린다. 찾은 뒤에는 그 pid만 보면 되므로 프로세스 목록을 안 찍는다.
+fn match_new_sessions(owner: &HashMap<String, u32>) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let (search, loose): (Vec<(String, u32)>, Vec<(String, u32)>) = {
+        let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+        let bound: std::collections::HashSet<String> =
+            act.values().filter_map(|a| a.session_id.clone()).collect();
+        let mut search = Vec::new();
+        for (id, a) in act.iter_mut() {
+            if a.session_id.is_some() || a.root_pid == 0 || a.agent == "codex" || a.agent == "gemini" {
+                continue;
+            }
+            if a.pid_found != 0 {
+                match owner.iter().find(|(_, &pid)| pid == a.pid_found) {
+                    Some((sid, _)) if a.pid_session.as_deref() != Some(sid.as_str()) => {
+                        a.pid_session = Some(sid.clone());
+                        trace(id, &a.agent, "pid-session", sid);
+                        found.push((id.clone(), sid.clone()));
+                    }
+                    Some(_) => {}
+                    None => a.pid_found = 0, // 그 클로드가 사라졌다 — 다시 찾는다
+                }
+                continue;
+            }
+            if a.pid_tries < PID_TRIES_MAX {
+                a.pid_tries += 1;
+                search.push((id.clone(), a.root_pid));
+            }
+        }
+        if search.is_empty() {
+            return found;
+        }
+        let loose = owner
+            .iter()
+            .filter(|(sid, _)| !bound.contains(sid.as_str()))
+            .map(|(sid, &pid)| (sid.clone(), pid))
+            .collect();
+        (search, loose)
+    };
+    if loose.is_empty() {
+        return found;
+    }
+    // 프로세스 목록은 잠금 밖에서 찍는다
+    let parents = crate::pty::process_parents();
+    let mut hits = Vec::new();
+    for (id, root) in &search {
+        let mine: Vec<&(String, u32)> =
+            loose.iter().filter(|(_, pid)| crate::pty::descends_from(*pid, *root, &parents)).collect();
+        // 한 탭 아래에 클로드가 둘이면(탭 안에서 또 띄운 경우) 어느 쪽인지 모른다
+        if let [(sid, pid)] = mine[..] {
+            hits.push((id.clone(), sid.clone(), *pid));
+        }
+    }
+    let mut act = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner());
+    for (id, sid, pid) in hits {
+        if let Some(a) = act.get_mut(&id) {
+            if a.session_id.is_none() {
+                a.pid_found = pid;
+                a.pid_session = Some(sid.clone());
+                trace(&id, &a.agent, "pid-session", &sid);
+                found.push((id, sid));
+            }
+        }
+    }
+    found
+}
+
 /// 버스트 상태를 주기적으로 평가해 working 전이를 이벤트로 올린다.
 /// JS 타이머가 아니라 여기서 판정하는 게 요점 — 창이 백그라운드로 가도 멈추지 않는다.
 /// 상태 파일이 있는 세션은 그 값을 그대로 쓰고, 없는 세션(codex/gemini, 파일이 아직
@@ -557,6 +647,9 @@ pub(crate) fn spawn_state_monitor(app: AppHandle) {
         // 상태 파일은 1초에 한 번 (파일 몇 개를 읽는 정도라 부담이 없다)
         if tick % 4 == 0 {
             (file_status, session_owner) = scan_session_status();
+            for (id, session_id) in match_new_sessions(&session_owner) {
+                let _ = app.emit("pty-session", PtySessionEvent { id, session_id });
+            }
         }
 
         // 1단계: 잠금 안에서 판정에 필요한 것만 모은다 (파일 I/O는 잠금 밖에서)
@@ -1097,6 +1190,10 @@ mod tests {
             owner_pid: None,
             moved: false,
             moved_seen: None,
+            root_pid: 0,
+            pid_tries: 0,
+            pid_found: 0,
+            pid_session: None,
         }
     }
 

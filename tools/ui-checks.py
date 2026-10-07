@@ -357,6 +357,50 @@ def ctrl_click_opens_file_paths(p):
 
 
 @check
+def empty_sessions_leave_the_list(p):
+    """질문 없이 끝난 세션이 '(내용 없음)'으로 쌓이던 것. 방금 생긴 것·답이 있는 것은 남긴다."""
+    now = time.time()
+    p.load(sessions=fake_sessions(4, {
+        0: {"title": "", "mtime": now - 3600},                       # 숨김
+        1: {"title": "", "mtime": now - 30},                         # 방금 — 첫 질문 전일 수 있다
+        2: {"title": "", "mtime": now - 3600, "last_text": "답"},    # 명령으로 시작했지만 내용 있음
+        3: {"mtime": now - 3600},                                    # 보통 세션
+    }))
+    time.sleep(0.3)
+    n = p.js("document.querySelectorAll('.session-item').length")
+    assert n == 3, f"보이는 줄 {n}개"
+    p.js("document.querySelector('#search').value = 'proj0'; renderSidebar()")
+    assert p.js("document.querySelectorAll('.session-item').length") == 1, "검색하면 찾을 수 있어야 한다"
+
+
+@check
+def new_tabs_in_one_folder_take_their_own_sessions(p):
+    """같은 폴더에 새 탭 둘: 나중 탭에서 먼저 질문하면 그 기록이 먼저 생긴다. 먼저 뜬
+    탭에 주던 것을 pid로 확인한 짝(pty-session)대로 붙인다."""
+    p.load()
+    r = p.js("""(async () => {
+      await openNewSession('D:/w/p');
+      await new Promise(r => setTimeout(r, 5));
+      await openNewSession('D:/w/p');
+      const [a, b] = tabOrder.filter(id => id.startsWith('new-'));
+      window.__handlers['pty-session']({payload: {id: b, session_id: 'sid-b'}});
+      window.__handlers['pty-session']({payload: {id: a, session_id: 'sid-a'}});
+      // 뒤 탭(b)의 기록이 먼저 생겼다
+      sessions = [{session_id: 'sid-b', cwd: 'D:\\\\w\\\\p', agent: 'claude', mtime: Date.now() / 1000 + 1,
+                   file: 'D:/x/b.jsonl', title: 'b'}];
+      adoptNewTabs();
+      const first = [terms.get(a).sessionId || null, terms.get(b).sessionId || null];
+      sessions.push({session_id: 'sid-a', cwd: 'D:/w/p', agent: 'claude', mtime: Date.now() / 1000 + 2,
+                     file: 'D:/x/a.jsonl', title: 'a'});
+      adoptNewTabs();
+      return JSON.stringify([first, [terms.get(a).sessionId, terms.get(b).sessionId]]);
+    })()""")
+    first, after = json.loads(r)
+    assert first == [None, "sid-b"], f"b의 기록이 먼저 생겼을 때 {first}"
+    assert after == ["sid-a", "sid-b"], f"둘 다 생긴 뒤 {after}"
+
+
+@check
 def plain_scroll_still_works_outside_mouse_mode(p):
     """마우스 신호 모드가 아닐 때 휠은 xterm 자체 스크롤이어야 한다"""
     p.load()

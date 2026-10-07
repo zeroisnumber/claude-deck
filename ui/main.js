@@ -312,6 +312,13 @@ const STATUS_FILTERS = {
   "&": (s, t) => !t && s.bg_state === "failed",
 };
 
+const EMPTY_SESSION_GRACE_S = 600;
+function isEmptySession(s, nowSec) {
+  // 답이 하나라도 있으면(명령으로 시작해 제목이 없는 세션) 내용이 있는 것이다
+  return !sessionTitle(s) && !s.last_text && !s.bg_running && !pins.includes(s.session_id)
+    && nowSec - s.mtime > EMPTY_SESSION_GRACE_S && !tabFor(s.session_id)[0];
+}
+
 function renderSidebar() {
   // 접혀 있으면 그리지 않는다 — 20초 폴링마다 보이지도 않는 DOM을 통째로 다시
   // 만들 이유가 없다. 펼칠 때 setSidebarCollapsed가 한 번 다시 그린다.
@@ -330,8 +337,12 @@ function renderSidebar() {
   if (statusKey) q = q.slice(1).trim();
   listEl.innerHTML = "";
 
+  const nowSec = Date.now() / 1000;
   const visible = sessions.filter((s) => {
     if (agentFilter !== "all" && s.agent !== agentFilter) return false;
+    // 질문 한 번 없이 끝난 세션(띄웠다 닫음, 명령만 쳐 봄)은 "(내용 없음)"으로 쌓이기만
+    // 한다. 열려 있거나 방금 생긴 것(아직 첫 질문 전), 고정·백그라운드는 남긴다.
+    if (!q && !statusKey && isEmptySession(s, nowSec)) return false;
     if (statusKey && !STATUS_FILTERS[statusKey](s, tabFor(s.session_id)[1])) return false;
     if (!q) return true;
     // 제목·프로젝트에 더해 백그라운드 상태 문구도 검색 대상에 넣는다
@@ -1350,9 +1361,14 @@ function adoptFor(meta) {
     if (!samePath(meta.cwd, t.cwd)) continue;
     if (meta.mtime < (t.startedAt || 0) - 5) continue;
     if (t.knownAtStart && t.knownAtStart.has(meta.session_id)) continue;
+    // pid로 이미 자기 세션을 안 탭은 그 세션만 받는다
+    if (t.pidSession && t.pidSession !== meta.session_id) continue;
     cand.push([id, t]);
   }
   if (!cand.length) return null;
+  // 0) pid로 확인된 짝이 있으면 그게 답이다
+  const byPid = cand.find(([, t]) => t.pidSession === meta.session_id);
+  if (byPid) return bindAdopted(byPid[0], meta);
   const copiedFrom = (t) =>
     t.forkOf && t.forkOf.firstPrompt && t.forkOf.firstPrompt === (meta.first_prompt || "");
   // 1) 원본과 첫 질문이 같으면 그 원본을 복사한 탭의 것이다
@@ -1365,6 +1381,10 @@ function adoptFor(meta) {
   // 4) 첫 질문이 다른 복사본 탭만 남았으면 붙이지 않는다. 그 복사본의 기록은 아직
   //    안 생겼을 뿐이고, 잘못 붙이면 재시작이 남의 세션을 재개한다.
   if (!pick) return null;
+  return bindAdopted(pick, meta);
+}
+
+function bindAdopted(pick, meta) {
   const t = terms.get(pick);
   t.sessionId = meta.session_id;
   t.file = meta.file;
@@ -1706,6 +1726,17 @@ listen("pty-output", (ev) => {
 // 같은 세션을 다른 프로세스가 이어받으면(클로드가 스스로 다시 띄우거나 다른
 // 터미널에서 --resume 했을 때) 이 탭의 화면을 그리고 키를 읽던 쪽이 사라진다.
 // 겉보기에는 멀쩡해서 한참 뒤에야 알아채므로, 알게 된 순간 띠를 띄운다.
+// 새 세션 탭의 클로드가 어느 세션을 잡았는지 Rust가 pid로 알아냈다. 기록 파일이 생긴
+// 순서로 짝을 맞추면 같은 폴더의 새 탭 둘이 서로 바뀔 수 있다 — 이게 정답이다.
+listen("pty-session", (ev) => {
+  const { id, session_id } = ev.payload;
+  const t = terms.get(id);
+  // 복사본은 처음에 원본 id를 적을 수 있어 기존 방식(첫 질문 비교)에 맡긴다
+  if (!t || t.sessionId || t.forkOf) return;
+  t.pidSession = session_id;
+  adoptNewTabs(); // 목록이 이미 그 세션을 알면 바로 붙는다
+});
+
 listen("session-moved", (ev) => {
   const { id, from, to } = ev.payload;
   const t = terms.get(id);
