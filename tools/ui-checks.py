@@ -660,6 +660,8 @@ def slow_frames_are_traced(p):
     assert rec, "느린 프레임을 남기지 않았다"
     p95, mx, n, mode, shown, kb = rec[-1].split("|")
     assert int(p95) > 25 and mode in ("gl", "dom") and shown == "1", rec[-1]
+    # frames가 없는 구간도 어느 렌더러였는지 알 수 있어야 한다
+    assert [c["value"] for c in calls(p, "trace_ui") if c["kind"] == "renderer"] == [mode]
 
 
 @check
