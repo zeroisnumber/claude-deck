@@ -663,6 +663,137 @@ def turn_chart_groups_thousands_of_bars(p):
     assert r[1] == r[2], f"끊긴 턴 {r[2]}개 중 빨간 막대 {r[1]}개"
 
 
+def pane_state(p):
+    return json.loads(p.js("""JSON.stringify({
+      panes, focusPane, activeId,
+      visible: [...document.querySelectorAll('.term-container.visible')].map(c =>
+        [...terms].find(([, t]) => t.container === c)[0]).sort(),
+      rects: Object.fromEntries([...terms].filter(([, t]) => t.container.classList.contains('visible'))
+        .map(([id, t]) => { const r = t.container.getBoundingClientRect();
+                            return [id, [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]]; })),
+      empty: document.querySelectorAll('.pane-empty').length,
+    })"""))
+
+
+@check
+def split_into_four_panes(p):
+    """4칸: 열린 탭이 칸에 앉고, 칸을 누르면 입력이 그 칸으로, 다른 탭은 입력 중인 칸에만 뜬다"""
+    p.load()
+    for t in "abc":
+        p.term(t)
+    p.js("activate('a')")
+    p.js("document.querySelector('#layout-btns [data-layout=\"4\"]').click()")
+    time.sleep(0.4)
+    s = pane_state(p)
+    assert s["panes"][0] == "a" and sorted(x for x in s["panes"] if x) == ["a", "b", "c"], s
+    assert s["visible"] == ["a", "b", "c"] and s["empty"] == 1, s
+    r = list(s["rects"].values())
+    assert len({(x[0], x[1]) for x in r}) == 3, f"칸이 겹친다 {s['rects']}"
+    full = p.rect("#term-area")
+    assert all(x[2] < full["width"] / 2 + 2 and x[3] < full["height"] / 2 + 2 for x in r), s["rects"]
+    # 각 칸 크기에 맞춰 PTY 크기를 알렸다
+    cols = {c["id"]: c["cols"] for c in calls(p, "resize_pty")}
+    assert cols["b"] < p.js("Math.floor(document.querySelector('#term-area').clientWidth / 7)"), cols
+
+    # 다른 칸을 누르면 그 칸으로 입력이 간다 — 칸 배치는 그대로
+    b = s["rects"][s["panes"][1]]
+    x, y = b[0] + b[2] / 2, b[1] + b[3] / 2
+    for t in ("mousePressed", "mouseReleased"):
+        p.cdp("Input.dispatchMouseEvent", type=t, x=x, y=y, button="left", clickCount=1)
+    time.sleep(0.2)
+    s2 = pane_state(p)
+    assert s2["activeId"] == s["panes"][1] and s2["focusPane"] == 1 and s2["panes"] == s["panes"], s2
+    p.js("window.__sent = []")
+    p.key("x", "KeyX", 88, text="x")
+    time.sleep(0.2)
+    sent = calls(p, "write_pty")
+    assert sent and sent[-1]["id"] == s["panes"][1], f"입력이 {sent[-1:]}로 갔다"
+
+    # Alt+1: 첫 칸으로
+    p.key("1", "Digit1", 49, modifiers=1)
+    time.sleep(0.2)
+    assert pane_state(p)["activeId"] == "a"
+
+    # 안 보이던 탭을 고르면 입력 중인 칸에만 뜬다
+    p.term("d")
+    s3 = pane_state(p)
+    assert s3["panes"][0] == "d" and s3["panes"][1:3] == s["panes"][1:3], s3
+
+    # 한 칸으로 돌아가면 입력 중인 탭만 남는다
+    p.js("setLayout('1')")
+    time.sleep(0.3)
+    s4 = pane_state(p)
+    assert s4["visible"] == ["d"] and s4["empty"] == 0, s4
+    full_r = s4["rects"]["d"]
+    assert abs(full_r[2] - full["width"]) < 2, f"한 칸인데 폭 {full_r} / {full}"
+
+
+@check
+def split_close_and_notify(p):
+    """입력 중이 아닌 칸의 탭을 닫아도 입력 칸은 그대로. 보이는 칸이 끝나면 토스트 대신 테두리."""
+    p.load()
+    for t in "abcde":
+        p.term(t)
+    p.js("activate('a'); setLayout('h2')")
+    time.sleep(0.3)
+    s = pane_state(p)
+    other = s["panes"][1]
+    assert other and other != "a", s
+    # 다른 칸의 응답이 끝났다
+    p.js(f"window.__handlers['pty-state']({{payload: {{id: '{other}', working: true, waiting: false}}}})")
+    p.js(f"window.__handlers['pty-state']({{payload: {{id: '{other}', working: false, waiting: false, notify: true}}}})")
+    time.sleep(0.2)
+    toasts = p.js("document.querySelectorAll('#toasts .toast').length")
+    flash = p.js(f"terms.get('{other}').container.classList.contains('pane-flash')")
+    if p.js("document.hasFocus()"):
+        assert toasts == 0 and flash, f"보이는 칸인데 토스트 {toasts}, 깜빡임 {flash}"
+    # 그 칸의 탭을 닫는다 — 입력은 a에 남고 그 칸은 다른 탭으로 찬다
+    p.js(f"closeTab('{other}')")
+    time.sleep(0.3)
+    s2 = pane_state(p)
+    assert s2["activeId"] == "a" and s2["panes"][0] == "a", s2
+    assert s2["panes"][1] and s2["panes"][1] not in ("a", other), s2
+
+
+@check
+def split_gutter_resizes_once_on_release(p):
+    """경계를 끄는 동안엔 PTY 크기를 안 바꾸고(에이전트가 프레임마다 다시 그린다), 놓을 때 한 번"""
+    p.load()
+    for t in "ab":
+        p.term(t)
+    p.js("activate('a'); setLayout('h2')")
+    time.sleep(0.4)
+    g = p.rect("#gutter-x")
+    area = p.rect("#term-area")
+    x0, y = g["x"] + 2, g["y"] + g["height"] / 2
+    p.cdp("Input.dispatchMouseEvent", type="mousePressed", x=x0, y=y, button="left", clickCount=1, buttons=1)
+    p.js("window.__calls = []")
+    for i in range(1, 11):
+        p.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x0 - i * 20, y=y, button="left", buttons=1)
+        time.sleep(0.03)
+    during = len(calls(p, "resize_pty"))
+    p.cdp("Input.dispatchMouseEvent", type="mouseReleased", x=x0 - 200, y=y, button="left", clickCount=1, buttons=0)
+    time.sleep(0.3)
+    after = calls(p, "resize_pty")
+    assert during == 0, f"끄는 동안 resize_pty {during}번"
+    assert {c["id"] for c in after} == {"a", "b"}, f"놓은 뒤 {after}"
+    a = pane_state(p)["rects"]["a"]
+    want = area["width"] * p.js("split.x")
+    assert abs(a[2] - want) < 6 and p.js("split.x") < 0.45, f"폭 {a} 비율 {p.js('split.x')}"
+    assert json.loads(p.js("localStorage.getItem('split')"))["x"] == p.js("split.x")
+
+
+@check
+def split_layout_is_restored(p):
+    """다시 켜면 나눈 화면과 칸마다의 탭이 제자리로 온다"""
+    p.load(extra_storage="localStorage.setItem('layout', 'h2'); "
+                         "localStorage.setItem('panes', JSON.stringify(['a', 'b']));")
+    assert p.js("layout") == "h2"
+    p.js("makeTerm('a', 'a', 'D:/x'); makeTerm('b', 'b', 'D:/x'); fillEmptyPanes()")
+    time.sleep(0.3)
+    assert pane_state(p)["panes"] == ["a", "b"], pane_state(p)  # 최근 순(b, a)이 아니라 지난 배치
+
+
 @check
 def webgl_is_kept_on_recent_tabs_only(p):
     """탭마다 WebGL을 붙이면 16개쯤에서 브라우저가 컨텍스트를 버린다"""
@@ -672,7 +803,7 @@ def webgl_is_kept_on_recent_tabs_only(p):
     on = p.js("[...terms.entries()].filter(([k, t]) => t.webgl).map(([k]) => k)")
     if not on:
         return "skip: 이 크롬에서 WebGL을 못 씀"
-    assert len(on) <= 4, f"GPU 붙은 탭 {on}"
+    assert len(on) <= p.js("WEBGL_MAX") < 8, f"GPU 붙은 탭 {on}"
     p.js("activate('t0')")
     time.sleep(0.4)
     assert p.js("!!terms.get('t0').webgl"), "다시 본 탭에 GPU가 안 붙었다"

@@ -58,9 +58,20 @@
     <main id="main">
       <!-- 펼치기 버튼은 #tabs 바깥에 둔다 — renderTabs()가 매번 innerHTML을 비운다 -->
       <button id="btn-side-show" class="icon-btn" title="사이드바 펼치기 (Ctrl+Shift+B)">⟩</button>
-      <div id="tabs"></div>
+      <div id="tab-row">
+        <div id="tabs"></div>
+        <!-- 화면 나누기. 입력은 테두리가 밝은 칸으로 간다 (칸 클릭 또는 Alt+1~4) -->
+        <div id="layout-btns">
+          <button data-layout="1" title="한 칸"><svg viewBox="0 0 14 14"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5"/></svg></button>
+          <button data-layout="h2" title="좌우 두 칸"><svg viewBox="0 0 14 14"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5"/><path d="M7 1.5v11"/></svg></button>
+          <button data-layout="v2" title="위아래 두 칸"><svg viewBox="0 0 14 14"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5"/><path d="M1.5 7h11"/></svg></button>
+          <button data-layout="4" title="네 칸 (Alt+1~4로 칸 이동)"><svg viewBox="0 0 14 14"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5"/><path d="M7 1.5v11M1.5 7h11"/></svg></button>
+        </div>
+      </div>
 
       <div id="term-area">
+        <div id="gutter-x" class="gutter hidden" title="끌어서 칸 너비 조절"></div>
+        <div id="gutter-y" class="gutter hidden" title="끌어서 칸 높이 조절"></div>
         <div id="empty-state">
           <div class="empty-mark">⧉</div>
           <div class="empty-title">CLI Deck</div>

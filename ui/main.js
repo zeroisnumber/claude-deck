@@ -695,8 +695,16 @@ function showToast(title, body, onClick, kind) {
 }
 
 function notifyDone(id, t) {
-  // 화면에 떠 있고 창에 포커스가 있으면 사용자가 이미 보고 있음 — 알림 불필요
-  if (isShown(id) && document.hasFocus()) return;
+  // 화면에 떠 있고 창에 포커스가 있으면 사용자가 이미 보고 있음 — 알림 불필요.
+  // 입력 중이 아닌 칸이면 그 칸 테두리만 잠깐 깜빡여 끝났다는 걸 알린다.
+  if (isShown(id) && document.hasFocus()) {
+    if (id !== activeId) {
+      t.container.classList.remove("pane-flash");
+      void t.container.offsetWidth; // 연달아 와도 다시 깜빡이게
+      t.container.classList.add("pane-flash");
+    }
+    return;
+  }
   t.attention = true;
   showToast("✻ 응답 완료", t.title, () => activate(id), "done");
   // OS 알림은 Rust에서 보낸다. 창이 최소화되면 WebView2가 렌더러를 재워서
@@ -752,7 +760,8 @@ function applyRenderer() {
 // 않는다(되살리려고 다시 만들면 또 하나가 버려진다). 안 보이는 탭은 그릴 일이 없으니
 // CPU 렌더러로 둬도 비용이 없다. 보이는 탭은 GPU가 필요하다 — 풀스크린 클로드의 화면
 // 한 장을 CPU로 그리면 60ms(최대 104ms), GPU는 17ms. 그동안 키 입력이 밀린다.
-const WEBGL_MAX = 4;
+// 화면을 4칸까지 나누므로 보이는 4개 + 방금 본 2개. 보이는 칸은 상한에 걸려도 떼지 않는다.
+const WEBGL_MAX = 6;
 let glOrder = [];
 function ensureWebgl(id) {
   if (!webglOn) return;
@@ -764,7 +773,10 @@ function ensureWebgl(id) {
     try { t.term.refresh(0, t.term.rows - 1); } catch { /* 닫히는 중인 탭 */ }
   }
   while (glOrder.length > WEBGL_MAX) {
-    const old = terms.get(glOrder.pop());
+    let k = glOrder.length - 1;
+    while (k >= 0 && isShown(glOrder[k])) k--;
+    if (k < 0) break;
+    const old = terms.get(glOrder.splice(k, 1)[0]);
     if (old) dropWebgl(old);
   }
 }
@@ -1152,6 +1164,16 @@ function makeTerm(id, title, cwd) {
     }
   });
 
+  // 나눈 화면에서는 칸마다 크기가 따로 바뀐다(배치 변경, 경계 끌기)
+  ro.observe(container);
+  // 칸을 누르면 그 칸으로 입력이 간다
+  container.addEventListener("mousedown", () => {
+    if (activeId === id || !isShown(id)) return;
+    focusTab(id);
+    renderTabs();
+    renderSidebar();
+  }, true);
+
   if (lastGen.has(id)) entry.deadGen = lastGen.get(id);
   terms.set(id, entry);
   tabOrder.push(id);
@@ -1240,7 +1262,7 @@ async function openSession(meta, focus = true, opts = {}) {
   entry.spawnCommand = spawnCommand;
   entry.file = forking ? null : meta.file;
   if (focus) activate(tabId);
-  else renderTabs();
+  else { fillEmptyPanes(); renderTabs(); } // 나눈 화면이면 빈 칸에 앉힌다(복원할 때)
   await spawnInto(tabId, entry, "실행 실패");
   if (forking) catchUpAdoption(tabId);
   saveOpenTabs();
@@ -1537,12 +1559,159 @@ function activate(id) {
   renderSidebar();
 }
 
+// ---------- 화면 나누기 ----------
+// 칸마다 탭 하나. 칸 위치는 CSS 격자 대신 여기서 계산해 각 터미널에 직접 준다 — 경계를
+// 끌어 비율을 바꾸기 쉽고, 2×2의 가로 경계가 두 토막으로 갈리지 않는다.
+// 입력은 한 칸(focusPane)으로만 간다. 그 칸의 탭이 activeId다.
+const LAYOUT_PANES = { "1": 1, h2: 2, v2: 2, "4": 4 };
+let layout = LAYOUT_PANES[localStorage.getItem("layout")] ? localStorage.getItem("layout") : "1";
+let panes = [];          // 칸 번호 → 탭 id (null = 빈 칸)
+let focusPane = 0;
+let split = { x: 0.5, y: 0.5 };
+try { Object.assign(split, JSON.parse(localStorage.getItem("split") || "{}")); } catch { /* 기본값 */ }
+// 지난번 칸 배치. 복원된 탭이 열리는 대로 제자리에 앉힌다 (한 번 읽고 끝)
+let savedPanes = [];
+try { savedPanes = JSON.parse(localStorage.getItem("panes") || "[]"); } catch { /* 없음 */ }
+let splitDragging = false;
+
+function paneCount() { return LAYOUT_PANES[layout]; }
+
+function paneRects() {
+  const { x, y } = split;
+  switch (layout) {
+    case "h2": return [[0, 0, x, 1], [x, 0, 1 - x, 1]];
+    case "v2": return [[0, 0, 1, y], [0, y, 1, 1 - y]];
+    case "4": return [[0, 0, x, y], [x, 0, 1 - x, y], [0, y, x, 1 - y], [x, y, 1 - x, 1 - y]];
+    default: return [[0, 0, 1, 1]];
+  }
+}
+
+// 칸 배열을 화면에 반영한다: 보일 터미널·위치·빈 칸 안내·경계·포커스 표시
+function applyPanes() {
+  const n = paneCount();
+  panes = panes.slice(0, n);
+  while (panes.length < n) panes.push(null);
+  if (focusPane >= n) focusPane = 0;
+  shownIds = panes.filter(Boolean);
+  const rects = paneRects();
+  const place = (el, i) => {
+    if (n === 1) { el.style.left = el.style.top = el.style.right = el.style.bottom = ""; return; }
+    const [l, t, w, h] = rects[i];
+    // 경계 막대(4px) 자리를 양쪽이 2px씩 비운다
+    el.style.left = `calc(${l * 100}% + ${l > 0 ? 2 : 0}px)`;
+    el.style.top = `calc(${t * 100}% + ${t > 0 ? 2 : 0}px)`;
+    el.style.right = `calc(${(1 - l - w) * 100}% + ${l + w < 1 ? 2 : 0}px)`;
+    el.style.bottom = `calc(${(1 - t - h) * 100}% + ${t + h < 1 ? 2 : 0}px)`;
+  };
+  for (const [tid, t] of terms) {
+    const i = panes.indexOf(tid);
+    t.container.classList.toggle("visible", i >= 0);
+    if (i >= 0) place(t.container, i);
+  }
+  termArea.querySelectorAll(".pane-empty").forEach((el) => el.remove());
+  if (terms.size && n > 1) {
+    panes.forEach((tid, i) => {
+      if (tid) return;
+      const el = document.createElement("div");
+      el.className = "pane-empty";
+      el.dataset.pane = i;
+      el.textContent = "탭을 고르면 이 칸에 열립니다";
+      el.onmousedown = () => { focusPane = i; markPaneFocus(); };
+      place(el, i);
+      termArea.appendChild(el);
+    });
+  }
+  const gx = $("#gutter-x"), gy = $("#gutter-y");
+  gx.classList.toggle("hidden", !(n > 1 && layout !== "v2"));
+  gy.classList.toggle("hidden", !(n > 1 && layout !== "h2"));
+  gx.style.left = `calc(${split.x * 100}% - 2px)`;
+  gy.style.top = `calc(${split.y * 100}% - 2px)`;
+  termArea.classList.toggle("split", n > 1);
+  markPaneFocus();
+  document.querySelectorAll("#layout-btns button").forEach((b) =>
+    b.classList.toggle("on", b.dataset.layout === layout));
+  if (terms.size) localStorage.setItem("panes", JSON.stringify(panes));
+}
+
+function markPaneFocus() {
+  const on = paneCount() > 1;
+  for (const [tid, t] of terms) t.container.classList.toggle("pane-focused", on && panes[focusPane] === tid);
+  termArea.querySelectorAll(".pane-empty").forEach((el) =>
+    el.classList.toggle("pane-focused", on && +el.dataset.pane === focusPane));
+}
+
+// 안 보이는 탭 중 가장 최근에 연 것
+function spareTab() {
+  return [...tabOrder].reverse().find((x) => !panes.includes(x) && terms.get(x) && !terms.get(x).disposed);
+}
+
+// 빈 칸을 채운다. 지난번 그 칸에 있던 탭이 열려 있으면 그걸, 아니면 안 보이는 최근 탭을.
+function fillEmptyPanes() {
+  if (paneCount() === 1) return;
+  panes.forEach((tid, i) => {
+    if (tid) return;
+    const want = savedPanes[i];
+    const pick = want && terms.has(want) && !panes.includes(want) ? want : spareTab();
+    if (pick) { panes[i] = pick; ensureWebgl(pick); }
+  });
+  applyPanes();
+}
+
+function setLayout(next) {
+  if (!LAYOUT_PANES[next] || next === layout) return;
+  layout = next;
+  localStorage.setItem("layout", next);
+  const n = paneCount();
+  // 줄일 때 입력 중인 탭은 남긴다
+  if (activeId && panes.indexOf(activeId) >= n) panes[n - 1] = activeId;
+  panes = panes.slice(0, n);
+  focusPane = Math.max(0, panes.indexOf(activeId));
+  applyPanes();
+  fillEmptyPanes();
+  for (const id of shownIds) ensureWebgl(id);
+}
+
+// 경계 끌기. 끄는 동안에는 칸 위치만 옮기고 터미널 크기는 놓을 때 한 번 맞춘다 —
+// 프레임마다 맞추면 에이전트가 그때마다 화면 전체를 다시 그린다.
+function dragGutter(el, axis) {
+  el.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    splitDragging = true;
+    const move = (ev) => {
+      const r = termArea.getBoundingClientRect();
+      const v = axis === "x" ? (ev.clientX - r.left) / r.width : (ev.clientY - r.top) / r.height;
+      split[axis] = Math.min(0.8, Math.max(0.2, v));
+      applyPanes();
+    };
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+      splitDragging = false;
+      localStorage.setItem("split", JSON.stringify(split));
+      refitShown();
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  });
+}
+
+function refitShown() {
+  for (const [id, t] of shownTabs()) {
+    t.fit.fit();
+    invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
+  }
+}
+
 function showTab(id) {
   const t0 = performance.now();
-  shownIds = [id];
-  for (const [tid, t] of terms) {
-    t.container.classList.toggle("visible", isShown(tid));
-  }
+  // 이미 어느 칸에 떠 있으면 그 칸으로 옮겨 갈 뿐이다. 아니면 입력 중인 칸에 띄운다.
+  const at = panes.indexOf(id);
+  if (at >= 0) focusPane = at;
+  else panes[focusPane] = id;
+  applyPanes();
   emptyState.classList.add("hidden");
   // 묻는 카드가 떠 있는데 사이드바에서 직접 골라 열었으면 그걸로 답한 것이다.
   // 남겨 두면 탭을 다 닫았을 때 지난 질문이 다시 나타난다.
@@ -1567,6 +1736,9 @@ function focusTab(id) {
   activeId = id;
   const t = terms.get(id);
   if (t) t.attention = false;
+  const at = panes.indexOf(id);
+  if (at >= 0) focusPane = at;
+  markPaneFocus();
   // showTab의 맞추기 뒤에 돈다 (같은 프레임, 등록 순서)
   requestAnimationFrame(() => {
     if (terms.get(id) !== t || !t || t.disposed) return;
@@ -1590,13 +1762,18 @@ async function closeTab(id) {
   tabOrder = tabOrder.filter((x) => x !== id);
   glOrder = glOrder.filter((x) => x !== id);
   saveOpenTabs();
-  shownIds = shownIds.filter((x) => x !== id);
-  // 화면을 나누면: 입력 중이 아닌 칸의 탭을 닫을 때는 포커스를 옮기지 말아야 한다
+  // 닫힌 칸은 안 보이던 최근 탭으로 채운다. 입력 중이 아닌 칸이면 포커스는 그대로 둔다.
+  const pi = panes.indexOf(id);
+  if (pi >= 0) panes[pi] = null;
+  const spare = spareTab();
   if (activeId === id) {
     activeId = null;
-    const rest = tabOrder;
-    if (rest.length) activate(rest[rest.length - 1]);
-    else emptyState.classList.remove("hidden");
+    if (spare) { if (pi >= 0) focusPane = pi; activate(spare); }
+    else if (panes.some(Boolean)) activate(panes.find(Boolean));
+    else { applyPanes(); emptyState.classList.remove("hidden"); }
+  } else {
+    if (pi >= 0 && spare) { panes[pi] = spare; ensureWebgl(spare); }
+    applyPanes();
   }
   renderTabs();
   renderSidebar();
@@ -1616,7 +1793,7 @@ function renderTabs() {
     const t = terms.get(id);
     if (!t) continue;
     const el = document.createElement("div");
-    el.className = "tab" + (id === activeId ? " active" : "") + (t.exited ? " exited" : "") +
+    el.className = "tab" + (id === activeId ? " active" : isShown(id) ? " shown" : "") + (t.exited ? " exited" : "") +
       (t.waiting && !t.exited ? " wait" : t.attention ? " attention" : "");
     el.dataset.id = id;
     const showBadge = t.profile && t.profile.cmd !== "claude";
@@ -1848,13 +2025,26 @@ $("#btn-side-hide").onclick = () => setSidebarCollapsed(true);
 $("#btn-side-show").onclick = () => setSidebarCollapsed(false);
 
 // ---------- 리사이즈 ----------
+// 경계를 끄는 동안은 맞추지 않는다 — 놓을 때 dragGutter가 한 번 맞춘다.
+// 칸 크기가 그대로인 탭은 건너뛴다(다른 칸이 바뀔 때마다 모든 에이전트가 다시 그리지 않게).
 const ro = new ResizeObserver(() => {
+  if (splitDragging) return;
   for (const [id, t] of shownTabs()) {
+    const { cols, rows } = t.term;
     t.fit.fit();
-    invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
+    if (t.term.cols !== cols || t.term.rows !== rows || id === activeId) {
+      invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
+    }
   }
 });
 ro.observe(termArea);
+
+document.querySelectorAll("#layout-btns button").forEach((b) => {
+  b.onclick = () => setLayout(b.dataset.layout);
+});
+dragGutter($("#gutter-x"), "x");
+dragGutter($("#gutter-y"), "y");
+applyPanes();
 
 // 배율이 다른 모니터로 옮기면 창의 CSS 크기는 거의 그대로라 위 ResizeObserver가 안 불린다.
 // xterm은 스스로 글자를 다시 재고 선명하게 그리지만(matchMedia resolution + resize),
@@ -2412,6 +2602,15 @@ $("#modal-path").addEventListener("keydown", (e) => {
 // ---------- 단축키 ----------
 // Ctrl+Tab 탭 순환, Ctrl+1~9 탭 이동, Ctrl+Shift+W 탭 닫기, Ctrl+Shift+N 새 세션
 function handleShortcut(e) {
+  // Alt+1~4: 나눈 화면의 그 칸으로 입력을 옮긴다
+  if (e.altKey && !e.ctrlKey && !e.shiftKey && /^Digit[1-4]$/.test(e.code) && paneCount() > 1) {
+    const i = +e.code.slice(5) - 1;
+    if (i >= paneCount()) return true;
+    focusPane = i;
+    if (panes[i]) activate(panes[i]);
+    else markPaneFocus();
+    return true;
+  }
   if (!e.ctrlKey) return false;
   if (e.key === "Tab") {
     const ids = tabOrder;
