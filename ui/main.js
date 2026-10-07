@@ -64,7 +64,11 @@ const TERM_THEME = {
 let sessions = [];               // 스캔된 세션 메타
 const terms = new Map();         // id -> { term, fit, container, title, cwd, exited }
 let tabOrder = [];               // 탭 표시 순서 (드래그로 변경 가능)
-let activeId = null;
+let activeId = null;              // 입력을 받는 탭 (하나)
+let shownIds = [];                // 화면에 떠 있는 탭 (화면을 나누면 여럿)
+const isShown = (id) => shownIds.includes(id);
+const shownTabs = () =>
+  shownIds.map((id) => [id, terms.get(id)]).filter(([, t]) => t && !t.disposed);
 
 // ---------- UI 계측 (진단 기록이 켜져 있을 때만 의미 있음) ----------
 // 메인 스레드가 막히면 xterm이 못 그려서 "입력이 늦다가 한번에" 보인다.
@@ -691,8 +695,8 @@ function showToast(title, body, onClick, kind) {
 }
 
 function notifyDone(id, t) {
-  // 활성 탭 + 창 포커스 상태면 사용자가 이미 보고 있음 — 알림 불필요
-  if (id === activeId && document.hasFocus()) return;
+  // 화면에 떠 있고 창에 포커스가 있으면 사용자가 이미 보고 있음 — 알림 불필요
+  if (isShown(id) && document.hasFocus()) return;
   t.attention = true;
   showToast("✻ 응답 완료", t.title, () => activate(id), "done");
   // OS 알림은 Rust에서 보낸다. 창이 최소화되면 WebView2가 렌더러를 재워서
@@ -714,7 +718,7 @@ listen("pty-state", (ev) => {
   if (working) noteTurnStart(id);
   if (!working && !t.exited && notify !== false) notifyDone(id, t);
   // 권한 확인·질문으로 멈춘 세션: 보고 있지 않으면 완료 알림과 같은 방식으로 알린다
-  if (t.waiting && !wasWaiting && !(id === activeId && document.hasFocus())) {
+  if (t.waiting && !wasWaiting && !(isShown(id) && document.hasFocus())) {
     t.attention = true;
     showToast("✋ 입력 필요", t.title, () => activate(id), "wait");
   }
@@ -740,7 +744,7 @@ function loadWebgl(entry) {
 function applyRenderer() {
   for (const t of terms.values()) dropWebgl(t);
   glOrder = [];
-  if (webglOn && activeId) ensureWebgl(activeId);
+  if (webglOn) for (const id of shownIds) ensureWebgl(id);
 }
 
 // GPU 렌더러는 최근에 본 탭 몇 개에만 붙인다. 탭마다 붙이면 WebGL 컨텍스트가 탭 수만큼
@@ -1523,12 +1527,21 @@ function askRestore(list) {
   emptyState.appendChild(card);
 }
 
+// 탭을 화면에 띄우고(showTab) 입력을 그 탭으로 보낸다(focusTab).
+// "보이는 탭"과 "입력을 받는 탭(activeId)"은 지금은 같지만 화면을 나누면 갈라진다 —
+// 그래서 따로 둔다. 보이는지를 물을 때는 isShown, 입력 대상은 activeId를 쓴다.
 function activate(id) {
-  activeId = id;
-  const cur = terms.get(id);
-  if (cur) cur.attention = false;
+  showTab(id);
+  focusTab(id);
+  renderTabs();
+  renderSidebar();
+}
+
+function showTab(id) {
+  const t0 = performance.now();
+  shownIds = [id];
   for (const [tid, t] of terms) {
-    t.container.classList.toggle("visible", tid === id);
+    t.container.classList.toggle("visible", isShown(tid));
   }
   emptyState.classList.add("hidden");
   // 묻는 카드가 떠 있는데 사이드바에서 직접 골라 열었으면 그걸로 답한 것이다.
@@ -1536,16 +1549,29 @@ function activate(id) {
   emptyState.querySelector(".restore-card")?.remove();
   ensureWebgl(id);
   const t = terms.get(id);
+  const sync = performance.now() - t0;
   requestAnimationFrame(() => {
     // 이 프레임 사이에 탭이 닫혔을 수 있다. 버려진 터미널에 fit()을 걸면 xterm이
     // _isDisposed를 읽다 던진다(트레이스에 20건 남아 있던 예외).
     if (terms.get(id) !== t || t.disposed) return;
+    const f0 = performance.now();
     t.fit.fit();
     invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
+    // 탭 전환 때 60~90ms씩 멈칫하는 게 어느 단계인지 가르려고 잰다(전환·GPU 준비 | 맞추기)
+    const fit = performance.now() - f0;
+    if (traceOn && sync + fit > 5) uiTrace("activate", `${Math.round(sync)}|${Math.round(fit)}`);
+  });
+}
+
+function focusTab(id) {
+  activeId = id;
+  const t = terms.get(id);
+  if (t) t.attention = false;
+  // showTab의 맞추기 뒤에 돈다 (같은 프레임, 등록 순서)
+  requestAnimationFrame(() => {
+    if (terms.get(id) !== t || !t || t.disposed) return;
     t.term.focus();
   });
-  renderTabs();
-  renderSidebar();
 }
 
 async function closeTab(id) {
@@ -1564,6 +1590,8 @@ async function closeTab(id) {
   tabOrder = tabOrder.filter((x) => x !== id);
   glOrder = glOrder.filter((x) => x !== id);
   saveOpenTabs();
+  shownIds = shownIds.filter((x) => x !== id);
+  // 화면을 나누면: 입력 중이 아닌 칸의 탭을 닫을 때는 포커스를 옮기지 말아야 한다
   if (activeId === id) {
     activeId = null;
     const rest = tabOrder;
@@ -1821,11 +1849,10 @@ $("#btn-side-show").onclick = () => setSidebarCollapsed(false);
 
 // ---------- 리사이즈 ----------
 const ro = new ResizeObserver(() => {
-  if (!activeId) return;
-  const t = terms.get(activeId);
-  if (!t) return;
-  t.fit.fit();
-  invoke("resize_pty", { id: activeId, cols: t.term.cols, rows: t.term.rows });
+  for (const [id, t] of shownTabs()) {
+    t.fit.fit();
+    invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
+  }
 });
 ro.observe(termArea);
 
@@ -1839,12 +1866,12 @@ function onDprMaybeChanged() {
   if (window.devicePixelRatio === lastDpr) return;
   lastDpr = window.devicePixelRatio;
   requestAnimationFrame(() => {
-    const t = activeId && terms.get(activeId);
-    if (!t || t.disposed) return;
-    const { cols, rows } = t.term;
-    t.fit.fit();
-    if (t.term.cols !== cols || t.term.rows !== rows) {
-      invoke("resize_pty", { id: activeId, cols: t.term.cols, rows: t.term.rows });
+    for (const [id, t] of shownTabs()) {
+      const { cols, rows } = t.term;
+      t.fit.fit();
+      if (t.term.cols !== cols || t.term.rows !== rows) {
+        invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
+      }
     }
   });
 }
