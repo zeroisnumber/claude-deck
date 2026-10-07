@@ -648,6 +648,21 @@ def manual_update_check_reports_failure(p):
 
 
 @check
+def slow_frames_are_traced(p):
+    """50ms 미만으로 자주 밀리는 렉은 longtask에 안 잡힌다 — 프레임 간격으로 남긴다"""
+    p.load(trace=True)
+    p.term()
+    # 프레임마다 메인 스레드를 35ms씩 붙잡는다(출력이 쏟아질 때 그리기가 밀리는 모양)
+    p.js("window.__jank = setInterval(() => { const e = performance.now() + 35; while (performance.now() < e); }, 40)")
+    time.sleep(11.5)
+    p.js("clearInterval(window.__jank)")
+    rec = [c["value"] for c in calls(p, "trace_ui") if c["kind"] == "frames"]
+    assert rec, "느린 프레임을 남기지 않았다"
+    p95, mx, n, mode, shown, kb = rec[-1].split("|")
+    assert int(p95) > 25 and mode in ("gl", "dom") and shown == "1", rec[-1]
+
+
+@check
 def turn_chart_groups_thousands_of_bars(p):
     """턴 7857개를 막대 하나씩 그리느라 화면이 멈추던 것"""
     p.load()

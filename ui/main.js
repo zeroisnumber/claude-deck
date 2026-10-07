@@ -91,6 +91,36 @@ try {
   }).observe({ entryTypes: ["longtask"] });
 } catch { /* 미지원 브라우저 */ }
 
+// longtask는 50ms 이상만 잡는다. 출력이 쏟아지는 동안 20~40ms씩 자주 밀리는 "렉"은
+// 거기 안 걸리므로 프레임 간격을 직접 잰다. 5초마다 느린 쪽(p95)과 최대를 남기되, 매끄러운
+// 구간(p95 25ms 이하, 최대 50ms 이하)은 남기지 않는다. 기록이 꺼져 있으면 돌지 않는다.
+//   frames  <p95 ms>|<최대 ms>|<프레임 수>|<gl|dom>|<보이는 칸 수>|<그동안 받은 출력 KB>
+let frameGaps = [];
+let frameLast = 0;
+let frameLoop = false;
+let frameOutBytes = 0; // pty-output이 더한다
+function frameTick(now) {
+  if (!traceOn) { frameLoop = false; frameLast = 0; frameGaps = []; return; }
+  if (frameLast) frameGaps.push(now - frameLast);
+  frameLast = now;
+  requestAnimationFrame(frameTick);
+}
+setInterval(() => {
+  if (!traceOn) return;
+  if (!frameLoop) { frameLoop = true; requestAnimationFrame(frameTick); return; }
+  // 창이 가려져 프레임이 멈췄던 구간은 버린다(그건 렉이 아니다)
+  const gaps = frameGaps.filter((g) => g < 1000).sort((a, b) => a - b);
+  const out = frameOutBytes;
+  frameGaps = [];
+  frameOutBytes = 0;
+  if (gaps.length < 10) return;
+  const p95 = gaps[Math.floor(gaps.length * 0.95)];
+  const max = gaps[gaps.length - 1];
+  if (p95 <= 25 && max <= 50) return;
+  uiTrace("frames", `${Math.round(p95)}|${Math.round(max)}|${gaps.length}|${webglOn ? "gl" : "dom"}|` +
+    `${shownIds.length}|${Math.round(out / 1024)}`);
+}, 5000);
+
 const $ = (s) => document.querySelector(s);
 const listEl = $("#session-list");
 let kbId = null; // 사이드바에서 키보드로 고른 세션 (아래 키보드 탐색 참고)
@@ -1947,6 +1977,7 @@ listen("pty-output", (ev) => {
   if (t) {
     const t0 = performance.now();
     const bytes = b64ToBytes(data);
+    if (traceOn && isShown(id)) frameOutBytes += bytes.length;
     // 클로드가 첫 화면을 그리면(한 번에 1KB 넘게 온다) 안내를 거둔다
     if (t.loadingEl && bytes.length > 1000) hideLoading(t);
     t.term.write(bytes);
