@@ -1694,6 +1694,7 @@ function setLayout(next) {
   applyPanes();
   fillEmptyPanes();
   for (const id of shownIds) ensureWebgl(id);
+  renderTabs(); // 다른 칸에 뜬 탭 표시
 }
 
 // 경계 끌기. 끄는 동안에는 칸 위치만 옮기고 터미널 크기는 놓을 때 한 번 맞춘다 —
@@ -1954,9 +1955,6 @@ listen("pty-output", (ev) => {
   }
 });
 
-// 같은 세션을 다른 프로세스가 이어받으면(클로드가 스스로 다시 띄우거나 다른
-// 터미널에서 --resume 했을 때) 이 탭의 화면을 그리고 키를 읽던 쪽이 사라진다.
-// 겉보기에는 멀쩡해서 한참 뒤에야 알아채므로, 알게 된 순간 띠를 띄운다.
 // 새 세션 탭의 클로드가 어느 세션을 잡았는지 Rust가 pid로 알아냈다. 기록 파일이 생긴
 // 순서로 짝을 맞추면 같은 폴더의 새 탭 둘이 서로 바뀔 수 있다 — 이게 정답이다.
 listen("pty-session", (ev) => {
@@ -1968,6 +1966,9 @@ listen("pty-session", (ev) => {
   adoptNewTabs(); // 목록이 이미 그 세션을 알면 바로 붙는다
 });
 
+// 같은 세션을 다른 프로세스가 이어받으면(클로드가 스스로 다시 띄우거나 다른
+// 터미널에서 --resume 했을 때) 이 탭의 화면을 그리고 키를 읽던 쪽이 사라진다.
+// 겉보기에는 멀쩡해서 한참 뒤에야 알아채므로, 알게 된 순간 띠를 띄운다.
 listen("session-moved", (ev) => {
   const { id, from, to } = ev.payload;
   const t = terms.get(id);

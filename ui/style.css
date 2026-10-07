@@ -661,6 +661,8 @@ html, body {
   display: none;
 }
 .term-container.visible { display: block; }
+/* 경계를 끄는 동안 캔버스가 옛 크기로 옆 칸까지 삐져나오지 않게 */
+#term-area.split .term-container { overflow: hidden; }
 
 /* ─── 화면 나누기 ─── 칸 위치(left/top/right/bottom)는 main.js가 준다 */
 #term-area.split { background: var(--border); }

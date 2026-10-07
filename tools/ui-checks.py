@@ -729,6 +729,25 @@ def split_into_four_panes(p):
 
 
 @check
+def split_panes_all_get_gpu(p):
+    """4칸에서 보이는 칸이 모두 GPU로 그려야 한다 — CPU로 떨어지면 칸마다 60ms씩 멈춘다.
+    칸이 아직 안 보일 때 붙이면 조용히 실패할 수 있다."""
+    p.load(webgl=True)
+    for t in "abcd":
+        p.term(t)
+    if not p.js("!!terms.get('d').webgl"):
+        return "skip: 이 크롬에서 WebGL을 못 씀"
+    p.js("activate('a'); setLayout('4')")
+    time.sleep(0.6)
+    r = json.loads(p.js("""JSON.stringify(shownTabs().map(([id, t]) => {
+      const c = t.container.querySelector('.xterm-screen canvas');
+      return [id, !!t.webgl, c ? c.width : 0];
+    }))"""))
+    assert len(r) == 4 and all(gl and w > 0 for _, gl, w in r), f"칸별 GPU {r}"
+    assert p.js("[...document.querySelectorAll('.tab.shown')].length") == 3, "다른 칸의 탭 표시가 안 갱신됐다"
+
+
+@check
 def split_close_and_notify(p):
     """입력 중이 아닌 칸의 탭을 닫아도 입력 칸은 그대로. 보이는 칸이 끝나면 토스트 대신 테두리."""
     p.load()
