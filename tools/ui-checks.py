@@ -784,14 +784,31 @@ def split_gutter_resizes_once_on_release(p):
 
 
 @check
+def tab_switch_resizes_once(p):
+    """탭을 바꿀 때 크기 알림이 두 번 가면 에이전트가 화면을 두 번 그린다"""
+    p.load()
+    for t in "ab":
+        p.term(t)
+    p.js("window.__calls = []; activate('a')")
+    time.sleep(0.4)
+    n = [c["id"] for c in calls(p, "resize_pty")]
+    assert n == ["a"], f"resize_pty {n}"
+
+
+@check
 def split_layout_is_restored(p):
     """다시 켜면 나눈 화면과 칸마다의 탭이 제자리로 온다"""
-    p.load(extra_storage="localStorage.setItem('layout', 'h2'); "
-                         "localStorage.setItem('panes', JSON.stringify(['a', 'b']));")
+    s = fake_sessions(2)
+    a, b = s[0]["session_id"], s[1]["session_id"]
+    # 지난번: b가 왼쪽, a가 오른쪽. 복원은 a부터 연다(첫 탭은 입력 칸으로 바로 뜬다).
+    p.load(sessions=s, extra_storage="localStorage.setItem('layout', 'h2'); "
+                                     f"localStorage.setItem('panes', JSON.stringify(['{b}', '{a}']));")
     assert p.js("layout") == "h2"
-    p.js("makeTerm('a', 'a', 'D:/x'); makeTerm('b', 'b', 'D:/x'); fillEmptyPanes()")
-    time.sleep(0.3)
-    assert pane_state(p)["panes"] == ["a", "b"], pane_state(p)  # 최근 순(b, a)이 아니라 지난 배치
+    p.js("openRestored(sessions.slice(0, 2))")
+    time.sleep(0.6)
+    st = pane_state(p)
+    assert st["panes"] == [b, a], st
+    assert st["activeId"] == a and st["focusPane"] == 1, f"입력은 처음 연 탭(a)에 남아야 한다 {st}"
 
 
 @check

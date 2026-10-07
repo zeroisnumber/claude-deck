@@ -1514,8 +1514,10 @@ function restoreTabs() {
 }
 
 function openRestored(list) {
-  list.forEach((meta, i) =>
+  const opening = list.map((meta, i) =>
     detach(`restoreTab:${meta.session_id.slice(0, 8)}`, openSession(meta, i === 0)));
+  // 나눈 화면이면 다 열린 뒤 칸 배치를 지난번대로 맞춘다
+  Promise.allSettled(opening).then(arrangeSavedPanes);
 }
 
 function askRestore(list) {
@@ -1616,7 +1618,8 @@ function applyPanes() {
       el.className = "pane-empty";
       el.dataset.pane = i;
       el.textContent = "탭을 고르면 이 칸에 열립니다";
-      el.onmousedown = () => { focusPane = i; markPaneFocus(); };
+      // 빈 칸을 골랐으면 키 입력이 옆 칸 터미널로 새지 않게 포커스를 거둔다
+      el.onmousedown = (e) => { e.preventDefault(); document.activeElement?.blur(); focusPane = i; markPaneFocus(); };
       place(el, i);
       termArea.appendChild(el);
     });
@@ -1645,16 +1648,30 @@ function spareTab() {
   return [...tabOrder].reverse().find((x) => !panes.includes(x) && terms.get(x) && !terms.get(x).disposed);
 }
 
-// 빈 칸을 채운다. 지난번 그 칸에 있던 탭이 열려 있으면 그걸, 아니면 안 보이는 최근 탭을.
+// 빈 칸을 안 보이는 최근 탭으로 채운다
 function fillEmptyPanes() {
   if (paneCount() === 1) return;
   panes.forEach((tid, i) => {
     if (tid) return;
-    const want = savedPanes[i];
-    const pick = want && terms.has(want) && !panes.includes(want) ? want : spareTab();
+    const pick = spareTab();
     if (pick) { panes[i] = pick; ensureWebgl(pick); }
   });
   applyPanes();
+}
+
+// 켤 때 복원된 탭들을 지난번 칸으로. 탭이 하나씩 열리며 아무 칸에나 앉았던 것을 다 열린
+// 뒤 한 번에 제자리로 옮긴다(자리를 맞바꾼다). 이번에 안 연 탭의 칸은 남은 탭으로 채운다.
+function arrangeSavedPanes() {
+  if (paneCount() === 1) return;
+  savedPanes.slice(0, paneCount()).forEach((id, i) => {
+    if (!id || !terms.has(id) || panes[i] === id) return;
+    const j = panes.indexOf(id);
+    if (j >= 0) panes[j] = panes[i];
+    panes[i] = id;
+    ensureWebgl(id);
+  });
+  focusPane = Math.max(0, panes.indexOf(activeId));
+  fillEmptyPanes();
 }
 
 function setLayout(next) {
@@ -1755,6 +1772,7 @@ async function closeTab(id) {
   // 처리돼 아무 일도 안 일어난다. 정리는 무조건 끝까지 간다.
   t.disposed = true;
   try { t.term.dispose(); } catch (err) { reportFatal(`term.dispose: ${err && err.stack || err}`); }
+  ro.unobserve(t.container);
   t.container.remove();
   if (t.gen != null) lastGen.set(id, t.gen);
   terms.delete(id);
@@ -2032,7 +2050,9 @@ const ro = new ResizeObserver(() => {
   for (const [id, t] of shownTabs()) {
     const { cols, rows } = t.term;
     t.fit.fit();
-    if (t.term.cols !== cols || t.term.rows !== rows || id === activeId) {
+    // 크기가 그대로면 알리지 않는다. 탭을 띄울 때(안 보이다 보임)도 이게 불리는데, 그때는
+    // showTab이 이미 알렸다 — 또 보내면 에이전트가 화면을 한 번 더 다시 그린다.
+    if (t.term.cols !== cols || t.term.rows !== rows) {
       invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
     }
   }
