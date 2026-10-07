@@ -309,6 +309,54 @@ def mouse_moves_are_thinned_but_end_where_the_mouse_stopped(p):
 
 
 @check
+def ctrl_click_opens_file_paths(p):
+    """화면의 파일 경로: 올리면 밑줄(손가락), Ctrl+클릭이면 열고, 그냥 클릭은 에이전트 몫.
+    앞에 한글(두 칸)이 있어도 칸이 맞아야 하고, 없는 파일은 잇지 않는다."""
+    p.load(replies={"resolve_links": ["D:/x/src/main.rs", None]})
+    mouse_mode(p)  # 풀스크린 클로드처럼 마우스 신호 모드에서도 돼야 한다
+    p.write("\x1b[H\x1b[2J● 수정함 src/main.rs:12 그리고 nope/x.rs")
+    time.sleep(0.2)
+
+    def at(ch, nth=0):
+        """줄 0에서 nth번째 ch 글자가 있는 칸의 화면 좌표"""
+        return json.loads(p.js(f"""(() => {{
+          const t = terms.get('t').term, line = t.buffer.active.getLine(0);
+          let seen = 0;
+          for (let x = 0; x < line.length; x++) {{
+            if (line.getCell(x).getChars() === {json.dumps(ch)} && seen++ === {nth}) {{
+              const c = t._core._renderService.dimensions.css.cell;
+              const s = t.element.querySelector('.xterm-screen').getBoundingClientRect();
+              return JSON.stringify([s.left + (x + 0.5) * c.width, s.top + 0.5 * c.height]);
+            }}
+          }}
+        }})()"""))
+
+    def hover(xy):
+        for dx in (-3, 0):
+            p.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=xy[0] + dx, y=xy[1])
+            time.sleep(0.12)
+        time.sleep(0.2)
+        return p.js("!!terms.get('t').term.element.querySelector('.xterm-cursor-pointer')")
+
+    def click(xy, mods):
+        for t in ("mousePressed", "mouseReleased"):
+            p.cdp("Input.dispatchMouseEvent", type=t, x=xy[0], y=xy[1], button="left",
+                  clickCount=1, buttons=1 if t == "mousePressed" else 0, modifiers=mods)
+            time.sleep(0.05)
+        time.sleep(0.2)
+        return p.js("window.__calls.filter(c => c[0] === 'open_link').map(c => c[1])")
+
+    assert hover(at("m")), "경로 위인데 손가락이 아니다"
+    assert click(at("m"), 0) == [], "그냥 클릭으로 열었다"
+    opened = click(at("m"), 2)
+    assert opened == [{"path": "D:/x/src/main.rs", "line": 12, "col": None}], f"Ctrl+클릭 {opened}"
+    assert not hover(at("그")), "경로 밖(뒤 한글)인데 손가락"
+    assert not hover(at("p", 0)), "없는 파일(nope)을 이었다"
+    got = p.js("pathCandidates('● 작업/파일.txt, 끝.').map(c => c.path)")
+    assert got == ["작업/파일.txt"], f"한글 폴더 {got}"
+
+
+@check
 def plain_scroll_still_works_outside_mouse_mode(p):
     """마우스 신호 모드가 아닐 때 휠은 xterm 자체 스크롤이어야 한다"""
     p.load()

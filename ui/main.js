@@ -872,6 +872,85 @@ function throttleMouseReports(term, container) {
   }, true);
 }
 
+// 화면의 파일 경로에 마우스를 올리면 밑줄, Ctrl+클릭이면 연다(편집기가 있으면 그 줄로).
+// 경로처럼 생긴 것 중 실제로 있는 것만 잇는다 — 있는지는 Rust가 본다. 마우스를 올린
+// 줄마다 묻게 되므로 같은 줄 글자는 기억해 둔다.
+const LINK_STOP = /[\s"'`()[\]{}<>|,;]/;
+const linkCache = new Map(); // "폴더\n줄 글자" → { at, p: Promise<찾은 경로[]> }
+function pathCandidates(text) {
+  const out = [];
+  let i = 0;
+  while (i < text.length) {
+    if (LINK_STOP.test(text[i])) { i++; continue; }
+    let j = i;
+    while (j < text.length && !LINK_STOP.test(text[j])) j++;
+    let tok = text.slice(i, j), start = i;
+    // 문장 끝 구두점, 앞에 붙은 기호(●⎿ 같은 것)는 떼어 낸다
+    const lead = tok.match(/^[^\p{L}\p{N}_.~\\/]+/u); // 한글 폴더 이름은 남긴다
+    if (lead) { tok = tok.slice(lead[0].length); start += lead[0].length; }
+    tok = tok.replace(/[.:]+$/, "");
+    const m = tok.match(/^(.+?)(?::(\d+))?(?::(\d+))?$/);
+    const p = m && m[1];
+    if (p && !p.includes("://") && /[A-Za-z]/.test(p)
+        && (/[\\/]/.test(p) || /\.[A-Za-z][\w]{0,9}$/.test(p))) {
+      out.push({ start, end: start + tok.length, path: p,
+                 line: m[2] ? +m[2] : null, col: m[3] ? +m[3] : null });
+    }
+    i = j;
+  }
+  return out;
+}
+function fileLinkProvider(term, entry) {
+  return {
+    provideLinks(y, callback) {
+      const line = term.buffer.active.getLine(y - 1);
+      if (!line) return callback(undefined);
+      // 한글처럼 두 칸짜리 글자가 있으면 글자 위치와 칸 위치가 다르다. 글자마다 칸을 적어 둔다.
+      let text = "";
+      const colOf = [];
+      for (let x = 0; x < line.length; x++) {
+        const cell = line.getCell(x);
+        if (!cell || cell.getWidth() === 0) continue;
+        const ch = cell.getChars() || " ";
+        for (let k = 0; k < ch.length; k++) colOf.push([x, cell.getWidth()]);
+        text += ch;
+      }
+      const cands = pathCandidates(text);
+      if (!cands.length || !entry.cwd && cands.every((c) => !/^[A-Za-z]:/.test(c.path))) return callback(undefined);
+      const key = entry.cwd + "\n" + text;
+      // 방금 만든 파일도 곧 잡히게 잠깐만 기억한다
+      const hit = linkCache.get(key);
+      let pending = hit && performance.now() - hit.at < 10000 ? hit.p : null;
+      if (!pending) {
+        pending = invoke("resolve_links", { cwd: entry.cwd || "", candidates: cands.map((c) => c.path) })
+          .catch(() => []);
+        linkCache.delete(key);
+        linkCache.set(key, { at: performance.now(), p: pending });
+        if (linkCache.size > 300) linkCache.delete(linkCache.keys().next().value);
+      }
+      pending.then((found) => {
+        const links = [];
+        cands.forEach((c, n) => {
+          const full = found[n];
+          if (!full) return;
+          const [x0] = colOf[c.start];
+          const [x1, w1] = colOf[c.end - 1];
+          links.push({
+            range: { start: { x: x0 + 1, y }, end: { x: x1 + w1, y } },
+            text: text.slice(c.start, c.end),
+            activate: (e) => {
+              if (!e.ctrlKey) return; // 그냥 클릭은 에이전트 화면 조작이다
+              invoke("open_link", { path: full, line: c.line, col: c.col })
+                .catch((err) => showToast("열 수 없습니다", String(err)));
+            },
+          });
+        });
+        callback(links.length ? links : undefined);
+      });
+    },
+  };
+}
+
 function makeTerm(id, title, cwd) {
   const container = document.createElement("div");
   container.className = "term-container";
@@ -886,6 +965,8 @@ function makeTerm(id, title, cwd) {
     scrollback: 8000,
     theme: TERM_THEME,
     allowProposedApi: true,
+    // 에이전트가 OSC 8 링크를 찍으면 xterm 기본 동작은 confirm() 창이다 — 앱을 막는다
+    linkHandler: { activate() {} },
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
@@ -918,6 +999,7 @@ function makeTerm(id, title, cwd) {
   const entry = { term, fit, container, title, cwd, exited: false, busy: false, profile: null, webgl: null };
   // GPU 렌더러는 activate가 붙인다 (최근에 본 몇 개만)
   term.element.addEventListener("webglcontextrestored", () => scheduleWebglRebuild("context restored"), true);
+  term.registerLinkProvider(fileLinkProvider(term, entry));
 
   // 한글 입력이 가끔 두 번 들어가고 조합창이 엉뚱한 데 뜬다. 재현이 들쭉날쭉해서
   // 한 번 찍어 보는 로그로는 못 잡는다 — 진단 기록이 켜져 있는 동안 조합 이벤트와

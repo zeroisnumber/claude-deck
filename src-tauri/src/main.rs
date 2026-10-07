@@ -21,6 +21,7 @@ use tauri_plugin_notification::NotificationExt;
 mod agents;
 mod diag;
 mod endsession;
+mod links;
 mod statusline;
 mod activity;
 mod pty;
@@ -179,6 +180,8 @@ fn main() {
             usage::codex_state,
             open_log_file,
             open_path,
+            links::resolve_links,
+            links::open_link,
             rebind_ime,
             update::check_update,
             update::install_update,
