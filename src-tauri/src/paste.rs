@@ -29,8 +29,22 @@ pub(crate) fn save_clipboard_image(app: AppHandle) -> Result<Option<String>, Str
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let path = dir.join(format!("paste-{stamp}.png"));
-    write_png(&path, img.rgba(), w, h)?;
+    write_png(&path, &opaque_if_blank(img.rgba()), w, h)?;
     Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// 32비트 비트맵을 내놓는 프로그램 중에는 알파 칸을 안 쓰고 0으로 두는 것이 있다
+/// (문서상 BI_RGB면 그 바이트는 "쓰지 않음"이다). arboard는 그 알파를 믿으므로 그대로
+/// 저장하면 완전히 투명한 그림이 되어 에이전트가 빈 이미지를 받는다. 실제 캡처가 모든
+/// 픽셀이 투명할 리는 없으니, 그럴 때만 불투명으로 바꾼다.
+fn opaque_if_blank(rgba: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if rgba.chunks_exact(4).all(|p| p[3] == 0) {
+        let mut v = rgba.to_vec();
+        v.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+        std::borrow::Cow::Owned(v)
+    } else {
+        std::borrow::Cow::Borrowed(rgba)
+    }
 }
 
 fn write_png(path: &Path, rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
@@ -87,15 +101,28 @@ mod tests {
     }
 
     #[test]
+    fn blank_alpha_becomes_opaque() {
+        // 알파를 0으로 둔 비트맵 → 불투명으로
+        assert_eq!(&*super::opaque_if_blank(&[10, 20, 30, 0, 40, 50, 60, 0]), &[10, 20, 30, 255, 40, 50, 60, 255]);
+        // 일부라도 알파가 있으면 진짜 투명도다 — 건드리지 않는다
+        assert_eq!(&*super::opaque_if_blank(&[10, 20, 30, 0, 40, 50, 60, 128]), &[10, 20, 30, 0, 40, 50, 60, 128]);
+    }
+
+    #[test]
     fn cleanup_removes_only_old_pastes() {
         let dir = std::env::temp_dir().join(format!("deck-paste-clean-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let fresh = dir.join("paste-2.png");
+        let old = dir.join("paste-1.png");
         let other = dir.join("keep.txt");
         std::fs::write(&fresh, b"x").unwrap();
         std::fs::write(&other, b"x").unwrap();
+        std::fs::write(&old, b"x").unwrap();
+        let two_days = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(two_days).unwrap();
         super::cleanup(&dir);
         assert!(fresh.exists() && other.exists(), "방금 만든 것·남의 파일은 남긴다");
+        assert!(!old.exists(), "하루 넘은 붙여넣기는 치운다");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
