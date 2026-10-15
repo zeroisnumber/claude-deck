@@ -1160,6 +1160,12 @@ function makeTerm(id, title, cwd) {
     } catch {
       try { text = await navigator.clipboard.readText(); } catch { /* 클립보드 접근 실패 */ }
     }
+    // 글자가 없으면 캡처 같은 이미지일 수 있다. 터미널로는 이미지를 못 보내므로 임시
+    // 파일로 저장해 그 경로를 붙여넣는다(클로드는 이미지 경로를 붙여넣으면 첨부한다).
+    if (!text) {
+      const path = await invoke("save_clipboard_image").catch(() => null);
+      if (path) text = /\s/.test(path) ? `"${path}"` : path;
+    }
     if (text) {
       // paste는 onData를 곧바로(동기로) 부른다 — 그동안만 입력기 검사를 끈다
       pasting = true;

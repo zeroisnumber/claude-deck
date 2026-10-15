@@ -648,6 +648,26 @@ def manual_update_check_reports_failure(p):
 
 
 @check
+def ctrl_v_pastes_clipboard_image_as_path(p):
+    """클립보드에 글자 없이 이미지만 있으면 임시 PNG 경로를 붙여넣는다. 글자가 있으면 글자."""
+    p.load(replies={"save_clipboard_image": r"C:\Users\me\AppData\Local\Temp\cli-deck-paste\paste-1.png"})
+    p.term()
+    p.js("window.__clip = ''; window.__TAURI__.clipboardManager = { readText: () => Promise.resolve(window.__clip) }")
+    p.write("\x1b[?2004h")  # 클로드처럼 괄호 붙여넣기를 켠다
+    p.js("window.__sent = []")
+    p.key("v", "KeyV", 86, modifiers=2)
+    time.sleep(0.3)
+    sent = "".join(p.js("window.__sent"))
+    assert sent == "\x1b[200~C:\\Users\\me\\AppData\\Local\\Temp\\cli-deck-paste\\paste-1.png\x1b[201~", repr(sent)
+    # 글자가 있으면 이미지는 보지 않는다
+    p.js("window.__clip = 'hello'; window.__sent = []; window.__calls = []")
+    p.key("v", "KeyV", 86, modifiers=2)
+    time.sleep(0.3)
+    assert "".join(p.js("window.__sent")) == "\x1b[200~hello\x1b[201~"
+    assert not calls(p, "save_clipboard_image"), "글자가 있는데 이미지를 저장했다"
+
+
+@check
 def slow_frames_are_traced(p):
     """50ms 미만으로 자주 밀리는 렉은 longtask에 안 잡힌다 — 프레임 간격으로 남긴다"""
     p.load(trace=True)

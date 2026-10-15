@@ -22,6 +22,7 @@ mod agents;
 mod diag;
 mod endsession;
 mod links;
+mod paste;
 mod statusline;
 mod activity;
 mod pty;
@@ -182,6 +183,7 @@ fn main() {
             open_path,
             links::resolve_links,
             links::open_link,
+            paste::save_clipboard_image,
             rebind_ime,
             update::check_update,
             update::install_update,

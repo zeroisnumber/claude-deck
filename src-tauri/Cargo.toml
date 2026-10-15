@@ -19,6 +19,8 @@ serde_json = "1"
 portable-pty = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 base64 = "0.22"
+# 클립보드 이미지를 붙여넣을 때 PNG로 저장. tauri가 이미 물고 있는 버전이라 빌드가 늘지 않는다.
+png = "0.17"
 dirs = "5"
 # WebView2 초기 IME 바인딩 버그 우회용 (tauri가 쓰는 버전과 일치해야 함)
 webview2-com = "0.38"

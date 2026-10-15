@@ -572,6 +572,69 @@ mod tests {
         assert!(super::descends_from(me, parent, &parents));
     }
 
+    /// 이미지 파일 경로를 괄호 붙여넣기로 보내면 클로드가 이미지로 첨부하는가
+    /// (Ctrl+V로 캡처를 붙여넣을 때 앱이 하는 일). 제출하지 않으므로 요청은 나가지 않는다.
+    /// `cargo test -- --ignored claude_attaches_pasted_image_path --nocapture`
+    #[test]
+    #[ignore]
+    fn claude_attaches_pasted_image_path() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("deck-typeahead");
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = std::env::temp_dir().join("cli-deck-paste-test.png");
+        let px: Vec<u8> = (0..16 * 16).flat_map(|i| [(i % 255) as u8, 80, 160, 255]).collect();
+        crate::paste::write_png_for_test(&img, &px, 16, 16);
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "claude"]);
+        cmd.cwd(&dir);
+        for (k, _) in std::env::vars() {
+            if k.starts_with("CLAUDE") || k == "AI_AGENT" {
+                cmd.env_remove(k);
+            }
+        }
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() { break; }
+            }
+        });
+        let t0 = std::time::Instant::now();
+        let mut screen = Vec::new();
+        let mut sent = false;
+        while t0.elapsed() < std::time::Duration::from_secs(25) {
+            if let Ok(c) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                if String::from_utf8_lossy(&c).contains("[c") {
+                    let _ = writer.write_all(b"\x1b[?1;2c");
+                }
+                screen.extend_from_slice(&c);
+            }
+            // 첫 화면이 뜬 뒤(6초) 경로를 괄호 붙여넣기로 보낸다 — xterm의 term.paste와 같다
+            if !sent && t0.elapsed() > std::time::Duration::from_secs(6) {
+                let paste = format!("\x1b[200~{}\x1b[201~", img.display());
+                let _ = writer.write_all(paste.as_bytes());
+                sent = true;
+            }
+            if sent && String::from_utf8_lossy(&screen).contains("[Image") {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let text = String::from_utf8_lossy(&screen);
+        let attached = text.contains("[Image");
+        let plain: String = text.chars().filter(|c| c.is_alphanumeric() || " #[]._-\\:".contains(*c)).collect();
+        let tail: String = plain.chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
+        eprintln!("첨부됨: {attached}\n화면 끝: {tail}");
+        let _ = std::fs::remove_file(&img);
+        assert!(attached, "경로를 붙여넣었는데 이미지로 첨부되지 않았다");
+    }
+
     /// 새 세션 탭의 클로드를 pid로 찾을 수 있는가: 상태 파일이 언제 생기고, 그 pid가
     /// 탭의 cmd.exe 아래에 있는가. 제출하지 않으므로 요청은 나가지 않는다.
     /// `cargo test -- --ignored new_tab_session_by_pid --nocapture`
