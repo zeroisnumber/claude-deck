@@ -1,13 +1,24 @@
 //! 클립보드에 글자 없이 이미지만 있을 때(Win+Shift+S 캡처 등) Ctrl+V로 붙여넣는다.
-//! 터미널로는 이미지를 보낼 수 없으므로 임시 폴더에 PNG로 저장하고 그 경로를 돌려준다 —
+//! 터미널로는 이미지를 보낼 수 없으므로 앱 폴더에 PNG로 저장하고 그 경로를 돌려준다 —
 //! 프런트가 경로를 붙여넣으면 클로드는 이미지로 첨부하고, 다른 에이전트도 파일로 읽는다.
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-/// 붙여넣은 이미지를 두는 곳. 하루 지난 것은 저장할 때마다 치운다.
+/// 붙여넣은 이미지를 두는 곳: %LOCALAPPDATA%\com.user.cli-deck\paste (번역 캐시·진단
+/// 기록과 같은 앱 폴더). 하루 지난 것은 앱을 켤 때와 저장할 때마다 치운다 — 클로드는
+/// 붙여넣는 순간 이미지를 대화 기록에 담으므로 파일이 지워져도 세션은 멀쩡하다.
 fn paste_dir() -> PathBuf {
-    std::env::temp_dir().join("cli-deck-paste")
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("com.user.cli-deck")
+        .join("paste")
+}
+
+/// 켤 때 한 번. 마지막으로 붙여넣은 뒤 다시 붙여넣지 않으면 저장할 때의 정리가 안 돌아
+/// 파일이 남기 때문이다. 폴더가 없으면 아무것도 안 한다.
+pub(crate) fn cleanup_on_start() {
+    std::thread::spawn(|| cleanup(&paste_dir()));
 }
 
 const KEEP_SECS: u64 = 24 * 3600;

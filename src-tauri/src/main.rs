@@ -189,6 +189,7 @@ fn main() {
             update::install_update,
         ])
         .setup(|app| {
+            paste::cleanup_on_start();
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
