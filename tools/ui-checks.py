@@ -648,6 +648,48 @@ def manual_update_check_reports_failure(p):
 
 
 @check
+def line_height_follows_renderer(p):
+    """GPU를 끄면 블록 문자(QR 코드)가 줄마다 떨어지지 않게 줄 간격을 1로"""
+    p.load()
+    p.term()
+    assert p.js("terms.get('t').term.options.lineHeight") == 1.0, "GPU 끔인데 줄 간격이 1이 아니다"
+    rows_dom = p.js("terms.get('t').term.rows")
+    p.js("webglOn = true; applyRenderer()")
+    time.sleep(0.3)
+    assert p.js("terms.get('t').term.options.lineHeight") == 1.25
+    assert p.js("terms.get('t').term.rows") < rows_dom, "줄 간격이 늘었는데 줄 수를 다시 맞추지 않았다"
+    p.term("u")
+    assert p.js("terms.get('u').term.options.lineHeight") == 1.25, "새 탭이 설정을 안 따른다"
+
+
+@check
+def dropped_files_paste_into_the_pane_under_the_cursor(p):
+    """탐색기에서 끌어다 놓은 파일 경로를 놓은 칸의 터미널에 붙여넣는다(공백 있는 경로는 따옴표)"""
+    p.load()
+    for t in "ab":
+        p.term(t)
+    p.js("activate('a'); setLayout('h2')")
+    time.sleep(0.4)
+    for t in "ab":
+        p.write("\x1b[?2004h", tab=t)
+    s = pane_state(p)
+    other = s["panes"][1]
+    r = s["rects"][other]
+    dpr = p.js("window.devicePixelRatio")
+    pos = {"x": (r[0] + r[2] / 2) * dpr, "y": (r[1] + r[3] / 2) * dpr}
+    p.js(f"window.__handlers['tauri://drag-over']({{payload: {{position: {json.dumps(pos)}}}}})")
+    assert p.js(f"terms.get('{other}').container.classList.contains('drop-target')"), "놓일 칸 표시가 없다"
+    p.js("window.__sent = []; window.__calls = []")
+    paths = [r"C:\shots\a.png", r"C:\My Shots\b.png"]
+    p.js(f"window.__handlers['tauri://drag-drop']({{payload: {{paths: {json.dumps(paths)}, position: {json.dumps(pos)}}}}})")
+    time.sleep(0.2)
+    w = [c for c in calls(p, "write_pty")]
+    assert w and w[-1]["id"] == other, f"놓은 칸이 아닌 곳에 붙였다 {w}"
+    assert w[-1]["data"] == '\x1b[200~C:\\shots\\a.png "C:\\My Shots\\b.png"\x1b[201~', repr(w[-1]["data"])
+    assert p.js("activeId") == other and not p.js("document.querySelector('.drop-target')")
+
+
+@check
 def sidebar_groups_by_project(p):
     """프로젝트로 묶고(가장 최근 순), 고정은 맨 위 따로, 검색으로 비면 머리말도 빠진다.
     빈 화면에는 최근 세션을 바로 열 수 있게 보여 준다."""

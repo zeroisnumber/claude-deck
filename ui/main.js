@@ -833,10 +833,25 @@ function loadWebgl(entry) {
 
 // 설정을 바꾸면 열려 있는 탭에 바로 반영한다 — 끊길 때 켜고 끄며 확인하는 값이라
 // 재시작을 요구하면 쓸모가 없다.
+// 줄 간격. GPU로 그리면 xterm이 블록·선 문자(▀▄█ │─)를 칸에 꽉 차게 직접 그리므로 줄
+// 사이를 띄워도 이어진다. GPU를 끄면 그 문자들을 글꼴로 그려서 띄운 만큼 줄마다 틈이 생기고,
+// 글자로 찍은 QR 코드가 줄마다 떨어져 인식이 안 됐다 — 그때는 줄 간격을 1로 붙인다.
+// 탭마다 GPU가 붙고 떨어지는 것(최근 본 몇 개만)이 아니라 설정을 따른다. 탭을 바꿀 때마다
+// 줄 수가 바뀌면 에이전트가 화면을 통째로 다시 그린다.
+function termLineHeight() {
+  return webglOn ? 1.25 : 1.0;
+}
+
 function applyRenderer() {
   for (const t of terms.values()) dropWebgl(t);
   glOrder = [];
   if (webglOn) for (const id of shownIds) ensureWebgl(id);
+  const lh = termLineHeight();
+  for (const t of terms.values()) {
+    if (t.disposed || t.term.options.lineHeight === lh) continue;
+    t.term.options.lineHeight = lh;
+  }
+  refitShown(); // 보이지 않는 탭은 띄울 때 맞춘다
   uiTrace("renderer", webglOn ? "gl" : "dom");
 }
 
@@ -1071,7 +1086,7 @@ function makeTerm(id, title, cwd) {
   const term = new Terminal({
     fontFamily: '"Cascadia Mono", Consolas, "D2Coding", monospace',
     fontSize: fontSize,
-    lineHeight: 1.25,
+    lineHeight: termLineHeight(),
     letterSpacing: 0,
     cursorBlink: true,
     scrollback: 8000,
@@ -1211,7 +1226,7 @@ function makeTerm(id, title, cwd) {
     // 파일로 저장해 그 경로를 붙여넣는다(클로드는 이미지 경로를 붙여넣으면 첨부한다).
     if (!text) {
       const path = await invoke("save_clipboard_image").catch(() => null);
-      if (path) text = /\s/.test(path) ? `"${path}"` : path;
+      if (path) text = quotePath(path);
     }
     if (text) {
       // paste는 onData를 곧바로(동기로) 부른다 — 그동안만 입력기 검사를 끈다
@@ -2046,6 +2061,37 @@ listen("pty-output", (ev) => {
     const d = performance.now() - t0;
     if (d > 5) uiTrace("term-write", d);
   }
+});
+
+// 탐색기에서 파일을 끌어다 놓으면 놓은 칸의 터미널에 경로를 붙여넣는다(Ctrl+V 이미지와
+// 같은 길 — 클로드는 이미지 경로를 첨부로 바꾼다). 칸 밖(사이드바 등)에 놓으면 입력 중인
+// 탭으로. 끄는 동안 놓일 칸에 테두리를 띄운다. 위치는 물리 픽셀로 온다.
+function dropTarget(pos) {
+  if (!pos) return activeId;
+  const dpr = window.devicePixelRatio || 1;
+  const el = document.elementFromPoint(pos.x / dpr, pos.y / dpr);
+  const box = el && el.closest(".term-container");
+  if (box) for (const [id, t] of terms) if (t.container === box) return id;
+  return activeId;
+}
+function markDrop(id) {
+  for (const [tid, t] of terms) t.container.classList.toggle("drop-target", tid === id);
+}
+function quotePath(p) {
+  return /\s/.test(p) ? `"${p}"` : p;
+}
+listen("tauri://drag-over", (ev) => markDrop(dropTarget(ev.payload && ev.payload.position)));
+listen("tauri://drag-leave", () => markDrop(null));
+listen("tauri://drag-drop", (ev) => {
+  markDrop(null);
+  const { paths, position } = ev.payload || {};
+  const id = dropTarget(position);
+  const t = id && terms.get(id);
+  if (!t || t.disposed || t.exited || !paths || !paths.length) return;
+  if (id !== activeId) activate(id);
+  pasting = true;
+  try { t.term.paste(paths.map(quotePath).join(" ")); } finally { pasting = false; }
+  t.term.focus();
 });
 
 // 새 세션 탭의 클로드가 어느 세션을 잡았는지 Rust가 pid로 알아냈다. 기록 파일이 생긴
