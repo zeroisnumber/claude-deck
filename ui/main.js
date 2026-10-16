@@ -363,6 +363,7 @@ function isEmptySession(s, nowSec) {
 function renderSidebar() {
   // 접혀 있으면 그리지 않는다 — 20초 폴링마다 보이지도 않는 DOM을 통째로 다시
   // 만들 이유가 없다. 펼칠 때 setSidebarCollapsed가 한 번 다시 그린다.
+  renderEmptyRecent(); // 빈 화면은 사이드바를 접어도 보인다
   if (sideCollapsed) return;
   const sbT0 = performance.now();
   // 플래그만 믿으면 어떤 경로로든 안 풀렸을 때 사이드바가 영구히 멈춘다.
@@ -459,7 +460,6 @@ function renderSidebar() {
   }
   kbRestore();
   updateTtlBadges();
-  renderEmptyRecent();
 }
 
 // 빈 화면의 "이어서 할 세션": 최근 세션 몇 개를 바로 열 수 있게. 빈 화면이 보일 때만 그린다.

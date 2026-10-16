@@ -92,7 +92,7 @@ html, body {
 /* 네 칸짜리 램프판 — 하나만 켜져 있다 */
 #brand-mark svg { width: 15px; height: 15px; display: block; }
 #brand-mark circle { fill: var(--border-strong); }
-#brand-mark circle.lit { fill: var(--amber); }
+#brand-mark circle.lit { fill: var(--accent); } /* 호박은 "입력 필요" 전용이라 쓰지 않는다 */
 #brand-name { font-weight: 650; font-size: var(--fs-md); letter-spacing: -0.01em; }
 
 .icon-btn {
@@ -572,7 +572,9 @@ html, body {
   align-items: stretch;
   min-width: 0;
   background: var(--bg-deep);
-  border-bottom: 1px solid var(--border);
+  /* 아래 선은 테두리가 아니라 안쪽 그림자로 — 자식 밑에 그려지므로 보고 있는 탭(불투명)이
+     덮어 터미널과 이어진다. 테두리로 두면 #tabs의 스크롤 영역에 잘려 탭 밑에 선이 남았다. */
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 #tab-row #tabs { flex: 1; min-width: 0; }
 #layout-btns { display: flex; align-items: center; gap: 0; padding: 0 8px 0 6px; }
@@ -624,8 +626,6 @@ html, body {
 .tab.active {
   background: var(--bg);
   color: var(--text);
-  /* 탭 줄 아래 선을 덮어 터미널과 이어 붙인다 */
-  box-shadow: 0 1px 0 var(--bg);
 }
 /* 나눈 화면의 다른 칸에 떠 있는 탭 — 보이지만 입력은 안 가는 탭 */
 .tab.shown { color: var(--text-dim); background: color-mix(in srgb, var(--bg) 55%, var(--bg-deep)); }
