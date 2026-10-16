@@ -440,6 +440,14 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 .si-meta > * { min-width: 0; }
+/* 대화 본문 검색에서 찾은 자리 */
+.si-snippet {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .si-ttl {
   text-align: right;

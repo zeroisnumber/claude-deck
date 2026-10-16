@@ -741,6 +741,31 @@ def sidebar_groups_by_project(p):
 
 
 @check
+def search_finds_text_inside_conversations(p):
+    """제목에 없는 말도 대화 본문에서 찾아 따로 묶고, 찾은 자리를 한 줄 보인다.
+    제목으로 이미 걸린 세션은 겹쳐 보이지 않고, 같은 검색어로는 한 번만 찾는다."""
+    s = fake_sessions(3, {0: {"title": "셰이더 정리"}})
+    a, b = s[0]["session_id"], s[2]["session_id"]
+    p.load(sessions=s, replies={"search_sessions": [
+        {"session_id": a, "snippet": "셰이더 캐시", "role": "user"},
+        {"session_id": b, "snippet": "…컴파일 셰이더 오류가…", "role": "assistant"}]})
+    time.sleep(0.3)
+    p.js("document.querySelector('#search').value = '셰이더'; document.querySelector('#search').dispatchEvent(new Event('input'))")
+    time.sleep(0.7)
+    heads = p.js("[...document.querySelectorAll('#session-list .si-group')].map(e => e.textContent)")
+    assert heads[-1] == "대화 내용에서", heads
+    assert rows(p) == [a, b], f"제목으로 걸린 것 뒤에 본문으로 걸린 것만: {rows(p)}"
+    snip = p.js("document.querySelector('.si-snippet').textContent")
+    assert "컴파일 셰이더 오류" in snip and snip.startswith("답"), snip
+    p.js("renderSidebar(); renderSidebar()")
+    time.sleep(0.5)
+    n = len([c for c in calls(p, "search_sessions")])
+    assert n == 1, f"같은 검색어로 {n}번 찾았다"
+    q = calls(p, "search_sessions")[0]
+    assert q["query"] == "셰이더" and len(q["files"]) == 3, q
+
+
+@check
 def bundled_font_loads(p):
     """앱에 넣은 Pretendard가 실제로 쓰인다 — 파일이 빠지거나 CSP에 막히면 말없이 맑은 고딕으로 물러난다"""
     p.load()

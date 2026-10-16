@@ -442,6 +442,32 @@ function renderSidebar() {
     }
   }
 
+  // 검색어가 대화 본문에만 있는 세션은 따로 묶어 찾은 자리를 한 줄 보여 준다.
+  // 본문 검색은 기록 파일을 훑으므로(1.2GB에 0.2초) 글자를 칠 때마다가 아니라 잠깐 멈추면 돈다.
+  const cq = statusKey ? "" : q;
+  scheduleContentSearch(cq);
+  if (cq && contentHits.q === cq) {
+    const extra = contentHits.hits
+      .filter((h) => !shown.has(h.session_id))
+      .map((h) => [sessions.find((s) => s.session_id === h.session_id), h])
+      .filter(([s]) => s && (agentFilter === "all" || s.agent === agentFilter));
+    if (extra.length) {
+      const head = document.createElement("div");
+      head.className = "si-group";
+      head.textContent = "대화 내용에서";
+      listEl.appendChild(head);
+      for (const [s, h] of extra) {
+        const row = sessionRow(s, false);
+        const snip = document.createElement("div");
+        snip.className = "si-snippet";
+        snip.textContent = `${h.role === "user" ? "나" : "답"}  ${h.snippet}`;
+        row.querySelector(".si-body").appendChild(snip);
+        listEl.appendChild(row);
+        count++;
+      }
+    }
+  }
+
   if (performance.now() - sbT0 > 5) uiTrace("sidebar", performance.now() - sbT0);
   const busyN = [...terms.values()].filter((t) => !t.exited && t.busy).length;
   const runN = [...terms.values()].filter((t) => !t.exited).length;
@@ -460,6 +486,27 @@ function renderSidebar() {
   }
   kbRestore();
   updateTtlBadges();
+}
+
+// 대화 본문 검색. 같은 검색어로는 한 번만 돌고(목록은 20초마다 다시 그려진다), 늦게 온
+// 답은 버린다(그 사이 검색어가 바뀌었다).
+let contentHits = { q: "", hits: [] };
+let contentTimer = 0;
+let contentToken = 0;
+const CONTENT_SEARCH_DELAY_MS = 350;
+function scheduleContentSearch(q) {
+  if (q === contentHits.q) return;
+  clearTimeout(contentTimer);
+  const token = ++contentToken;
+  contentHits = { q, hits: [] };
+  if ([...q].length < 2) return;
+  contentTimer = setTimeout(async () => {
+    const files = sessions.filter((s) => s.file).map((s) => [s.session_id, s.file]);
+    const hits = await invoke("search_sessions", { query: q, files }).catch(() => []);
+    if (token !== contentToken) return;
+    contentHits = { q, hits: hits || [] };
+    if (contentHits.hits.length) renderSidebar();
+  }, CONTENT_SEARCH_DELAY_MS);
 }
 
 // 빈 화면의 "이어서 할 세션": 최근 세션 몇 개를 바로 열 수 있게. 빈 화면이 보일 때만 그린다.

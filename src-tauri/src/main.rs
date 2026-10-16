@@ -23,6 +23,7 @@ mod diag;
 mod endsession;
 mod links;
 mod paste;
+mod search;
 mod statusline;
 mod activity;
 mod pty;
@@ -74,7 +75,7 @@ fn open_log_file(file: String) -> Result<(), String> {
 
 /// 알려진 세션 저장소 안의 세션 파일인지 검사하고 정규화된 경로를 돌려준다.
 /// ".." 같은 성분이 섞이면 starts_with 검사를 그냥 통과하므로 반드시 정규화 후 비교.
-fn session_file_in_store(file: &str) -> Result<PathBuf, String> {
+pub(crate) fn session_file_in_store(file: &str) -> Result<PathBuf, String> {
     let p = fs::canonicalize(file).map_err(|e| e.to_string())?;
     let home = dirs::home_dir().ok_or("no home dir")?;
     let allowed = [
@@ -184,6 +185,7 @@ fn main() {
             links::resolve_links,
             links::open_link,
             links::list_editors,
+            search::search_sessions,
             paste::save_clipboard_image,
             rebind_ime,
             update::check_update,
