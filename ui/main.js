@@ -2545,13 +2545,13 @@ $("#btn-check-update").onclick = async (e) => {
 
 // 설정의 "Ctrl+클릭으로 파일 열기" 줄. 깔려 있는 편집기만 고를 수 있게 한다.
 const OPEN_HOW_LABEL = {
-  auto: "자동 (VS Code, 없으면 기본 프로그램)", default: "기본 프로그램", vscode: "VS Code",
+  auto: "자동 (VS Code 우선)", default: "기본 프로그램", vscode: "VS Code",
   rider: "Rider", vs: "Visual Studio", reveal: "탐색기에서 위치만",
 };
 let editorsAvail = null;
 async function renderOpenRules() {
   const box = $("#open-rules");
-  if (!editorsAvail) editorsAvail = await invoke("list_editors").catch(() => ({}));
+  if (!editorsAvail) editorsAvail = (await invoke("list_editors").catch(() => null)) || {};
   box.innerHTML = "";
   openRules.forEach((r, i) => {
     const row = document.createElement("div");

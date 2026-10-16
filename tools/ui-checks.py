@@ -1489,9 +1489,13 @@ def screens_render_without_errors(p):
       previewCard.innerHTML = mdToHtml('# h\\n- a\\n```\\ncode\\n```\\n> q');
       await new Promise(r => setTimeout(r, 300));
       return [document.querySelectorAll('#dash-models tr').length, !!document.querySelector('#turns-detail .td-q'),
-              !!document.querySelector('.tab-ctx'), !!document.querySelector('.limit-fill'), document.querySelectorAll('.lrow').length > 0];
+              !!document.querySelector('.tab-ctx'), !!document.querySelector('.limit-fill'), document.querySelectorAll('.lrow').length > 0,
+              document.querySelectorAll('#open-rules .open-rule').length];
     })()""")
-    assert r == [2, True, True, True, True], r
+    assert r == [2, True, True, True, True, 3], r
+    # 화면은 떴는데 그 사이 스크립트가 던진 것(처리 안 된 오류)도 실패다 — 화면만 보면 놓친다
+    failed = [c["value"][:300] for c in calls(p, "trace_ui") if c["kind"] == "script-failed"]
+    assert not failed, failed
 
 
 @check
