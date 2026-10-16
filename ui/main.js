@@ -340,9 +340,9 @@ function sessionRow(s, child) {
 function bgMenuItems(s) {
   const items = [];
   const parent = s.parent_id ? sessions.find((x) => x.session_id === s.parent_id) : null;
-  if (parent) items.push(["↖ 원본 세션 열기", () => detach("openSession:parent", openSession(parent))]);
+  if (parent) items.push(["원본 세션 열기", () => detach("openSession:parent", openSession(parent))]);
   // 복사본은 아무 claude 세션에서나 갈라져 나올 수 있다 (codex/gemini는 --fork-session이 없다)
-  if (s.agent === "claude") items.push(["⑂ 복사본으로 열기", () => detach("openSession:fork", openSession(s, true, { fork: true }))]);
+  if (s.agent === "claude") items.push(["복사본으로 열기", () => detach("openSession:fork", openSession(s, true, { fork: true }))]);
   return items;
 }
 
@@ -559,22 +559,24 @@ function showCtxMenu(e, s, itemEl) {
   hidePreview();
   const pinned = pins.includes(s.session_id);
   ctxMenu.innerHTML = "";
+  // 메뉴는 글자만 — 이모지 아이콘은 글꼴마다 색과 크기가 달라 줄이 들쭉날쭉했다.
+  // 되돌릴 수 없는 삭제는 선으로 떼어 맨 아래에 붉게 둔다.
   const items = [
     ...bgMenuItems(s),
-    ["📊 토큰 상세", () => openTurns(s)],
-    [pinned ? "📌 핀 해제" : "📌 핀 고정", () => {
+    ["토큰 상세", () => openTurns(s)],
+    [pinned ? "핀 해제" : "핀 고정", () => {
       pins = pinned ? pins.filter((x) => x !== s.session_id) : [...pins, s.session_id];
       localStorage.setItem("pins", JSON.stringify(pins));
       renderSidebar();
     }],
-    ["✏️ 이름 바꾸기", () => startRename(s, itemEl)],
-    ["📂 폴더 열기", () => {
+    ["이름 바꾸기", () => startRename(s, itemEl)],
+    ["폴더 열기", () => {
       invoke("open_path", { path: s.cwd }).catch((e) => showToast("⚠ 폴더 열기 실패", String(e)));
     }],
-    ["📄 로그 파일 열기", () => {
+    ["로그 파일 열기", () => {
       invoke("open_log_file", { file: s.file }).catch((e) => showToast("⚠ 로그 열기 실패", String(e)));
     }],
-    ["🗑️ 세션 삭제", async () => {
+    ["세션 삭제", async () => {
       try {
         const ok = await window.__TAURI__.dialog.confirm(
           `이 세션 기록을 영구 삭제할까요?\n\n${sessionTitle(s) || s.session_id}`,
@@ -588,16 +590,22 @@ function showCtxMenu(e, s, itemEl) {
     }],
   ];
   for (const [label, fn] of items) {
+    if (label === "세션 삭제") {
+      const sep = document.createElement("div");
+      sep.className = "ctx-sep";
+      ctxMenu.appendChild(sep);
+    }
     const d = document.createElement("div");
-    d.className = "ctx-item";
+    d.className = "ctx-item" + (label === "세션 삭제" ? " danger" : "");
     d.textContent = label;
     d.onclick = () => { hideCtxMenu(); fn(); };
     ctxMenu.appendChild(d);
   }
   ctxMenu.classList.remove("hidden");
-  const mw = 160;
-  ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - mw - 8) + "px";
-  ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - 160) + "px";
+  // 실제 크기를 재서 창 밖으로 나가지 않게 (항목 수가 세션마다 다르다)
+  const { offsetWidth: mw, offsetHeight: mh } = ctxMenu;
+  ctxMenu.style.left = Math.max(8, Math.min(e.clientX, window.innerWidth - mw - 8)) + "px";
+  ctxMenu.style.top = Math.max(8, Math.min(e.clientY, window.innerHeight - mh - 8)) + "px";
 }
 function hideCtxMenu() { ctxMenu.classList.add("hidden"); }
 window.addEventListener("click", hideCtxMenu);
@@ -811,10 +819,14 @@ function statusLabel(t) {
 // ---------- 완료 알림 (앱 내 토스트 + OS 알림) ----------
 // kind: "wait"(사람이 답해야 함 — 호박색, 저절로 사라지지 않음) · "done"(완료 — 초록) · 없음
 function showToast(title, body, onClick, kind) {
+  // 제목 앞의 이모지(✋ ✻ ⚠)는 떼고, 종류는 사이드바 램프와 같은 색 점으로 보인다
+  // (호박 = 입력 필요, 초록 = 끝남, 빨강 = 실패). 이모지는 글꼴마다 모양·색이 제각각이었다.
+  const raw = String(title);
+  if (!kind && raw.startsWith("⚠")) kind = "warn";
   const el = document.createElement("div");
   el.className = "toast" + (kind ? " " + kind : "");
   el.innerHTML = `<div class="toast-title"></div><div class="toast-body"></div>`;
-  el.querySelector(".toast-title").textContent = title;
+  el.querySelector(".toast-title").textContent = raw.replace(/^[^\p{L}\p{N}]+/u, "") || raw;
   el.querySelector(".toast-body").textContent = body;
   el.onclick = () => { el.remove(); if (onClick) onClick(); };
   $("#toasts").appendChild(el);

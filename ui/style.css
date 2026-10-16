@@ -878,8 +878,8 @@ kbd {
 #modal {
   width: 440px;
   background: var(--bg-deep);
-  border: 1px solid var(--border);
-  border-radius: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
   padding: 22px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
 }
@@ -975,22 +975,25 @@ kbd {
 #ctx-menu {
   position: fixed;
   z-index: 200;
-  min-width: 150px;
-  background: var(--bg-deep);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 5px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  min-width: 160px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 4px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 #ctx-menu.hidden { display: none; }
 .ctx-item {
-  padding: 7px 11px;
-  border-radius: 7px;
-  font-size: 12.5px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
   color: var(--text);
   cursor: pointer;
 }
-.ctx-item:hover { background: var(--bg-hover); }
+.ctx-item:hover { background: var(--bg-active); }
+.ctx-item.danger { color: var(--red-soft); }
+.ctx-item.danger:hover { background: rgba(229, 100, 90, 0.14); }
+.ctx-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 
 /* ─── 세션 핀 / 이름 편집 ─────────────────────────────── */
 .si-pin { flex: none; width: 10px; height: 10px; color: var(--text-dim); }
@@ -1100,34 +1103,49 @@ kbd {
   gap: 8px;
   align-items: flex-end;
 }
+/* 알림. 종류는 제목 앞 램프 하나로 가른다 — 사이드바 램프와 같은 말이다.
+   (호박 = 입력 필요, 사라지지 않음 · 초록 = 끝남 · 빨강 = 실패 · 없음 = 그냥 알림) */
 .toast {
   width: 300px;
-  background: var(--bg-deep);
-  border: 1px solid rgba(var(--accent-rgb), 0.5);
-  border-left: 3px solid var(--accent);
-  border-radius: 11px;
-  padding: 11px 14px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 10px 14px 11px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
   cursor: pointer;
   animation: toast-in 0.22s ease-out;
   transition: opacity 0.4s, transform 0.4s;
 }
-.toast:hover { background: var(--bg-hover); }
+.toast:hover { background: var(--bg-active); }
 .toast.fade { opacity: 0; transform: translateY(8px); }
 @keyframes toast-in {
-  from { opacity: 0; transform: translateX(30px); }
-  to   { opacity: 1; transform: translateX(0); }
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-.toast-title { font-size: 12px; font-weight: 700; color: var(--accent); }
-/* 알림 종류마다 색을 가른다 — 입력 필요는 호박색(사라지지 않음), 완료는 초록 */
-.toast.wait { border-color: rgba(232, 184, 120, 0.5); border-left-color: var(--amber); }
-.toast.wait .toast-title { color: var(--amber); }
-.toast.done { border-color: rgba(135, 179, 135, 0.45); border-left-color: var(--green); }
-.toast.done .toast-title { color: var(--green); }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+.toast-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  color: var(--text);
+}
+.toast.wait .toast-title::before, .toast.done .toast-title::before, .toast.warn .toast-title::before {
+  content: "";
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.toast.wait { border-color: rgba(var(--amber-rgb), 0.55); }
+.toast.wait .toast-title::before { background: var(--amber); box-shadow: 0 0 0 3px rgba(var(--amber-rgb), 0.22); }
+.toast.done .toast-title::before { background: var(--green); }
+.toast.warn .toast-title::before { background: var(--red); }
 .toast-body {
   margin-top: 3px;
-  font-size: 12px;
-  color: var(--text);
+  padding-left: 16px; /* 램프만큼 들여 제목 글자와 맞춘다 */
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1167,22 +1185,25 @@ kbd {
   font-size: 11.5px;
   cursor: pointer;
 }
-.dp.on { background: var(--accent-soft); border-color: rgba(var(--accent-rgb), 0.4); color: var(--accent); font-weight: 600; }
+.dp.on { background: var(--bg-active); border-color: var(--border-strong); color: var(--text); font-weight: 600; }
 
+/* 요약 줄: 똑같은 카드 다섯 장 대신, 가장 궁금한 비용 하나를 크게 두고 나머지는 옆에
+   작은 숫자로 늘어놓는다. 아래 선 하나로 표와 나눈다. */
 #dash-tiles {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
-  gap: 8px;
-  margin-top: 14px;
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  column-gap: 28px;
+  row-gap: 10px;
+  margin-top: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
 }
-.tile {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 11px 12px;
-}
-.tile-v { font-size: 17px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
-.tile-l { font-size: 10.5px; color: var(--text-faint); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile { min-width: 0; }
+.tile-v { font-size: var(--fs-lg); font-weight: 650; color: var(--text); font-variant-numeric: tabular-nums; }
+.tile:first-child { margin-right: 8px; }
+.tile:first-child .tile-v { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+.tile-l { font-size: var(--fs-xs); color: var(--text-faint); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile-v.hot { color: var(--red); }
 
 .dash-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
