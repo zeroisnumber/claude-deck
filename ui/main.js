@@ -450,7 +450,8 @@ function renderSidebar() {
     const extra = contentHits.hits
       .filter((h) => !shown.has(h.session_id))
       .map((h) => [sessions.find((s) => s.session_id === h.session_id), h])
-      .filter(([s]) => s && (agentFilter === "all" || s.agent === agentFilter));
+      .filter(([s]) => s && (agentFilter === "all" || s.agent === agentFilter))
+      .sort(([a], [b]) => b.mtime - a.mtime); // 사이드바의 다른 줄처럼 최근 것부터
     if (extra.length) {
       const head = document.createElement("div");
       head.className = "si-group";
