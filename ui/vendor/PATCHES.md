@@ -16,7 +16,7 @@ Claude Code처럼 화면을 공격적으로 다시 그리는 TUI에서 한글 IM
 ## addon-unicode-graphemes 0.4.0 — 패치 없음, 유니코드 폭 제공자
 
 xterm 6.0.0과 같은 날 배포된 짝(`npm pack @xterm/addon-unicode-graphemes@0.4.0`의 `lib/addon-unicode-graphemes.js`를
-그대로 복사). 불러오는 순간 `activeVersion`을 `"15-graphemes"`로 바꾼다. 없으면 main.js가 unicode11로 물러난다.
+그대로 복사). 불러오는 순간 `activeVersion`을 `"15-graphemes"`로 바꾼다. 없으면 terminal.js가 unicode11로 물러난다.
 
 넣은 이유: 글자 폭을 클로드와 다르게 세면 그 뒤가 한 칸씩 밀린다. 클로드는
 `Bun.stringWidth(s, {ambiguousIsNarrow: true})`로 센다(2.1.270 바이너리에서 확인). bun으로 57자를 대조했을 때

@@ -300,7 +300,14 @@
   <script src="vendor/addon-unicode11.js"></script>
   <script src="vendor/addon-unicode-graphemes.js"></script>
   <script src="vendor/addon-webgl.js"></script>
-  <script src="main.js"></script>
+  <!-- 앱 스크립트는 모듈이 아닌 일반 스크립트로 이 순서대로 — 최상위 선언을 전역으로 함께 쓰고,
+       로드하는 동안 바로 도는 줄은 앞 파일의 것만 쓸 수 있다 (각 파일 머리말 참고) -->
+  <script src="core.js"></script>
+  <script src="sidebar.js"></script>
+  <script src="terminal.js"></script>
+  <script src="panes.js"></script>
+  <script src="settings.js"></script>
+  <script src="app.js"></script>
   <script src="usage.js"></script>
 </body>
 </html>

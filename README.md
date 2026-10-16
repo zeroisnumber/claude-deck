@@ -38,9 +38,9 @@ UI(`ui/`)는 빌드 시 바이너리에 임베드되므로, 프런트 수정 후
 | `src-tauri/src/usage.rs` | 세션 파일 기반 사용량 통계, 요금제 한도(상태줄 → 사용량 API 순) |
 | `src-tauri/src/statusline.rs` | Claude Code 상태줄 명령으로 실행돼 세션별 상태 페이로드를 저장하는 탭 모드 |
 | `src-tauri/src/diag.rs` | 크래시 로그, PTY 트레이스(설정에서 켬), 명령줄 비밀값 가림 |
-| `ui/main.js` | 사이드바·탭·터미널·설정·한도 위젯 전체 프런트 (번들러 없이 스크립트 하나) |
+| `ui/*.js` | 프런트. 번들러 없는 일반 스크립트로 `index.html` 순서대로 로드되고 최상위 선언을 전역으로 함께 쓴다: `core.js`(상태·계측·도구) → `sidebar.js`(세션 목록·알림) → `terminal.js`(터미널·링크·세션 열기) → `panes.js`(탭·화면 나누기·PTY 이벤트) → `settings.js`(설정·새 세션 창) → `app.js`(단축키·업데이트) → `usage.js`(사용량). 각 파일 머리말에 맡은 일이 있다 |
 | `ui/vendor/` | xterm.js와 애드온. 수동 패치는 `ui/vendor/PATCHES.md` 참고 |
-| `tools/startup-check.js` | `main.js`를 최상위까지 실행해 시작 시 던지는지 검사 (`node tools/startup-check.js`) |
+| `tools/startup-check.js` | `index.html`의 스크립트를 그 순서대로 최상위까지 실행해 시작 시 던지는지 검사 (`node tools/startup-check.js`) |
 
 러스트 모듈은 `use super::*`로 크레이트 루트를 공유하므로, 모듈 간에 쓰는 항목은 `pub(crate)`로 둔다. 검증은 `cd src-tauri && cargo test`, `node tools/startup-check.js`, `python tools/ui-checks.py`(크롬 + `pip install websocket-client`; 크롬이 흔한 자리에 없으면 `CHROME` 환경 변수로 경로를 준다).
 
