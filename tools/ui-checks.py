@@ -428,6 +428,10 @@ def restore_asks_and_opens_only_the_picked(p):
     spawned = p.js("window.__calls.filter(c => c[0] === 'spawn_pty').map(c => c[1].id)")
     assert spawned == [sess[0]["session_id"]], f"띄운 것 {spawned}"
     assert p.js("[...terms.keys()]") == [sess[0]["session_id"]], "위험한 id가 빈 탭을 남겼다"
+    # 위험한 id를 거부하며 남긴 오류는 이 검사가 일부러 일으킨 것이다 — 그것만 치운다
+    expected = "window.__calls.filter(c => c[0] === 'trace_ui' && String(c[1].value).includes('unsafe session id'))"
+    assert p.js(f"{expected}.length") == 1, "위험한 id를 거부한 기록이 없다"
+    p.js("window.__calls = window.__calls.filter(c => !(c[0] === 'trace_ui' && String(c[1].value).includes('unsafe session id')))")
 
 
 @check
@@ -1609,6 +1613,11 @@ def main():
                 p.harvest()
                 new = p.violations[before:]
                 assert not new, f"CSP 위반 {len(new)}건: " + "; ".join(sorted(set(new)))[:600]
+                # 화면은 맞게 떴어도 그 사이 스크립트가 던진 것(처리 안 된 오류, 파일을 나눈 뒤의
+                # 선언 순서 문제)은 실패다. reportFatal이 trace_ui로 남긴다.
+                thrown = p.js("(window.__calls || []).filter(c => c[0] === 'trace_ui' && c[1].kind === 'script-failed')"
+                              ".map(c => String(c[1].value).slice(0, 240))")
+                assert not thrown, "스크립트 오류: " + " | ".join(thrown)
                 print(f"통과  {c.__name__}" + (f"  ({note})" if note else ""))
             except Exception as e:
                 failed += 1
