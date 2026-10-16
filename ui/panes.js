@@ -778,7 +778,7 @@ function onDprMaybeChanged() {
 (function watchDpr() {
   // 쿼리는 현재 배율에만 맞으므로 바뀔 때마다 새로 건다. matchMedia가 없는 런타임
   // (기동 검사의 node 등)에서는 창 크기 변경(resize)만으로 둔다 — 여기서 던지면
-  // main.js 전체가 멈춘다.
+  // 이 파일의 나머지가 멈추고, 뒤 파일들이 그 선언을 못 찾는다.
   if (typeof matchMedia !== "function") return;
   matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener(
     "change", () => { onDprMaybeChanged(); watchDpr(); }, { once: true });
