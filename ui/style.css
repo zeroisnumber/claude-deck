@@ -13,6 +13,7 @@
   font-display: swap;
 }
 :root {
+  color-scheme: dark; /* 드롭다운·스크롤바 같은 기본 부품도 어둡게 */
   --bg:        #17181b; /* 석탄 — 터미널·작업 영역 */
   --bg-deep:   #1e2024; /* 흑연 — 사이드바·탭 줄·창 */
   --bg-hover:  #26292e;
@@ -267,6 +268,11 @@ html, body {
   padding: 14px 0 2px;
 }
 .set-card #profile-list { margin-bottom: 6px; }
+/* Ctrl+클릭으로 파일 열기: 이름 | 확장자 | 무엇으로 */
+.open-rules { display: flex; flex-direction: column; gap: 7px; }
+.open-rule { display: grid; grid-template-columns: 96px minmax(0, 1fr) 210px; gap: 7px; align-items: center; }
+.or-name { font-size: var(--fs-sm); color: var(--text-dim); }
+.or-how { cursor: pointer; }
 
 .lmodal-section {
   display: flex;

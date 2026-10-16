@@ -349,7 +349,7 @@ def ctrl_click_opens_file_paths(p):
     assert hover(at("m")), "경로 위인데 손가락이 아니다"
     assert click(at("m"), 0) == [], "그냥 클릭으로 열었다"
     opened = click(at("m"), 2)
-    assert opened == [{"path": "D:/x/src/main.rs", "line": 12, "col": None}], f"Ctrl+클릭 {opened}"
+    assert opened == [{"path": "D:/x/src/main.rs", "line": 12, "col": None, "how": "auto"}], f"Ctrl+클릭 {opened}"
     assert not hover(at("그")), "경로 밖(뒤 한글)인데 손가락"
     assert not hover(at("p", 0)), "없는 파일(nope)을 이었다"
     got = p.js("pathCandidates('● 작업/파일.txt, 끝.').map(c => c.path)")
@@ -687,6 +687,37 @@ def dropped_files_paste_into_the_pane_under_the_cursor(p):
     assert w and w[-1]["id"] == other, f"놓은 칸이 아닌 곳에 붙였다 {w}"
     assert w[-1]["data"] == '\x1b[200~C:\\shots\\a.png "C:\\My Shots\\b.png"\x1b[201~', repr(w[-1]["data"])
     assert p.js("activeId") == other and not p.js("document.querySelector('.drop-target')")
+
+
+@check
+def links_survive_wraps_glued_drives_and_particles(p):
+    """두 줄로 갈린 경로(다음 줄 들여쓰기), 글자에 붙은 C:\, 조사가 붙은 파일 이름을 잡는다.
+    그림은 기본 프로그램으로 연다(VS Code로 열면 바이트가 보였다)."""
+    p.load()
+    c = p.js(r"""JSON.stringify([
+      pathCandidates('파일:C:\\work\\a.txt 를 봐').map(x => x.path),
+      pathCandidates('main.rs를 고쳤고 ui/x.png에서 봤다').map(x => x.path),
+      pathCandidates('(C:\\a\\b.rs:12)').map(x => [x.path, x.line]),
+    ])""")
+    glued, particle, paren = json.loads(c)
+    assert glued == [r"C:\work\a.txt"], glued
+    assert particle == ["main.rs", "ui/x.png"], particle
+    assert paren == [[r"C:\a\b.rs", 12]], paren
+    assert p.js("openHowFor('C:/x/shot.PNG')") == "default"
+    assert p.js("openHowFor('C:/x/main.cpp')") == "auto"
+    # 클로드 답글처럼: 긴 경로가 줄 끝에서 끊기고 다음 줄은 들여쓰기로 이어진다
+    p.term()
+    cols = p.js("terms.get('t').term.cols")
+    head = "● 수정: "
+    path = r"C:\Users\me\project\Source\Game\Combat\DamageCalculator.cpp"
+    first = cols - 2 - 8  # 앞 줄을 거의 끝까지 채운다(한글 두 칸 = 8칸)
+    pad = "x" * (first - len(path) // 2)
+    line1 = head + pad + " " + path[: len(path) // 2]
+    line2 = "  " + path[len(path) // 2:]
+    p.write("\x1b[H\x1b[2J" + line1 + "\r\n" + line2 + "\r\n")
+    got = p.js("""JSON.stringify([joinedLine(terms.get('t').term, 1).text, joinedLine(terms.get('t').term, 2).text])""")
+    t1, t2 = json.loads(got)
+    assert path in t1 and path in t2, (t1, t2)
 
 
 @check

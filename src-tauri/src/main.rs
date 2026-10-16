@@ -183,6 +183,7 @@ fn main() {
             open_path,
             links::resolve_links,
             links::open_link,
+            links::list_editors,
             paste::save_clipboard_image,
             rebind_ime,
             update::check_update,

@@ -1003,7 +1003,7 @@ function throttleMouseReports(term, container) {
 // 경로처럼 생긴 것 중 실제로 있는 것만 잇는다 — 있는지는 Rust가 본다. 마우스를 올린
 // 줄마다 묻게 되므로 같은 줄 글자는 기억해 둔다.
 const LINK_STOP = /[\s"'`()[\]{}<>|,;]/;
-const linkCache = new Map(); // "폴더\n줄 글자" → { at, p: Promise<찾은 경로[]> }
+const linkCache = new Map(); // "폴더\n이어 붙인 글자" → { at, p: Promise<찾은 경로[]> }
 function pathCandidates(text) {
   const out = [];
   let i = 0;
@@ -1012,9 +1012,14 @@ function pathCandidates(text) {
     let j = i;
     while (j < text.length && !LINK_STOP.test(text[j])) j++;
     let tok = text.slice(i, j), start = i;
+    // 절대 경로가 다른 글자에 붙어 있으면(파일:C:\..., =C:\...) 드라이브 글자부터 본다
+    const drive = tok.search(/(?<![\p{L}\p{N}])[A-Za-z]:[\\/]/u);
+    if (drive > 0) { tok = tok.slice(drive); start += drive; }
     // 문장 끝 구두점, 앞에 붙은 기호(●⎿ 같은 것)는 떼어 낸다
     const lead = tok.match(/^[^\p{L}\p{N}_.~\\/]+/u); // 한글 폴더 이름은 남긴다
     if (lead) { tok = tok.slice(lead[0].length); start += lead[0].length; }
+    // 확장자 뒤에 붙은 조사(main.rs를, a.png에서)는 경로가 아니다
+    tok = tok.replace(/(\.[A-Za-z]\w{0,9}(?::\d+){0,2})[\uAC00-\uD7A3]+$/u, "$1");
     tok = tok.replace(/[.:]+$/, "");
     const m = tok.match(/^(.+?)(?::(\d+))?(?::(\d+))?$/);
     const p = m && m[1];
@@ -1027,22 +1032,106 @@ function pathCandidates(text) {
   }
   return out;
 }
+
+// 줄 하나의 글자와, 글자마다 몇 번째 칸인지. 한글처럼 두 칸짜리 글자가 있으면 글자 위치와
+// 칸 위치가 다르다.
+function lineCells(buf, y0) {
+  const line = buf.getLine(y0);
+  if (!line) return null;
+  let text = "";
+  const colOf = [];
+  for (let x = 0; x < line.length; x++) {
+    const cell = line.getCell(x);
+    if (!cell || cell.getWidth() === 0) continue;
+    const ch = cell.getChars() || " ";
+    for (let k = 0; k < ch.length; k++) colOf.push([x, cell.getWidth()]);
+    text += ch;
+  }
+  return { y0, text, colOf, wrapped: line.isWrapped };
+}
+
+// 긴 경로는 두 줄로 갈린다. 터미널이 접은 줄(isWrapped)이거나, 에이전트가 스스로 줄을 바꾸며
+// 다음 줄을 들여 쓴 경우(클로드의 ● 답글)다. 앞 줄이 거의 끝까지 차 있고 경로 글자로
+// 끝나며, 다음 줄이 들여쓰기 뒤 곧바로 글자로 이어지면 한 경로로 본다.
+const WRAP_SLACK = 6;
+function continuesInto(a, b, cols) {
+  if (!a || !b) return false;
+  const t = a.text.replace(/\s+$/, "");
+  if (!t || LINK_STOP.test(t[t.length - 1])) return false;
+  if (b.wrapped) return true;
+  const lastCol = a.colOf[t.length - 1];
+  if (!lastCol || lastCol[0] + lastCol[1] < cols - WRAP_SLACK) return false;
+  return /^\s+\S/.test(b.text) && !LINK_STOP.test(b.text.trimStart()[0]);
+}
+
+// y줄(1부터)과 이어지는 앞뒤 줄을 한 글자열로 붙이고, 글자마다 [줄, 칸, 폭]을 적는다.
+function joinedLine(term, y) {
+  const buf = term.buffer.active;
+  const cols = term.cols;
+  const cur = lineCells(buf, y - 1);
+  if (!cur) return null;
+  const segs = [cur];
+  for (let k = 0; k < 2; k++) {               // 앞으로 두 줄까지
+    const prev = lineCells(buf, segs[0].y0 - 1);
+    if (!continuesInto(prev, segs[0], cols)) break;
+    segs.unshift(prev);
+  }
+  for (let k = 0; k < 2; k++) {               // 뒤로 두 줄까지
+    const next = lineCells(buf, segs[segs.length - 1].y0 + 1);
+    if (!continuesInto(segs[segs.length - 1], next, cols)) break;
+    segs.push(next);
+  }
+  let text = "";
+  const at = [];
+  segs.forEach((sg, n) => {
+    let body = sg.text, skip = 0;
+    if (n < segs.length - 1) body = body.replace(/\s+$/, "");
+    if (n > 0 && !sg.wrapped) { skip = body.length - body.trimStart().length; body = body.slice(skip); }
+    for (let k = 0; k < body.length; k++) {
+      const [x, w] = sg.colOf[skip + k];
+      at.push([sg.y0 + 1, x, w]);
+    }
+    text += body;
+  });
+  return { text, at };
+}
+
+// Ctrl+클릭한 파일을 무엇으로 열지, 확장자별로. 위에서부터 처음 맞는 줄을 따른다.
+// 이미지까지 VS Code로 열리던 것(그림이 바이트로 보였다) — 그림·영상·문서는 기본 프로그램으로.
+//   how: auto(VS Code가 있으면 거기서, 줄 번호로) · default(기본 프로그램) · vscode · rider · vs · reveal(탐색기)
+const OPEN_RULES_DEFAULT = [
+  { name: "그림·영상·문서", exts: "png jpg jpeg gif webp bmp ico svg tga dds psd exr hdr mp4 mov webm mkv mp3 wav ogg pdf docx xlsx pptx", how: "default" },
+  { name: "C++·C#", exts: "cpp h hpp c cc cxx inl cs", how: "auto" },
+  { name: "그 밖의 파일", exts: "*", how: "auto" },
+];
+let openRules = OPEN_RULES_DEFAULT.map((r) => ({ ...r }));
+try {
+  const saved = JSON.parse(localStorage.getItem("openRules") || "null");
+  if (Array.isArray(saved) && saved.length === OPEN_RULES_DEFAULT.length) {
+    openRules = OPEN_RULES_DEFAULT.map((r, i) => ({ ...r, exts: r.exts === "*" ? "*" : String(saved[i].exts || ""), how: String(saved[i].how || r.how) }));
+  }
+} catch { /* 기본값 */ }
+function openHowFor(path) {
+  const m = /\.([^.\\/]+)$/.exec(path);
+  const ext = m ? m[1].toLowerCase() : "";
+  for (const r of openRules) {
+    if (r.exts === "*" || r.exts.toLowerCase().split(/[\s,]+/).filter(Boolean).map((e) => e.replace(/^\./, "")).includes(ext)) return r.how;
+  }
+  return "auto";
+}
+function openLinkPath(path, line, col) {
+  invoke("open_link", { path, line, col, how: openHowFor(path) })
+    .catch((err) => showToast("열 수 없습니다", String(err)));
+}
+
 function fileLinkProvider(term, entry) {
   return {
     provideLinks(y, callback) {
-      const line = term.buffer.active.getLine(y - 1);
-      if (!line) return callback(undefined);
-      // 한글처럼 두 칸짜리 글자가 있으면 글자 위치와 칸 위치가 다르다. 글자마다 칸을 적어 둔다.
-      let text = "";
-      const colOf = [];
-      for (let x = 0; x < line.length; x++) {
-        const cell = line.getCell(x);
-        if (!cell || cell.getWidth() === 0) continue;
-        const ch = cell.getChars() || " ";
-        for (let k = 0; k < ch.length; k++) colOf.push([x, cell.getWidth()]);
-        text += ch;
-      }
-      const cands = pathCandidates(text);
+      const j = joinedLine(term, y);
+      if (!j) return callback(undefined);
+      const { text, at } = j;
+      // 이 줄에 걸친 후보만
+      const cands = pathCandidates(text).filter((c) => at.slice(c.start, c.end).some(([ly]) => ly === y));
       if (!cands.length || !entry.cwd && cands.every((c) => !/^[A-Za-z]:/.test(c.path))) return callback(undefined);
       const key = entry.cwd + "\n" + text;
       // 방금 만든 파일도 곧 잡히게 잠깐만 기억한다
@@ -1060,15 +1149,16 @@ function fileLinkProvider(term, entry) {
         cands.forEach((c, n) => {
           const full = found[n];
           if (!full) return;
-          const [x0] = colOf[c.start];
-          const [x1, w1] = colOf[c.end - 1];
+          // 밑줄은 이 줄에 있는 부분만. 두 줄에 걸친 경로는 줄마다 따로 잡히고 같은 파일을 연다.
+          const mine = at.slice(c.start, c.end).filter(([ly]) => ly === y);
+          const [, x0] = mine[0];
+          const [, x1, w1] = mine[mine.length - 1];
           links.push({
             range: { start: { x: x0 + 1, y }, end: { x: x1 + w1, y } },
             text: text.slice(c.start, c.end),
             activate: (e) => {
               if (!e.ctrlKey) return; // 그냥 클릭은 에이전트 화면 조작이다
-              invoke("open_link", { path: full, line: c.line, col: c.col })
-                .catch((err) => showToast("열 수 없습니다", String(err)));
+              openLinkPath(full, c.line, c.col);
             },
           });
         });
@@ -2393,6 +2483,48 @@ $("#btn-check-update").onclick = async (e) => {
   }
 };
 
+// 설정의 "Ctrl+클릭으로 파일 열기" 줄. 깔려 있는 편집기만 고를 수 있게 한다.
+const OPEN_HOW_LABEL = {
+  auto: "자동 (VS Code, 없으면 기본 프로그램)", default: "기본 프로그램", vscode: "VS Code",
+  rider: "Rider", vs: "Visual Studio", reveal: "탐색기에서 위치만",
+};
+let editorsAvail = null;
+async function renderOpenRules() {
+  const box = $("#open-rules");
+  if (!editorsAvail) editorsAvail = await invoke("list_editors").catch(() => ({}));
+  box.innerHTML = "";
+  openRules.forEach((r, i) => {
+    const row = document.createElement("div");
+    row.className = "open-rule";
+    row.innerHTML = `<span class="or-name"></span><input class="set-input mono or-exts" spellcheck="false" /><select class="set-input or-how"></select>`;
+    row.querySelector(".or-name").textContent = r.name;
+    const ext = row.querySelector(".or-exts");
+    ext.value = r.exts === "*" ? "나머지 전부" : r.exts;
+    ext.disabled = r.exts === "*";
+    ext.title = "확장자를 띄어 쓰거나 쉼표로 나눠 적습니다";
+    const sel = row.querySelector(".or-how");
+    for (const [k, label] of Object.entries(OPEN_HOW_LABEL)) {
+      if ((k === "vscode" || k === "rider" || k === "vs") && !editorsAvail[k] && r.how !== k) continue;
+      const o = document.createElement("option");
+      o.value = k;
+      o.textContent = label;
+      sel.appendChild(o);
+    }
+    sel.value = r.how;
+    row.dataset.i = i;
+    box.appendChild(row);
+  });
+}
+function saveOpenRules() {
+  const rows = [...document.querySelectorAll("#open-rules .open-rule")];
+  if (rows.length !== openRules.length) return;
+  rows.forEach((row, i) => {
+    if (openRules[i].exts !== "*") openRules[i].exts = row.querySelector(".or-exts").value.trim();
+    openRules[i].how = row.querySelector(".or-how").value;
+  });
+  localStorage.setItem("openRules", JSON.stringify(openRules.map(({ exts, how }) => ({ exts, how }))));
+}
+
 $("#btn-settings").onclick = () => {
   $("#profile-list").innerHTML = "";
   profiles.forEach((p, i) => addProfileRow(p.name, p.cmd, p.resume !== false, i === activeProfile));
@@ -2401,6 +2533,7 @@ $("#btn-settings").onclick = () => {
   $("#update-state").textContent = "";
   loadAgentVersions();
   $("#opt-webgl").checked = webglOn;
+  renderOpenRules();
   $("#opt-beta").checked = betaUpdates;
   $("#opt-statusline").checked = statusLineOn;
   $("#opt-restore-ask").checked = localStorage.getItem("restoreAsk") !== "0";
@@ -2607,6 +2740,7 @@ $("#lmodal-save").onclick = () => {
   webglOn = $("#opt-webgl").checked;
   localStorage.setItem("webgl", webglOn ? "1" : "0");
   if (webglOn !== webglWas) applyRenderer();
+  saveOpenRules();
   const betaWas = betaUpdates;
   betaUpdates = $("#opt-beta").checked;
   localStorage.setItem("betaUpdates", betaUpdates ? "1" : "0");
