@@ -40,12 +40,12 @@ function cssVar(name, fallback) {
   }
 }
 const TERM_THEME = {
-  background: cssVar("--bg", "#202124"),
-  foreground: cssVar("--text", "#e6e7ea"),
-  cursor: cssVar("--accent", "#8b9bf5"),
-  cursorAccent: cssVar("--bg", "#202124"),
-  selectionBackground: cssVar("--term-selection", "#3b4050"),
-  black: cssVar("--bg-active", "#33363b"),
+  background: cssVar("--bg", "#17181b"),
+  foreground: cssVar("--text", "#e3e1dc"),
+  cursor: cssVar("--accent", "#7aa2ff"),
+  cursorAccent: cssVar("--bg", "#17181b"),
+  selectionBackground: cssVar("--term-selection", "#2c3955"),
+  black: cssVar("--bg-active", "#2d3137"),
   red: "#e05d5d", green: "#87b387", yellow: "#d9a057",
   blue: "#6a9bcc", magenta: "#b58dae",
   cyan: cssVar("--agent-codex", "#6aa8a8"),
@@ -57,7 +57,7 @@ const TERM_THEME = {
   brightBlue: cssVar("--agent-gemini", "#8cb4dd"),
   brightMagenta: "#cba6c4",
   brightCyan: "#8cc2c2",
-  brightWhite: cssVar("--text", "#e6e7ea"),
+  brightWhite: cssVar("--text", "#e3e1dc"),
 };
 
 // ---------- 상태 ----------
@@ -303,13 +303,14 @@ function sessionRow(s, child) {
     ? `<span class="si-ctx" title="마지막 응답 시점 컨텍스트 토큰 수">${fmtTok(s.ctx_tokens)} ctx</span>`
     : "<span></span>";
 
-  // 왼쪽 상태 슬롯 + 본문. 메타 줄은 고정 칸(프로젝트 | 시각 | ctx | TTL)이라 행마다 자리가 같다.
+  // 왼쪽 램프 칸 + 본문. 램프는 줄마다 같은 자리라 위에서 아래로 훑으면 누가 나를
+  // 부르는지 보인다. 프로젝트는 묶음 머리말에 있으므로 줄에는 없다.
+  // 메타 줄은 고정 칸(시각 | ctx | TTL)이라 행마다 자리가 같다.
   el.innerHTML = `
     <div class="si-slot">${slot}</div>
     <div class="si-body">
       <div class="si-title">${pin}${glyph}${fork}<span class="si-title-text"></span>${badge}</div>
       <div class="si-meta">
-        <span class="si-proj"></span>
         <span class="si-time">${timeAgo(s.mtime)}</span>
         ${ctxText}
         ${ttl}
@@ -324,7 +325,6 @@ function sessionRow(s, child) {
     tag.title = "같은 이름이 여럿이라 세션 id를 함께 표시합니다";
     el.querySelector(".si-title").appendChild(tag);
   }
-  el.querySelector(".si-proj").textContent = projOf(s);
   const detail = bgDetailText(s.bg_detail);
   if (detail) el.querySelector(".si-bg-detail").textContent = detail;
 
@@ -415,14 +415,29 @@ function renderSidebar() {
     }
   }
 
-  let count = 0;
+  // 프로젝트로 묶는다. 고정한 세션은 맨 위에 따로 모으고, 프로젝트는 가장 최근에 쓴
+  // 세션 순서대로 놓는다(sorted가 이미 고정 → 최근 순이라 처음 나온 순서가 곧 그 순서다).
+  // 검색·필터 중에도 묶음은 그대로 두고, 남은 줄이 없는 프로젝트는 머리말도 빠진다.
+  const groups = new Map();
   for (const s of sorted) {
     if (s.parent_id && shown.has(s.parent_id)) continue; // 부모 밑에서 그린다
-    listEl.appendChild(sessionRow(s, false));
-    count++;
-    for (const k of kids.get(s.session_id) || []) {
-      listEl.appendChild(sessionRow(k, true));
+    const key = pins.includes(s.session_id) ? "\u0000pin" : projOf(s) || "(폴더 없음)";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  let count = 0;
+  for (const [key, list] of groups) {
+    const head = document.createElement("div");
+    head.className = "si-group";
+    head.textContent = key === "\u0000pin" ? "고정" : key;
+    listEl.appendChild(head);
+    for (const s of list) {
+      listEl.appendChild(sessionRow(s, false));
       count++;
+      for (const k of kids.get(s.session_id) || []) {
+        listEl.appendChild(sessionRow(k, true));
+        count++;
+      }
     }
   }
 
@@ -431,12 +446,44 @@ function renderSidebar() {
   const runN = [...terms.values()].filter((t) => !t.exited).length;
   const bgN = sessions.filter((s) => s.bg_running).length;
   const prof = currentProfile();
-  const parts = [`세션 ${count}개`, `실행 ${runN}`, `답변중 ${busyN}`];
+  // 가운데점으로 잇지 않고 칸으로 나눈다 — 숫자가 앞에 와서 훑을 때 숫자만 읽힌다
+  const parts = [`세션 ${count}개`, `실행 ${runN}`, `답변 중 ${busyN}`];
   if (bgN) parts.push(`백그라운드 ${bgN}`);
   if (prof.cmd !== "claude") parts.push(prof.name);
-  $("#foot-count").textContent = parts.join(" · ");
+  const foot = $("#foot-count");
+  foot.innerHTML = "";
+  for (const p of parts) {
+    const span = document.createElement("span");
+    span.textContent = p;
+    foot.appendChild(span);
+  }
   kbRestore();
   updateTtlBadges();
+  renderEmptyRecent();
+}
+
+// 빈 화면의 "이어서 할 세션": 최근 세션 몇 개를 바로 열 수 있게. 빈 화면이 보일 때만 그린다.
+const EMPTY_RECENT_N = 5;
+function renderEmptyRecent() {
+  const box = $("#empty-recent");
+  if (!box || emptyState.classList.contains("hidden")) return;
+  const nowSec = Date.now() / 1000;
+  const list = sessions
+    .filter((s) => !isEmptySession(s, nowSec) && !tabFor(s.session_id)[0])
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, EMPTY_RECENT_N);
+  box.innerHTML = "";
+  for (const s of list) {
+    const b = document.createElement("button");
+    b.className = "er-row";
+    b.innerHTML = `<span class="si-agent ${escapeHtml(s.agent)}">${AGENT_GLYPH[s.agent] || "•"}</span>` +
+      `<span class="er-title"></span><span class="er-proj"></span><span class="er-time">${timeAgo(s.mtime)}</span>`;
+    b.querySelector(".er-title").textContent = (sessionTitle(s) || s.session_id.slice(0, 8)).slice(0, 80);
+    b.querySelector(".er-proj").textContent = projOf(s);
+    b.onclick = () => detach("openSession:empty", openSession(s));
+    box.appendChild(b);
+  }
+  emptyState.classList.toggle("no-recent", !list.length);
 }
 
 // 캐시 TTL 배지: 매초 남은 시간만 갱신 (전체 리렌더 없이 텍스트만 갱신해 저비용)
@@ -1592,7 +1639,8 @@ function askRestore(list) {
     openRestored(picked);
   };
   card.querySelector(".restore-skip").onclick = done;
-  emptyState.appendChild(card);
+  // 지난번 탭을 묻는 카드가 있으면 그게 먼저다 (최근 세션 목록은 CSS가 감춘다)
+  emptyState.querySelector(".empty-inner").prepend(card);
 }
 
 // 탭을 화면에 띄우고(showTab) 입력을 그 탭으로 보낸다(focusTab).
@@ -2660,6 +2708,7 @@ function launchNew(p) {
 }
 $("#modal-path").addEventListener("input", hideMissing);
 $("#btn-new").onclick = openNewModal;
+$("#empty-new").onclick = openNewModal;
 $("#modal-browse").onclick = async () => {
   try {
     const d = await window.__TAURI__.dialog.open({ directory: true, defaultPath: $("#modal-path").value });

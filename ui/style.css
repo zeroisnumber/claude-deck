@@ -1,41 +1,60 @@
-/* ─── CLI Deck — 다크 테마 ─────────────────────────────── */
+/* ─── CLI Deck — 관제판 ───────────────────────────────────
+   여러 에이전트를 지켜보다 나를 부르는 쪽을 곧바로 찾는 도구다. 그래서 화면에서
+   가장 강한 것은 상태 램프 하나로 몬다: 호박(입력 필요) > 초록(끝났는데 안 봄) >
+   파랑(작업 중) > 빈 고리(쉬는 중). 나머지 바탕·선·글자는 물러서 있는다.
+   파랑은 "작업 중"과 입력이 가는 자리(포커스·선택)에만 쓰고 장식에는 쓰지 않는다. */
+@font-face {
+  /* Pretendard 1.3.9 가변 글꼴 (SIL OFL 1.1, fonts/Pretendard-LICENSE.txt).
+     CSP가 바깥 글꼴을 막으므로 앱에 넣어 둔다. 없으면 아래 시스템 글꼴로 물러난다. */
+  font-family: "Pretendard Variable";
+  src: url("fonts/PretendardVariable.woff2") format("woff2-variations");
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+}
 :root {
-  /* 세 에이전트를 나란히 다루는 도구라 어느 하나의 브랜드 색을 화면 전체에 쓰지
-     않는다. 강조색은 클로드의 주황, 코덱스의 청록, 제미나이의 파랑, 그리고 상태의
-     빨강·초록·호박 어디와도 겹치지 않는 인디고다. 에이전트 색은 그 에이전트를
-     가리키는 자리(글리프·탭 라벨)에만 쓴다. */
-  --bg:        #202124;
-  --bg-deep:   #191a1c;
-  --bg-hover:  #2a2c30;
-  --bg-active: #33363b;
-  --border:    #34373c;
-  --border-strong: #4a4e55;
-  --bg-elev:   #26282c;
-  --text:      #e6e7ea;
-  --text-dim:  #9a9ea6;
-  --text-faint:#80848c; /* 11px 보조 글자가 하루 종일 읽히려면 4.5:1 이상 (#6d7178은 3.55:1) */
-  --accent:    #8b9bf5;
-  --accent-soft: rgba(var(--accent-rgb), 0.15);
+  --bg:        #17181b; /* 석탄 — 터미널·작업 영역 */
+  --bg-deep:   #1e2024; /* 흑연 — 사이드바·탭 줄·창 */
+  --bg-hover:  #26292e;
+  --bg-active: #2d3137;
+  --border:    #33373e; /* 철 */
+  --border-strong: #474c55;
+  --bg-elev:   #23262b;
+  --text:      #e3e1dc; /* 종이 — 살짝 따뜻한 흰색 */
+  --text-dim:  #a6aab1;
+  --text-faint:#8a8e96; /* 11px 보조 글자가 하루 종일 읽히려면 4.5:1 이상 (흑연 위 4.96) */
+  --accent:    #7aa2ff; /* 신호 파랑 */
+  --accent-soft: rgba(var(--accent-rgb), 0.13);
   /* 테두리·글로우처럼 투명도가 필요한 자리용 — 색을 한 곳에서만 정의하려고 둔다 */
-  --accent-rgb: 139, 155, 245;
-  /* 강조색 위에 얹는 글자색. 흰색은 대비가 2.6까지 떨어져 읽기 힘들다 (어두운 쪽은 6.7). */
-  --on-accent: #16171a;
+  --accent-rgb: 122, 162, 255;
+  /* 강조색 위에 얹는 글자색 (대비 7.3) */
+  --on-accent: #14161a;
   /* 터미널 선택 영역 — xterm이 CSS를 못 쓰므로 여기서 읽어 간다 */
-  --term-selection: #3b4050;
-  --green:     #87b387;
-  /* 에이전트를 가리키는 자리(글리프·탭 라벨)에만 쓴다. 강조색과 달리 화면 전체에
-     퍼지지 않는다. 터미널 테마도 이 값을 읽어 간다. */
+  --term-selection: #2c3955;
+  --green:     #7cc58a;
+  --green-rgb: 124, 197, 138;
+  /* 에이전트를 가리키는 자리(글리프)에만 쓴다. 터미널 테마도 이 값을 읽어 간다. */
   --agent-claude: #d97757;
   --agent-codex:  #6aa8a8;
   --agent-gemini: #8cb4dd;
   /* 실패·캐시 끊김처럼 본문 글자에 얹는 옅은 빨강 (--red는 점·막대용) */
-  --red-soft:  #ef8080;
-  /* 경고 단계 — 게이지가 초록에서 붉은색으로 가는 중간이자, 입력 대기 상태의 색 */
-  --amber:     #e8b878;
-  --red:       #e05d5d;
-  --radius:    10px;
-  --font-ui:   "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", sans-serif;
+  --red-soft:  #f08a80;
+  /* 램프 호박 — "입력 필요" 전용. 화면에서 가장 강한 색이라 다른 데 쓰지 않는다. */
+  --amber:     #f2b544;
+  --amber-rgb: 242, 181, 68;
+  /* 한도 게이지의 중간 단계. 예전엔 호박을 같이 써서 반쯤 찬 막대마다 "나를 봐"라고
+     외쳤다 — 채도를 뺀 황토로 둔다. */
+  --gauge-warm: #b59a66;
+  --red:       #e5645a;
+  --radius:    8px;
+  --radius-sm: 5px;
+  --font-ui:   "Pretendard Variable", "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", sans-serif;
   --font-mono: "Cascadia Mono", "Consolas", "D2Coding", monospace;
+  /* 글자 크기는 네 단계만: 보조 11 · 본문 12 · 제목줄 13 · 머리 15 */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -66,53 +85,48 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 14px 10px;
+  padding: 12px 10px 10px 16px;
 }
 
-#brand { display: flex; align-items: center; gap: 8px; }
-#brand-mark { color: var(--accent); font-size: 17px; }
-#brand-name { font-weight: 600; font-size: 14px; letter-spacing: 0.2px; }
+#brand { display: flex; align-items: center; gap: 9px; }
+/* 네 칸짜리 램프판 — 하나만 켜져 있다 */
+#brand-mark svg { width: 15px; height: 15px; display: block; }
+#brand-mark circle { fill: var(--border-strong); }
+#brand-mark circle.lit { fill: var(--amber); }
+#brand-name { font-weight: 650; font-size: var(--fs-md); letter-spacing: -0.01em; }
 
 .icon-btn {
+  display: inline-grid;
+  place-items: center;
   background: none;
   border: none;
-  color: var(--text-dim);
-  font-size: 15px;
+  color: var(--text-faint);
   width: 28px; height: 28px;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
 }
-.icon-btn:hover { background: var(--bg-hover); color: var(--text); }
-
-#btn-new {
-  margin: 0 14px 10px;
-  padding: 9px 12px;
-  background: var(--accent);
-  color: var(--on-accent);
-  border: none;
-  border-radius: var(--radius);
-  font-family: var(--font-ui);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: filter 0.12s, transform 0.06s;
+.icon-btn svg {
+  width: 16px; height: 16px;
+  fill: none; stroke: currentColor; stroke-width: 1.4;
+  stroke-linecap: round; stroke-linejoin: round;
 }
-#btn-new:hover { filter: brightness(1.08); }
-#btn-new:active { transform: scale(0.985); }
+.icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+.icon-btn:focus-visible, .af:focus-visible, .er-row:focus-visible, .tab-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 
-#head-btns { display: flex; gap: 2px; }
+#head-btns { display: flex; gap: 0; }
 
-/* 탭 배지 — 기본(claude) 외 프로필 표시 */
+/* 탭 배지 — 기본(claude) 외 프로필 표시. 파랑은 "작업 중" 몫이라 무채색 테두리 글자로 둔다 */
 .tab-badge {
-  font-size: 9px;
-  font-weight: 700;
-  color: var(--accent);
-  background: var(--accent-soft);
-  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
   border-radius: 4px;
-  padding: 0.5px 4px;
-  letter-spacing: 0.4px;
+  padding: 0 4px;
   flex-shrink: 0;
 }
 .l-active {
@@ -297,47 +311,42 @@ html, body {
   border-radius: 4px;
 }
 
-#search-wrap { padding: 0 14px 10px; }
+#search-wrap { padding: 0 12px 8px; }
 #search {
   width: 100%;
-  padding: 7px 11px;
+  padding: 7px 10px;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   color: var(--text);
   font-family: var(--font-ui);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   outline: none;
   transition: border-color 0.12s;
 }
 #search::placeholder { color: var(--text-faint); }
 #search:focus { border-color: var(--accent); }
 
-/* 에이전트 필터 */
+/* 에이전트 필터 — 알약 버튼 네 개 대신 글자 줄. 켜진 것만 밑줄로 드러난다 */
 #agent-filter {
   display: flex;
-  gap: 4px;
-  padding: 0 14px 8px;
+  gap: 14px;
+  padding: 2px 16px 8px;
+  border-bottom: 1px solid var(--border);
 }
 .af {
-  flex: 1;
-  padding: 4px 0;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 7px;
+  padding: 3px 0 4px;
+  background: none;
+  border: none;
+  border-bottom: 1.5px solid transparent;
   color: var(--text-faint);
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   cursor: pointer;
-  transition: color 0.1s, border-color 0.1s, background 0.1s;
+  transition: color 0.1s, border-color 0.1s;
 }
 .af:hover { color: var(--text); }
-.af.on {
-  background: var(--accent-soft);
-  border-color: rgba(var(--accent-rgb), 0.4);
-  color: var(--accent);
-  font-weight: 600;
-}
+.af.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
 
 /* 에이전트 글리프 */
 .si-agent { flex: none; font-size: 11px; }
@@ -349,80 +358,82 @@ html, body {
   flex: 1;
   min-height: 0; /* flex 자식이 내용만큼 커져 푸터를 밀어내지 않게 */
   overflow-y: auto;
-  padding: 2px 8px 8px;
+  padding: 4px 6px 10px;
 }
+
+/* 프로젝트 머리말. 알약 칩 대신 묶음 위의 작은 글자 한 줄 */
+.si-group {
+  padding: 12px 10px 4px 30px; /* 램프 칸 너비만큼 들여 제목과 줄을 맞춘다 */
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.si-group:first-child { padding-top: 6px; }
 
 .session-item {
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr);
-  column-gap: 8px;
-  padding: 9px 10px 8px;
-  margin-bottom: 3px;
-  border-radius: var(--radius);
+  column-gap: 10px;
+  padding: 7px 10px 7px 10px;
+  margin-bottom: 1px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  border: 1px solid transparent;
-  transition: background 0.1s, border-color 0.1s;
+  transition: background 0.1s;
   position: relative;
 }
-/* 상태 슬롯: 탭 상태(작업 중·대기·종료)가 우선, 없으면 백그라운드 잡 상태 */
-.si-slot { display: flex; align-items: center; justify-content: center; height: 18px; }
-.si-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* 램프 칸: 탭 상태(작업 중·대기·종료)가 우선, 없으면 백그라운드 잡 상태.
+   모든 줄이 같은 자리에 램프를 두므로 세로로 한 줄이 된다 */
+.si-slot { display: flex; align-items: center; justify-content: center; height: 19px; }
+.si-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .si-status { width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; }
-.si-status.busy    { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
-/* 끝나고 이미 본 탭은 속이 빈 초록 고리, 아직 안 봤으면 찬 초록 — 백그라운드 실행(보라)과 섞이지 않게 */
-.si-status.idle    { background: transparent; border: 1.5px solid var(--green); }
-.si-status.exited  { background: var(--text-faint); }
-.si-status.wait    { background: var(--amber); animation: pulse 1.1s ease-in-out infinite; }
-.si-status.bg-run  { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; } /* 도는 중 = 작업 중과 같은 색 */
-.si-status.bg-wait { background: var(--amber); }
+/* 작업 중 — 파랑이 숨쉰다 */
+.si-status.busy, .si-status.bg-run { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+/* 입력 필요 — 가장 강한 신호. 깜빡이지 않고 꽉 찬 호박에 빛무리 */
+.si-status.wait, .si-status.bg-wait {
+  width: 9px; height: 9px;
+  background: var(--amber);
+  box-shadow: 0 0 0 3px rgba(var(--amber-rgb), 0.22), 0 0 10px rgba(var(--amber-rgb), 0.35);
+}
+/* 끝났는데 아직 안 봄 — 꽉 찬 초록 */
+.si-status.unread { background: var(--green); border: none; box-shadow: 0 0 0 3px rgba(var(--green-rgb), 0.2); }
+/* 쉬는 중(열린 탭) — 빈 고리. 에이전트가 아무것도 안 바라는 상태 */
+.si-status.idle    { background: transparent; border: 1.5px solid var(--text-faint); }
+.si-status.exited  { width: 6px; height: 2px; border-radius: 1px; background: var(--text-faint); }
 .si-status.bg-done { border: 1.5px solid var(--text-faint); }
 .si-status.bg-fail { border: 1.5px solid var(--red-soft); }
-/* 읽지 않은 완료: 탭의 attention 글로우와 같은 뜻을 사이드바에도 */
-.si-status.unread { background: var(--green); border: none; box-shadow: 0 0 0 3px rgba(135, 179, 135, 0.28); }
-/* 사람의 답을 기다리는 줄은 점 하나로는 안 보인다 — 왼쪽 호박색 띠와 옅은 바탕 */
-.session-item.wait { box-shadow: inset 3px 0 0 var(--amber); background: rgba(232, 184, 120, 0.06); }
+/* 사람의 답을 기다리는 줄은 램프만으로 모자라다 — 왼쪽 호박 띠와 옅은 바탕 */
+.session-item.wait { box-shadow: inset 2px 0 0 var(--amber); background: rgba(var(--amber-rgb), 0.07); }
 .session-item.kb { outline: 1px solid rgba(var(--accent-rgb), 0.6); outline-offset: -1px; }
 .session-item:hover { background: var(--bg-hover); }
-.session-item.active {
-  background: var(--accent-soft);
-  border-color: rgba(var(--accent-rgb), 0.35);
-}
+.session-item.active { background: var(--bg-active); }
+.session-item.active .si-title { font-weight: 600; }
 
 .si-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13px;
-  line-height: 1.35;
+  font-size: var(--fs-md);
+  line-height: 1.45;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
 }
 .si-title-text { overflow: hidden; text-overflow: ellipsis; }
-/* 고정 칸: 프로젝트 | 시각 | ctx | TTL — 행마다 같은 자리에 온다 */
+/* 고정 칸: 시각 | ctx | TTL — 행마다 같은 자리에 온다 */
 .si-meta {
   display: grid;
-  grid-template-columns: fit-content(96px) auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  column-gap: 6px;
-  font-size: 11px;
+  column-gap: 8px;
+  font-size: var(--fs-xs);
   color: var(--text-faint);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .si-meta > * { min-width: 0; }
-.si-proj {
-  justify-self: start;
-  color: var(--text-dim);
-  background: var(--bg-hover);
-  padding: 1px 6px;
-  border-radius: 5px;
-  font-size: 10.5px;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.session-item.active .si-proj { background: rgba(var(--accent-rgb), 0.18); color: var(--accent); }
 
 .si-ttl {
   text-align: right;
@@ -438,25 +449,30 @@ html, body {
   border-radius: 50%;
   flex-shrink: 0;
 }
-.tab-dot.idle   { background: var(--green); }
-.tab-dot.busy   { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
-.tab-dot.exited { background: var(--text-faint); }
-.tab-dot.wait   { background: var(--amber); animation: pulse 1.1s ease-in-out infinite; }
+/* 탭 램프 — 사이드바 램프와 같은 말을 쓴다 */
+.tab-dot.idle   { background: transparent; border: 1.5px solid var(--text-faint); }
+.tab-dot.busy   { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.tab-dot.exited { width: 6px; height: 2px; border-radius: 1px; background: var(--text-faint); }
+.tab-dot.wait   { background: var(--amber); box-shadow: 0 0 0 2px rgba(var(--amber-rgb), 0.25); }
+.tab.attention .tab-dot { background: var(--green); border: none; }
 
-/* 깜빡임은 밝기만 — 번짐을 보라로 박아 두면 호박색(입력 필요) 점도 보라 빛으로 깜빡였다 */
+/* 깜빡임은 밝기만 — 번짐을 박아 두면 다른 색 점도 그 빛으로 깜빡였다 */
 @keyframes pulse {
   0%, 100% { opacity: 1; }
-  50%      { opacity: 0.55; }
+  50%      { opacity: 0.4; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .si-status, .tab-dot, #btn-update { animation: none !important; }
 }
 
 #side-foot {
-  padding: 8px 14px;
+  padding: 10px 16px 12px;
   border-top: 1px solid var(--border);
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
 }
 #foot-row {
@@ -465,6 +481,8 @@ html, body {
   justify-content: space-between;
   gap: 8px;
 }
+/* 가운데점 대신 칸 사이 여백으로 나눈다 */
+#foot-count { display: flex; flex-wrap: wrap; column-gap: 12px; row-gap: 2px; font-variant-numeric: tabular-nums; }
 
 /* 요금제 한도 위젯 */
 #foot-limits { display: flex; align-items: flex-start; gap: 6px; }
@@ -502,7 +520,7 @@ html, body {
   border-radius: 3px;
   transition: width 0.5s ease;
 }
-.limit-fill.warm { background: var(--amber); }
+.limit-fill.warm { background: var(--gauge-warm); } /* 호박은 "입력 필요" 전용 */
 .limit-fill.hot  { background: var(--red); }
 .limit-txt {
   font-size: 10px;
@@ -546,30 +564,40 @@ html, body {
 /* 펼치기 버튼이 첫 탭을 가리지 않게 자리를 비운다 */
 #app.side-collapsed #tabs { padding-left: 42px; }
 
-#tab-row { display: flex; align-items: flex-end; min-width: 0; }
+/* 탭 줄은 사이드바와 같은 흑연 위에 평평한 칸을 늘어놓는다. 보고 있는 탭은 터미널과
+   같은 석탄색이라 아래 화면과 한 덩어리로 이어진다. 상태는 윗줄 2px로만 — 예전엔 입력
+   필요 탭이 통째로 호박 테두리·바탕으로 바뀌어 다른 탭을 덮었다. */
+#tab-row {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border);
+}
 #tab-row #tabs { flex: 1; min-width: 0; }
-#layout-btns { display: flex; gap: 2px; padding: 0 10px 5px 6px; }
+#layout-btns { display: flex; align-items: center; gap: 0; padding: 0 8px 0 6px; }
 #layout-btns button {
-  width: 24px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
   padding: 0;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
 }
-#layout-btns button:hover { background: var(--bg-deep); color: var(--text-dim); }
+#layout-btns button:hover { background: var(--bg-hover); color: var(--text); }
 #layout-btns button.on { color: var(--accent); }
+#layout-btns button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 #layout-btns svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.3; }
 
 #tabs {
   display: flex;
-  gap: 4px;
-  padding: 8px 10px 0;
-  min-height: 40px;
+  gap: 0;
+  padding: 0;
+  min-height: 38px;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -578,14 +606,12 @@ html, body {
 .tab {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 6px 8px 6px 12px;
-  background: var(--bg-deep);
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: 9px 9px 0 0;
-  font-size: 12px;
-  color: var(--text-dim);
+  gap: 8px;
+  padding: 0 8px 0 12px;
+  background: transparent;
+  border-right: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
   cursor: pointer;
   max-width: 250px;
   min-width: 118px;
@@ -594,35 +620,42 @@ html, body {
   /* 탭이 많으면 줄어든다 — 예전엔 줄지 않고 숨은 스크롤로 밀려 7개 중 뒤 2개가 안 보였다 */
   flex: 0 1 auto;
 }
-.tab:hover { background: var(--bg-hover); }
+.tab:hover { background: var(--bg-hover); color: var(--text-dim); }
 .tab.active {
-  background: var(--bg-active); /* 호버(--bg-hover)보다 한 단계 밝아 구분된다 */
+  background: var(--bg);
   color: var(--text);
-  border-color: var(--border);
-  box-shadow: inset 0 2px 0 var(--accent);
+  /* 탭 줄 아래 선을 덮어 터미널과 이어 붙인다 */
+  box-shadow: 0 1px 0 var(--bg);
 }
-/* 나눈 화면의 다른 칸에 떠 있는 탭 */
-.tab.shown { color: var(--text); box-shadow: inset 0 2px 0 rgba(var(--accent-rgb), 0.35); }
+/* 나눈 화면의 다른 칸에 떠 있는 탭 — 보이지만 입력은 안 가는 탭 */
+.tab.shown { color: var(--text-dim); background: color-mix(in srgb, var(--bg) 55%, var(--bg-deep)); }
+/* 상태 윗줄: 입력 필요(호박) · 끝났는데 안 봄(초록) */
+.tab::before {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 2px;
+  background: transparent;
+}
+.tab.wait::before { background: var(--amber); }
+.tab.attention::before { background: var(--green); }
 .tab-label { overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 42px; }
-/* 그래도 넘치면 보고 있지 않은 탭의 프로젝트 칩을 뺀다 */
+/* 그래도 넘치면 보고 있지 않은 탭의 프로젝트를 뺀다 */
 #tabs.compact .tab:not(.active) .tab-proj { display: none; }
 .tab-proj {
-  font-size: 10.5px;
-  padding: 0 5px;
-  border-radius: 4px;
-  background: var(--bg-hover);
-  color: var(--text-dim);
-  /* 탭이 줄어들 때 칩이 제목보다 훨씬 먼저 줄어든다 — 제목이 한두 글자로 찌그러지지 않게 */
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  /* 탭이 줄어들 때 프로젝트가 제목보다 훨씬 먼저 줄어든다 — 제목이 한두 글자로 찌그러지지 않게 */
   flex: 0 12 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tab.active .tab-proj { background: rgba(var(--accent-rgb), 0.18); color: var(--accent); }
 #tabs.drag-active .tab:not(.dragging) { transition: transform 0.16s ease; }
 .tab.dragging {
-  opacity: 0.92;
-  box-shadow: inset 0 2px 0 var(--accent), 0 5px 16px rgba(0, 0, 0, 0.5);
+  opacity: 0.94;
+  background: var(--bg-active);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   z-index: 10;
   position: relative;
   transition: none;
@@ -632,22 +665,24 @@ html, body {
 .tab.exited .tab-label { text-decoration: line-through; opacity: 0.55; }
 
 .tab-close {
-  width: 17px; height: 17px;
+  width: 18px; height: 18px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: none;
   color: var(--text-faint);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1;
   cursor: pointer;
-  transition: background 0.1s, color 0.1s;
+  opacity: 0;
+  transition: background 0.1s, color 0.1s, opacity 0.1s;
 }
-.tab-close:hover { background: var(--red); color: #fff; }
+/* 닫기 단추는 보고 있거나 손을 올린 탭에서만 — 늘 보이면 탭마다 ✕가 줄지어 시끄럽다 */
+.tab.active .tab-close, .tab:hover .tab-close, .tab-close:focus-visible { opacity: 1; }
+.tab-close:hover { background: var(--bg-active); color: var(--text); }
 
 #term-area {
   flex: 1;
   position: relative;
-  border-top: 1px solid var(--border);
   background: var(--bg);
   min-height: 0;
 }
@@ -726,22 +761,52 @@ html, body {
 .term-moved .moved-sub { opacity: 0.7; }
 
 /* ─── 빈 화면 ─────────────────────────────────────────── */
+/* 로고와 단축키 나열 대신 할 일을 내민다: 최근 세션을 바로 열거나 새로 시작한다.
+   가운데 정렬 대신 왼쪽 정렬한 한 덩어리를 화면 가운데 둔다 — 목록은 왼쪽부터 읽힌다. */
 #empty-state {
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  padding: 24px;
   color: var(--text-dim);
 }
 #empty-state.hidden { display: none; }
+.empty-inner { width: min(520px, 100%); display: flex; flex-direction: column; gap: 10px; }
+.empty-title { font-size: var(--fs-lg); font-weight: 650; color: var(--text); letter-spacing: -0.01em; }
+#empty-recent { display: flex; flex-direction: column; margin: 2px -10px 4px; }
+.er-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  column-gap: 10px;
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+.er-row:hover { background: var(--bg-hover); }
+.er-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.er-proj, .er-time { font-size: var(--fs-xs); color: var(--text-faint); white-space: nowrap; }
+.er-time { font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+.empty-actions { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
+.empty-actions .btn-sm { margin-top: 0; }
+.empty-keys { font-size: var(--fs-xs); color: var(--text-faint); }
+/* 이어서 열 탭을 묻는 카드가 있으면 그게 답할 일이다 — 최근 목록은 감춘다 */
+.empty-inner:has(.restore-card) > .empty-title,
+.empty-inner:has(.restore-card) > #empty-recent { display: none; }
+#empty-state.no-recent .empty-title,
+#empty-state.no-recent #empty-recent { display: none; }
 
 /* 켤 때 지난번 탭을 이어서 열지 묻는 카드 */
 .restore-card {
-  margin-top: 22px;
-  width: min(460px, 100%);
+  width: 100%;
   padding: 14px 16px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -765,16 +830,6 @@ html, body {
 .restore-proj { font-size: 11px; color: var(--text-faint); }
 .restore-remember { font-size: 11.5px; color: var(--text-dim); display: flex; gap: 6px; align-items: center; }
 .restore-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.empty-mark { font-size: 44px; color: var(--accent); opacity: 0.9; }
-.empty-title { font-size: 19px; font-weight: 600; color: var(--text); }
-.empty-sub { font-size: 13px; color: var(--text-dim); }
-.empty-hints {
-  margin-top: 18px;
-  display: flex;
-  gap: 18px;
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
 kbd {
   background: var(--bg-hover);
   border: 1px solid var(--border);
@@ -843,15 +898,6 @@ kbd {
 /* ─── 완료 어텐션 / 재시작 버튼 ─────────────────────────── */
 /* 끝났는데 아직 안 본 탭 = 초록 윗줄. 입력 필요(.wait, 호박색)와 색이 달라야 곁눈으로 가른다.
    예전엔 둘 다 같은 보라 빛으로 깜빡여 "나를 기다린다"와 "끝났다"를 못 갈랐다. */
-.tab.attention {
-  border-color: rgba(135, 179, 135, 0.55);
-  box-shadow: inset 0 2px 0 var(--green);
-}
-.tab.wait {
-  background: #2e2718;
-  border-color: rgba(232, 184, 120, 0.7);
-  box-shadow: inset 0 2px 0 var(--amber);
-}
 @keyframes attention-glow {
   0%, 100% { box-shadow: 0 0 0 rgba(var(--accent-rgb), 0); }
   50%      { box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.55); }

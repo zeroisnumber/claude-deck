@@ -648,6 +648,34 @@ def manual_update_check_reports_failure(p):
 
 
 @check
+def sidebar_groups_by_project(p):
+    """프로젝트로 묶고(가장 최근 순), 고정은 맨 위 따로, 검색으로 비면 머리말도 빠진다.
+    빈 화면에는 최근 세션을 바로 열 수 있게 보여 준다."""
+    s = fake_sessions(4, {0: {"project": "rpg"}, 1: {"project": "shader"}, 2: {"project": "rpg"}, 3: {"project": "tools"}})
+    p.load(sessions=s, extra_storage=f"localStorage.setItem('pins', JSON.stringify(['{s[3]['session_id']}']));")
+    time.sleep(0.4)
+    heads = lambda: p.js("[...document.querySelectorAll('#session-list .si-group')].map(e => e.textContent)")
+    assert heads() == ["고정", "rpg", "shader"], heads()
+    assert rows(p) == [s[3]["session_id"], s[0]["session_id"], s[2]["session_id"], s[1]["session_id"]], rows(p)
+    p.js("document.querySelector('#search').value = 'shader'; renderSidebar()")
+    assert heads() == ["shader"], f"검색 뒤 머리말 {heads()}"
+    p.js("document.querySelector('#search').value = ''; renderSidebar()")
+    recent = p.js("[...document.querySelectorAll('#empty-recent .er-row .er-title')].map(e => e.textContent)")
+    assert recent[:2] == ["세션 0", "세션 1"], recent
+    p.js("document.querySelector('#empty-recent .er-row').click()")
+    time.sleep(0.3)
+    assert calls(p, "spawn_pty") and calls(p, "spawn_pty")[0]["id"] == s[0]["session_id"], "최근 세션을 눌렀는데 안 열렸다"
+
+
+@check
+def bundled_font_loads(p):
+    """앱에 넣은 Pretendard가 실제로 쓰인다 — 파일이 빠지거나 CSP에 막히면 말없이 맑은 고딕으로 물러난다"""
+    p.load()
+    ok = p.js("document.fonts.load('13px \"Pretendard Variable\"', '가').then(f => f.length > 0 && document.fonts.check('13px \"Pretendard Variable\"', '가'))")
+    assert ok, "Pretendard를 못 불러왔다"
+
+
+@check
 def ctrl_v_pastes_clipboard_image_as_path(p):
     """클립보드에 글자 없이 이미지만 있으면 임시 PNG 경로를 붙여넣는다. 글자가 있으면 글자."""
     p.load(replies={"save_clipboard_image": r"C:\Users\me\AppData\Local\Temp\cli-deck-paste\paste-1.png"})
