@@ -1077,6 +1077,65 @@ setTimeout(() => process.exit(0), 8000);
         assert!(words_ok && echo_ok);
     }
 
+    /// 글자가 아닌 입력(ESC·Ctrl+C·방향키·Shift+Tab·마우스 휠/움직임·포커스·괄호 붙여넣기)이
+    /// ConPTY를 지나 앱에 그대로 닿는가. 받은 바이트를 JSON으로 찍게 해 내장과 함께 배포하는
+    /// ConPTY를 비교한다. `cargo test -- --ignored conpty_control_input --nocapture`
+    #[test]
+    #[ignore]
+    fn conpty_control_input() {
+        let js = r#"
+process.stdin.setRawMode(true); process.stdin.resume();
+process.stdout.write('\x1b[?1003h\x1b[?1006h\x1b[?1004h\x1b[?2004hREADY\r\n');
+process.stdin.on('data', (d) => { process.stdout.write('GOT' + JSON.stringify(d.toString('latin1')) + '\r\n'); });
+setTimeout(() => process.exit(0), 12000);
+"#;
+        let sends: [(&str, &[u8]); 9] = [
+            ("ESC", b"\x1b"),
+            ("Ctrl+C", b"\x03"),
+            ("Up", b"\x1b[A"),
+            ("Shift+Tab", b"\x1b[Z"),
+            ("wheel", b"\x1b[<64;10;5M"),
+            ("motion", b"\x1b[<35;12;6M"),
+            ("focus-in", b"\x1b[I"),
+            ("paste", b"\x1b[200~hi\x1b[201~"),
+            ("Enter", b"\r"),
+        ];
+        let sideloaded = std::env::current_exe().unwrap().parent().unwrap().join("conpty.dll").exists();
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 100, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("node");
+        cmd.args(["-e", js]);
+        let _child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
+        let w2 = writer.clone();
+        let got = Arc::new(Mutex::new(String::new()));
+        let g2 = got.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 { break; }
+                let s = String::from_utf8_lossy(&buf[..n]).to_string();
+                if s.contains("\x1b[c") {
+                    let _ = w2.lock().unwrap().write_all(b"\x1b[?1;2c");
+                }
+                g2.lock().unwrap().push_str(&s);
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        eprintln!("{}", if sideloaded { "conpty.dll" } else { "내장 conhost" });
+        for (name, bytes) in sends {
+            got.lock().unwrap().clear();
+            writer.lock().unwrap().write_all(bytes).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let s = got.lock().unwrap().clone();
+            let recv: Vec<&str> = s.split("GOT").skip(1).map(|x| x.split('\r').next().unwrap_or("")).collect();
+            eprintln!("  {name:<10} 보냄 {:<24} 받음 {}", format!("{:?}", String::from_utf8_lossy(bytes)), recv.join(" "));
+        }
+    }
+
     #[test]
     fn input_kind_tells_wheel_motion_and_clicks_apart() {
         assert_eq!(input_kind(b"\x1b[<64;10;5M"), 'w'); // 휠 위
