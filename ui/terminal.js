@@ -432,7 +432,8 @@ function makeTerm(id, title, cwd) {
       uiTrace("ime:orphan", `${Math.round(now)}|${id}|${JSON.stringify(d)}`);
       rebindIme(term);
     }
-    invoke("write_pty", { id, data: d });
+    // 기록이 켜져 있으면 보낸 시각을 싣는다 — 키가 Rust에 닿기까지 밀린 시간을 "in" 줄에 남긴다
+    invoke("write_pty", traceOn ? { id, data: d, sent: wallNow() } : { id, data: d });
   });
 
   // 조합창이 커서에서 얼마나 떨어져 있는지. 한 칸을 넘게 벌어지면 그게 "왼쪽 위"다.

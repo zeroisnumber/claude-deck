@@ -808,10 +808,34 @@ def slow_frames_are_traced(p):
     p.js("clearInterval(window.__jank)")
     rec = [c["value"] for c in calls(p, "trace_ui") if c["kind"] == "frames"]
     assert rec, "느린 프레임을 남기지 않았다"
-    p95, mx, n, mode, shown, kb = rec[-1].split("|")
-    assert int(p95) > 25 and mode in ("gl", "dom") and shown == "1", rec[-1]
+    p95, mx, n, mode, shown, kb, median = rec[-1].split("|")
+    assert int(p95) > 25 and mode in ("gl", "dom") and shown == "1" and float(median) > 0, rec[-1]
     # frames가 없는 구간도 어느 렌더러였는지 알 수 있어야 한다
     assert [c["value"] for c in calls(p, "trace_ui") if c["kind"] == "renderer"] == [mode]
+
+
+@check
+def delivery_delays_are_traced(p):
+    """출력 이벤트가 화면에 닿기까지, 키가 Rust에 닿기까지 밀린 시간 — 기록이 켜져 있을 때만"""
+    p.load(trace=True)
+    p.term()
+    # Rust가 80ms 전에 보낸 출력 (보낸 시각은 기록이 켜져 있을 때만 실려 온다)
+    p.js(f"window.__handlers['pty-output']({{payload: {{id: 't', data: '{b64('x')}', generation: 1, "
+         f"sent: performance.timeOrigin + performance.now() - 80}}}})")
+    p.key("a", "KeyA", 65, text="a")
+    sent = [c[1] for c in p.js("window.__calls") if c[0] == "write_pty"]
+    assert sent and isinstance(sent[-1].get("sent"), (int, float)), sent
+    time.sleep(5.5)
+    rec = [c["value"] for c in calls(p, "trace_ui") if c["kind"] == "ipc-out"]
+    assert rec, "밀린 출력 이벤트를 남기지 않았다"
+    p50, p95, mx, n = rec[-1].split("|")
+    assert float(mx) >= 80 and n == "1", rec[-1]
+    # 기록이 꺼져 있으면 키에 시각을 싣지 않는다
+    p.load(trace=False)
+    p.term()
+    p.key("a", "KeyA", 65, text="a")
+    sent = [c[1] for c in p.js("window.__calls") if c[0] == "write_pty"]
+    assert sent and "sent" not in sent[-1], sent
 
 
 @check

@@ -100,16 +100,24 @@ try {
 // longtask는 50ms 이상만 잡는다. 출력이 쏟아지는 동안 20~40ms씩 자주 밀리는 "렉"은
 // 거기 안 걸리므로 프레임 간격을 직접 잰다. 재는 일 자체가 매 프레임 깨어나는 부하라
 // 5초 중 1초만 잰다(렉은 몇 초씩 이어지므로 그걸로 잡힌다). 느린 쪽(p95)과 최대를 남기되,
-// 매끄러운 구간(p95 25ms 이하, 최대 50ms 이하)은 남기지 않는다. 기록이 꺼져 있으면 안 돈다.
-//   frames  <p95 ms>|<최대 ms>|<프레임 수>|<gl|dom>|<보이는 칸 수>|<5초간 받은 출력 KB>
+// 매끄러운 구간은 남기지 않는다. 기준은 화면 주사율에 맞춘다 — 그 구간의 중앙값이 한 프레임이고,
+// p95가 그 1.6배 이하이고 최대 50ms 이하면 매끄럽다. 예전엔 p95 25ms로 고정해서 120Hz 화면이
+// 40fps로 떨어져도 남지 않았다. 기록이 꺼져 있으면 안 돈다.
+//   frames  <p95 ms>|<최대 ms>|<프레임 수>|<gl|dom>|<보이는 칸 수>|<5초간 받은 출력 KB>|<중앙값 ms>
 // 렌더러 종류는 켤 때와 바꿀 때 따로 남긴다(renderer) — frames가 없을 때 "매끄러웠다"를
 // 어느 렌더러에서였는지 알 수 있게.
+// 같은 5초마다 출력 이벤트가 Rust에서 나와 여기 닿기까지 걸린 시간도 본다(보낸 시각은 기록이
+// 켜져 있을 때만 실려 온다). 메인 스레드·WebView2에서 밀린 시간이라 화면 쪽 계측엔 안 보인다.
+//   ipc-out <p50 ms>|<p95 ms>|<최대 ms>|<이벤트 수>   — p95 16ms 또는 최대 50ms를 넘을 때만
 const FRAME_SAMPLE_MS = 1000;
 let frameGaps = [];
 let frameLast = 0;
 let frameUntil = 0;
 let frameOutBytes = 0; // pty-output이 더한다
+let ipcOutLag = [];    // pty-output이 더한다 (ms)
 let rendererLogged = false;
+// Rust의 wall_ms()와 같은 벽시계(ms)
+const wallNow = () => performance.timeOrigin + performance.now();
 function frameTick(now) {
   if (!traceOn || now > frameUntil) { frameLast = 0; return; }
   if (frameLast) frameGaps.push(now - frameLast);
@@ -122,16 +130,25 @@ setInterval(() => {
   // 창이 가려져 프레임이 멈췄던 구간은 버린다(그건 렉이 아니다)
   const gaps = frameGaps.filter((g) => g < 1000).sort((a, b) => a - b);
   const out = frameOutBytes;
+  const lag = ipcOutLag.sort((a, b) => a - b);
   frameGaps = [];
   frameOutBytes = 0;
+  ipcOutLag = [];
   frameUntil = performance.now() + FRAME_SAMPLE_MS;
   requestAnimationFrame(frameTick);
+  if (lag.length) {
+    const p95 = lag[Math.floor(lag.length * 0.95)], max = lag[lag.length - 1];
+    if (p95 > 16 || max > 50) {
+      uiTrace("ipc-out", `${lag[Math.floor(lag.length / 2)].toFixed(1)}|${p95.toFixed(1)}|${max.toFixed(1)}|${lag.length}`);
+    }
+  }
   if (gaps.length < 10) return;
   const p95 = gaps[Math.floor(gaps.length * 0.95)];
   const max = gaps[gaps.length - 1];
-  if (p95 <= 25 && max <= 50) return;
+  const median = gaps[Math.floor(gaps.length / 2)];
+  if (p95 <= median * 1.6 && max <= 50) return;
   uiTrace("frames", `${Math.round(p95)}|${Math.round(max)}|${gaps.length}|${webglOn ? "gl" : "dom"}|` +
-    `${shownIds.length}|${Math.round(out / 1024)}`);
+    `${shownIds.length}|${Math.round(out / 1024)}|${median.toFixed(1)}`);
 }, 5000);
 
 const $ = (s) => document.querySelector(s);

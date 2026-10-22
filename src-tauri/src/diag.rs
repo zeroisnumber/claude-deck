@@ -55,7 +55,9 @@ pub(crate) fn install_panic_hook() {
 // 형식: <경과ms>	<pty id>	<에이전트>	<종류>	<값>
 //   out    = "<바이트수>,<스피너글리프 포함 1|0>"
 //   in     = 사용자 입력 바이트수 (타이핑 에코를 출력과 구분하기 위해 필요)
+//            화면 쪽이 시각을 실어 보내면 "<바이트수>,<화면→여기 ms>,<종류 w휠|m움직임|c누름|k그 밖>"
 //   spawn  = 실행 명령, exit = 없음
+//   conpty = 이 탭에 붙은 ConPTY — 함께 배포한 conpty.dll의 경로, 아니면 "inbox"(윈도우 내장)
 //   start  = <epoch ms> (id "#") — 파일을 열 때마다 첫 줄. 벽시계 환산용 (open_trace)
 // 앱을 켤 때마다 지난 기록은 pty-trace.prev.log로 밀린다 (rotate_trace).
 /// 런타임 토글 — 설정 창의 체크박스로 켜고 끈다. 릴리스에서 컴파일로 빼버렸더니

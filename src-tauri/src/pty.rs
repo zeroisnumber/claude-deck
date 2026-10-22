@@ -57,6 +57,29 @@ pub(crate) struct PtyOutput {
     /// 어느 실행에서 나온 출력인가. 탭을 다시 열면 같은 id로 새 프로세스가 뜨는데,
     /// 끈 프로세스의 리더 스레드가 남은 출력을 마저 흘려서 새 화면에 섞였다.
     pub(crate) generation: u64,
+    /// 진단 기록이 켜져 있을 때만: 보낸 벽시계 시각(ms). 화면 쪽이 받은 시각과 빼서 이벤트가
+    /// 메인 스레드·WebView2를 지나는 동안 얼마나 밀렸는지 본다 — 화면 쪽 계측엔 안 보이는 구간이다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sent: Option<f64>,
+}
+
+/// 벽시계 ms(소수점까지). 화면 쪽의 performance.timeOrigin + now()와 같은 시계다.
+pub(crate) fn wall_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
+/// 입력이 무엇인가 — 클로드가 마우스를 받는 동안엔 커서만 움직여도 SGR 보고가 나간다.
+/// 기록에서 휠(w)·움직임(m)·누름(c)과 그 밖(k)을 가르려고.
+pub(crate) fn input_kind(data: &[u8]) -> char {
+    let Some(rest) = data.strip_prefix(b"\x1b[<") else { return 'k' };
+    let code: u32 = rest
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .fold(0, |n, b| n * 10 + (b - b'0') as u32);
+    if code & 64 != 0 { 'w' } else if code & 32 != 0 { 'm' } else { 'c' }
 }
 
 #[derive(Clone, Serialize)]
@@ -169,9 +192,26 @@ impl OutPipe {
     }
 }
 
+/// 어느 ConPTY가 붙었나. portable-pty는 첫 PTY를 열 때 exe 옆의 conpty.dll(conpty/README.md)을
+/// 먼저 찾고, 없으면 윈도우 내장(kernel32)을 쓴다. 불러온 conpty.dll이 있으면 그 경로를 준다.
+fn conpty_in_use() -> String {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
+    let name: Vec<u16> = "conpty.dll\0".encode_utf16().collect();
+    unsafe {
+        let module = GetModuleHandleW(name.as_ptr());
+        if module.is_null() {
+            return "inbox".to_string();
+        }
+        let mut buf = [0u16; 1024];
+        let n = GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) as usize;
+        String::from_utf16_lossy(&buf[..n])
+    }
+}
+
 fn emit_output(app: &AppHandle, id: &str, generation: u64, data: &[u8]) {
     let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-    let _ = app.emit("pty-output", PtyOutput { id: id.to_string(), data: encoded, generation });
+    let sent = PTY_TRACE.load(Ordering::Relaxed).then(wall_ms);
+    let _ = app.emit("pty-output", PtyOutput { id: id.to_string(), data: encoded, generation, sent });
 }
 
 /// 새 세션 창에서 시작 전에 폴더가 있는지 본다. 네트워크 드라이브면 stat도 멈출 수
@@ -394,6 +434,9 @@ pub(crate) fn spawn_pty(
 
     let agent = trace_agent_label(&claude_cmd);
     trace(&id, &agent, "spawn", &redact_env(&claude_cmd));
+    if PTY_TRACE.load(Ordering::Relaxed) {
+        trace(&id, &agent, "conpty", &conpty_in_use());
+    }
 
     ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).insert(
         id.clone(),
@@ -505,11 +548,17 @@ pub(crate) fn spawn_pty(
     Ok(generation)
 }
 
+/// `sent`는 진단 기록이 켜져 있을 때 화면 쪽이 실어 보내는 벽시계 시각(ms) — 키가 이
+/// 명령(메인 스레드)에 닿기까지 밀린 시간을 "in" 줄에 함께 남긴다.
 #[tauri::command]
-pub(crate) fn write_pty(state: State<PtyState>, id: String, data: String) -> Result<(), String> {
+pub(crate) fn write_pty(state: State<PtyState>, id: String, data: String, sent: Option<f64>) -> Result<(), String> {
     let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(p) = map.get_mut(&id) {
-        trace(&id, &p.agent, "in", &data.len().to_string());
+        let value = match sent {
+            Some(t) => format!("{},{:.1},{}", data.len(), wall_ms() - t, input_kind(data.as_bytes())),
+            None => data.len().to_string(),
+        };
+        trace(&id, &p.agent, "in", &value);
         if let Some(a) = ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&id) {
             if is_user_input(data.as_bytes()) {
                 a.last_input = Some(std::time::Instant::now());
@@ -904,7 +953,9 @@ mod tests {
         let child = pair.slave.spawn_command(cmd).unwrap();
         drop(pair.slave);
         let cmd_pid = child.process_id().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        // 함께 배포하는 ConPTY는 터미널이 장치 속성 질의에 답할 때까지(여기선 아무도 안 답해
+        // 3초) 자식을 세워 둔다 — 그보다 오래 기다린다
+        std::thread::sleep(std::time::Duration::from_millis(4000));
 
         let alive = |name: &str| -> usize {
             let out = std::process::Command::new("tasklist").args(["/NH"]).output().unwrap();
@@ -922,6 +973,17 @@ mod tests {
         let after = alive("ping.exe");
         eprintln!("cmd.exe pid {cmd_pid} / ping 프로세스 {before}개 → {after}개");
         assert!(after < before, "손자가 살아남았다 — 다시 열면 세션에 프로세스가 하나 더 붙는다");
+    }
+
+    #[test]
+    fn input_kind_tells_wheel_motion_and_clicks_apart() {
+        assert_eq!(input_kind(b"\x1b[<64;10;5M"), 'w'); // 휠 위
+        assert_eq!(input_kind(b"\x1b[<65;10;5M"), 'w'); // 휠 아래
+        assert_eq!(input_kind(b"\x1b[<35;10;5M"), 'm'); // 버튼 없이 움직임
+        assert_eq!(input_kind(b"\x1b[<0;10;5M"), 'c');
+        assert_eq!(input_kind(b"\x1b[<0;10;5m"), 'c');
+        assert_eq!(input_kind(b"a"), 'k');
+        assert_eq!(input_kind(b"\x1b[A"), 'k');
     }
 
     /// 한산할 때의 첫 조각은 그대로 나가고(에코가 늦으면 타자가 밀린다), 그 직후
@@ -1120,5 +1182,209 @@ mod tests {
             s.matches("?2026h").count(),
             s.matches("?2026l").count()
         );
+    }
+
+    /// 실측용: 화면을 계속 다시 그리는 TUI(클로드처럼 마우스 모드·동기화 출력)에 키를 보내고,
+    /// 그 앱이 받자마자 바꾼 창 제목(OSC 0)이 마스터 쪽에 나올 때까지의 시간을 잰다.
+    /// 앱은 즉시 답하므로 이 시간은 전부 ConPTY 몫이다. 제목을 쓰는 건 ConPTY가 화면은
+    /// 바뀐 칸만 다시 그려 보내지만 제목은 통째로 넘겨서다.
+    /// DECK_FRAME_MS(다시 그리는 간격, 0이면 안 그림)·DECK_FRAME_ROWS(한 번에 그리는 줄 수).
+    /// exe 옆에 conpty.dll·OpenConsole.exe가 있으면 portable-pty가 그쪽을 쓴다 — 둘을 비교한다.
+    /// `cargo test -- --ignored conpty_input_latency --nocapture`
+    #[test]
+    #[ignore]
+    fn conpty_input_latency() {
+        let frame_ms: u64 = std::env::var("DECK_FRAME_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(33);
+        let frame_rows: u32 = std::env::var("DECK_FRAME_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(42);
+        let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        let sideloaded = exe_dir.join("conpty.dll").exists();
+        let js = r#"
+const E = '\x1b', cols = 176, rows = +process.env.DECK_FRAME_ROWS, fms = +process.env.DECK_FRAME_MS;
+process.stdin.setRawMode(true); process.stdin.resume();
+process.stdout.write(E + '[?1049h' + E + '[?1000h' + E + '[?1006h');
+let n = 0;
+process.stdin.on('data', () => { n++; process.stdout.write(E + ']0;K' + n + '\x07'); });
+let k = 0;
+function frame() {
+  let f = E + '[?2026h';
+  for (let y = 0; y < rows; y++) {
+    f += E + '[' + (1 + (y + k) % 42) + ';1H' + E + '[' + (31 + (y + k) % 7) + 'm' + ('abcdefgh' + k + ' ').repeat(16).slice(0, cols - 1);
+  }
+  f += E + '[0m' + E + '[?2026l'; k++;
+  process.stdout.write(f);
+}
+if (fms > 0) setInterval(frame, fms);
+setTimeout(() => process.exit(0), 60000);
+"#;
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 42, cols: 176, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("node");
+        cmd.args(["-e", js]);
+        cmd.env("DECK_FRAME_MS", frame_ms.to_string());
+        cmd.env("DECK_FRAME_ROWS", frame_rows.to_string());
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        // 제목 번호가 보일 때마다 그 시각을 남긴다
+        let seen: Arc<Mutex<HashMap<u32, std::time::Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (seen2, bytes2) = (seen.clone(), bytes.clone());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 65536];
+            let mut tail: Vec<u8> = Vec::new();
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 { break; }
+                let now = std::time::Instant::now();
+                bytes2.fetch_add(n, Ordering::Relaxed);
+                tail.extend_from_slice(&buf[..n]);
+                let s = String::from_utf8_lossy(&tail).to_string();
+                let mut rest = s.as_str();
+                while let Some(i) = rest.find("]0;K") {
+                    let after = &rest[i + 4..];
+                    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                    if digits.is_empty() || after.len() == digits.len() { break; }
+                    if let Ok(k) = digits.parse::<u32>() {
+                        seen2.lock().unwrap().entry(k).or_insert(now);
+                    }
+                    rest = &after[digits.len()..];
+                }
+                let keep = tail.len().saturating_sub(64);
+                tail.drain(..keep);
+            }
+        });
+        // 첫 화면이 자리 잡을 때까지 기다린 뒤 100ms마다 한 글자씩
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let b0 = bytes.load(Ordering::Relaxed);
+        let t_start = std::time::Instant::now();
+        let mut lat = Vec::new();
+        let mut lost = 0;
+        for i in 1..=60u32 {
+            let sent = std::time::Instant::now();
+            writer.write_all(b"a").unwrap();
+            let _ = writer.flush();
+            let deadline = sent + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(t) = seen.lock().unwrap().get(&i) {
+                    lat.push(t.duration_since(sent).as_secs_f64() * 1000.0);
+                    break;
+                }
+                if std::time::Instant::now() > deadline { lost += 1; break; }
+                std::thread::sleep(std::time::Duration::from_micros(300));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let kbps = (bytes.load(Ordering::Relaxed) - b0) as f64 / 1024.0 / t_start.elapsed().as_secs_f64();
+        // 가장 늦은 것이 몇 번째였나 — 첫 입력만 늦으면 ConPTY가 시작할 때 터미널 답을 기다린 것
+        let slow: Vec<usize> = lat.iter().enumerate().filter(|(_, &l)| l > 100.0).map(|(i, _)| i + 1).collect();
+        lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |p: f64| lat.get(((lat.len() as f64 - 1.0) * p) as usize).copied().unwrap_or(f64::NAN);
+        eprintln!(
+            "{} frame {}ms x{}줄  받은 출력 {:.0}KB/s  입력→반응 p50 {:.1} p90 {:.1} max {:.1} ms  (놓침 {lost}, 100ms 넘은 차례 {slow:?})",
+            if sideloaded { "conpty.dll" } else { "내장 conhost" },
+            frame_ms, frame_rows, kbps, q(0.5), q(0.9), q(1.0)
+        );
+        let _ = child.kill();
+    }
+
+    /// 실측용: 클로드가 답을 쓰는 동안 입력창에 친 글자가 화면에 돌아오기까지. 앱 탭과 같게
+    /// cmd.exe /c로 띄우고 haiku에게 숫자를 길게 세게 한다(요청이 하나 나간다). 표시 글자 Ж는
+    /// 답에 안 나오므로 그 글자 수가 늘면 에코가 온 것이다. DECK_XTVERSION=1이면 XTVERSION
+    /// 질의에 xterm.js라고 답한다 — 클로드가 xterm.js용 처리를 켜는지 비교한다.
+    /// `cargo test -- --ignored claude_echo_while_working --nocapture`
+    #[test]
+    #[ignore]
+    fn claude_echo_while_working() {
+        let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        let sideloaded = exe_dir.join("conpty.dll").exists();
+        let xtversion = std::env::var("DECK_XTVERSION").map(|v| v == "1").unwrap_or(false);
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("deck-typeahead");
+        std::fs::create_dir_all(&dir).unwrap();
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 42, cols: 160, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "claude", "--model", "haiku",
+                  "Write a 2000-word short story about a lighthouse keeper. Plain text, no tools."]);
+        cmd.cwd(&dir);
+        for (k, _) in std::env::vars() {
+            if k.starts_with("CLAUDE") || k == "AI_AGENT" {
+                cmd.env_remove(k);
+            }
+        }
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
+        let marks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (marks2, bytes2, writer2) = (marks.clone(), bytes.clone(), writer.clone());
+        let queries = Arc::new(Mutex::new(Vec::<String>::new()));
+        let queries2 = queries.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 65536];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 { break; }
+                bytes2.fetch_add(n, Ordering::Relaxed);
+                if let Ok(p) = std::env::var("DECK_DUMP") {
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+                        let _ = f.write_all(&buf[..n]);
+                    }
+                }
+                let s = String::from_utf8_lossy(&buf[..n]).to_string();
+                marks2.fetch_add(s.matches('Ж').count(), Ordering::Relaxed);
+                // 터미널 질의에 xterm처럼 답한다
+                let mut w = writer2.lock().unwrap();
+                if s.contains("\x1b[c") || s.contains("\x1b[0c") {
+                    let _ = w.write_all(b"\x1b[?1;2c");
+                    queries2.lock().unwrap().push("DA1".into());
+                }
+                if s.contains("\x1b[>q") || s.contains("\x1b[>0q") {
+                    queries2.lock().unwrap().push("XTVERSION".into());
+                    if xtversion {
+                        let _ = w.write_all(b"\x1bP>|xterm.js(6.0.0)\x1b\\");
+                    }
+                }
+            }
+        });
+        // 답을 쓰기 시작할 때까지 기다린다
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        let b0 = bytes.load(Ordering::Relaxed);
+        let t_start = std::time::Instant::now();
+        let mut lat = Vec::new();
+        let mut lost = 0;
+        for _ in 0..80 {
+            let before = marks.load(Ordering::Relaxed);
+            let sent = std::time::Instant::now();
+            {
+                let mut w = writer.lock().unwrap();
+                w.write_all("Ж".as_bytes()).unwrap();
+                let _ = w.flush();
+            }
+            let deadline = sent + std::time::Duration::from_secs(5);
+            loop {
+                if marks.load(Ordering::Relaxed) > before {
+                    lat.push(sent.elapsed().as_secs_f64() * 1000.0);
+                    break;
+                }
+                if std::time::Instant::now() > deadline { lost += 1; break; }
+                std::thread::sleep(std::time::Duration::from_micros(300));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        let kbps = (bytes.load(Ordering::Relaxed) - b0) as f64 / 1024.0 / t_start.elapsed().as_secs_f64();
+        lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |p: f64| lat.get(((lat.len() as f64 - 1.0) * p) as usize).copied().unwrap_or(f64::NAN);
+        let mut qs = queries.lock().unwrap().clone();
+        qs.dedup();
+        eprintln!(
+            "{}{} 출력 {:.0}KB/s  에코 p50 {:.1} p75 {:.1} p90 {:.1} max {:.1} ms (놓침 {lost}, 질의 {:?})",
+            if sideloaded { "conpty.dll" } else { "내장 conhost" },
+            if xtversion { " +XTVERSION" } else { "" },
+            kbps, q(0.5), q(0.75), q(0.9), q(1.0), qs
+        );
+        let _ = child.kill();
     }
 }

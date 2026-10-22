@@ -13,3 +13,21 @@
   RMDir /r "$LOCALAPPDATA\com.user.cli-deck"
   RMDir /r "$APPDATA\com.user.cli-deck"
 !macroend
+
+; 함께 배포하는 ConPTY(conpty/README.md)는 열린 탭마다 OpenConsole.exe를 띄운다. 앱이 꺼질 때
+; 같이 끝나지만, 덜 끝난 것이 남아 있으면 설치 프로그램이 그 파일을 덮어쓰지 못해 멈춘다.
+; 이 설치 폴더의 것만 끈다 — Windows Terminal·VS Code도 같은 이름의 프로세스를 띄운다.
+; 이 훅은 "앱이 떠 있나" 확인보다 먼저 돈다. 앱이 아직 떠 있으면(직접 설치를 실행한 경우) 손대지
+; 않는다 — 여기서 끄면 그 확인 창에서 취소해도 열린 탭이 이미 죽어 있다. 업데이트는 앱이 먼저 꺼진다.
+!macro DECK_STOP_OWN_OPENCONSOLE
+  nsExec::Exec `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "if (-not (Get-Process claude-deck -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq '$INSTDIR\claude-deck.exe' })) { Get-Process OpenConsole -ErrorAction SilentlyContinue | Where-Object { $$_.Path -eq '$INSTDIR\OpenConsole.exe' } | Stop-Process -Force -ErrorAction SilentlyContinue }"`
+  Pop $0
+!macroend
+
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro DECK_STOP_OWN_OPENCONSOLE
+!macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+  !insertmacro DECK_STOP_OWN_OPENCONSOLE
+!macroend
