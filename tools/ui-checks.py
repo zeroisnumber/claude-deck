@@ -83,8 +83,12 @@ def serve_ui(csp):
         def log_message(self, *a):
             pass
 
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", HTTP_PORT),
-                                          functools.partial(H, directory=os.path.join(ROOT, "ui")))
+    # 접속 대기열 기본값(5)으로는 한 페이지가 동시에 여는 파일(스크립트 7개·벤더·글꼴)을 다 못 받아
+    # 가끔 하나가 끊겼다 — 그러면 그 파일이 정의하는 것만 없는 채로 검사가 돌았다(CI에서 실측).
+    class Server(http.server.ThreadingHTTPServer):
+        request_queue_size = 128
+
+    srv = Server(("127.0.0.1", HTTP_PORT), functools.partial(H, directory=os.path.join(ROOT, "ui")))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -178,8 +182,12 @@ class Page:
         # 고정 시간만 기다리면 느린 러너나 HTTP로 띄울 때(--csp) 스크립트가 덜 올라온 채로
         # 검사가 돌아 가끔 실패했다("makeTerm is not defined", Terminal 없음). 앱이 실제로
         # 준비될 때까지 보고, 검사용 로컬 서버가 파일 하나를 놓친 경우를 위해 한 번 더 띄운다.
+        # 스크립트마다 하나씩 — 어느 파일이든 덜 올라왔으면 다시 띄운다
         ready = ("document.readyState === 'complete' && typeof Terminal === 'function' "
-                 "&& typeof makeTerm === 'function' && typeof renderSidebar === 'function'")
+                 "&& typeof b64ToBytes === 'function' && typeof renderSidebar === 'function' "
+                 "&& typeof makeTerm === 'function' && typeof adoptNewTabs === 'function' "
+                 "&& typeof loadProfiles === 'function' && typeof handleShortcut === 'function' "
+                 "&& typeof priceFor === 'function'")
         for attempt in range(2):
             self.cdp("Page.navigate", url=PAGE)
             deadline = time.time() + 15
