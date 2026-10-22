@@ -125,6 +125,48 @@ pub(crate) fn parser_for(path: &std::path::Path) -> fn(&PathBuf) -> Option<Sessi
     }
 }
 
+/// 클로드 세션의 이름을 바꾼다 — 클로드의 /rename과 같은 두 곳에 쓴다: 기록 파일 끝에
+/// custom-title 레코드 한 줄, 그리고 옆 폴더의 `<세션 id>/custom-title.json`. 그래서 클로드의
+/// /resume 목록과 이 앱의 목록에 같은 이름이 보인다(2.1.308 바이너리에서 확인한 형식).
+#[tauri::command(async)]
+pub(crate) fn rename_session(file: String, title: String) -> Result<(), String> {
+    let path = crate::session_file_in_store(&file)?;
+    let projects = dirs::home_dir().ok_or("no home dir")?.join(".claude").join("projects");
+    let projects = std::fs::canonicalize(projects).map_err(|e| e.to_string())?;
+    if !path.starts_with(&projects) || path.extension().map(|e| e != "jsonl").unwrap_or(true) {
+        return Err("클로드 세션만 이름을 바꿀 수 있습니다".into());
+    }
+    append_custom_title(&path, &title)
+}
+
+pub(crate) fn append_custom_title(path: &std::path::Path, title: &str) -> Result<(), String> {
+    use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("이름이 비어 있습니다".into());
+    }
+    let id = path.file_stem().and_then(|s| s.to_str()).ok_or("bad session file")?;
+    if !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Err("세션 id가 아닙니다".into());
+    }
+    let record = serde_json::json!({ "type": "custom-title", "customTitle": title, "sessionId": id });
+    let mut f = std::fs::OpenOptions::new().read(true).append(true).open(path).map_err(|e| e.to_string())?;
+    // 마지막 줄이 줄바꿈 없이 끝났으면 붙여 쓰지 않는다
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    let mut last = [0u8; 1];
+    let needs_newline = len > 0 && {
+        f.seek(SeekFrom::Start(len - 1)).map_err(|e| e.to_string())?;
+        f.read_exact(&mut last).map_err(|e| e.to_string())?;
+        last[0] != b'\n'
+    };
+    let line = format!("{}{}\n", if needs_newline { "\n" } else { "" }, record);
+    f.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    let dir = path.parent().ok_or("bad session file")?.join(id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("custom-title.json"), serde_json::json!({ "customTitle": title }).to_string())
+        .map_err(|e| e.to_string())
+}
+
 /// 호버 시점에만 호출 — 대개 목록 스캔이 이미 채워둔 캐시에서 바로 나온다.
 #[tauri::command(async)]
 pub(crate) fn session_preview(file: String) -> Option<SessionPreview> {
@@ -303,6 +345,7 @@ pub(crate) fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
     let mut meta = SessionMeta::new(path.file_stem()?.to_string_lossy(), "claude", path);
 
     let mut named = false; // agent-name을 봤으면 ai-title은 무시
+    let mut custom = false; // custom-title(/rename·앱의 이름 바꾸기)을 봤으면 나머지는 무시
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -319,9 +362,19 @@ pub(crate) fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
                 meta.summary = Some(s.to_string());
             }
         }
-        // 세션 이름: agent-name(사용자/피어가 정한 이름, 중복이면 "(2)")이 ai-title보다 우선.
-        // 둘 다 뒤에 나온 레코드가 최신이다.
-        if obj["type"] == "agent-name" {
+        // 세션 이름: custom-title(사람이 /rename으로 정한 이름) > agent-name(사용자/피어가 정한
+        // 이름, 중복이면 "(2)") > ai-title. 같은 종류끼리는 뒤에 나온 레코드가 최신이다.
+        if obj["type"] == "custom-title" {
+            if let Some(s) = obj["customTitle"].as_str() {
+                let s = s.trim();
+                if !s.is_empty() {
+                    meta.title = Some(s.to_string());
+                    custom = true;
+                }
+            }
+        } else if custom {
+            // 사람이 정한 이름을 자동 이름이 덮지 않는다
+        } else if obj["type"] == "agent-name" {
             if let Some(s) = obj["agentName"].as_str() {
                 let s = s.trim();
                 if !s.is_empty() {
@@ -766,6 +819,32 @@ mod tests {
             let v = list_sessions();
             eprintln!("round {round}: {} sessions in {:?}", v.len(), t0.elapsed());
         }
+    }
+
+    /// 이름 바꾸기는 클로드의 /rename과 같은 레코드·옆 파일을 쓰고, 목록은 그 이름을
+    /// 자동 이름(ai-title)보다 앞세운다 — 뒤에 ai-title이 다시 붙어도.
+    #[test]
+    fn rename_writes_custom_title_and_wins_over_ai_title() {
+        let dir = std::env::temp_dir().join(format!("deck-rename-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = "0b5c1f2e-1111-2222-3333-444455556666";
+        let file = dir.join(format!("{id}.jsonl"));
+        // 마지막 줄에 줄바꿈이 없는 경우까지
+        std::fs::write(&file, format!(
+            "{{\"type\":\"user\",\"cwd\":\"C:/x\",\"message\":{{\"content\":\"hi\"}},\"sessionId\":\"{id}\"}}\n\
+             {{\"type\":\"ai-title\",\"aiTitle\":\"자동 이름\",\"sessionId\":\"{id}\"}}"
+        )).unwrap();
+        append_custom_title(&file, "내 이름").unwrap();
+        std::fs::OpenOptions::new().append(true).open(&file).unwrap()
+            .write_all(format!("{{\"type\":\"ai-title\",\"aiTitle\":\"나중 자동\",\"sessionId\":\"{id}\"}}\n").as_bytes())
+            .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.lines().all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok()), "{text}");
+        assert_eq!(read_meta(&file).unwrap().title.as_deref(), Some("내 이름"));
+        let side = std::fs::read_to_string(dir.join(id).join("custom-title.json")).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&side).unwrap()["customTitle"], "내 이름");
+        assert!(append_custom_title(&file, "  ").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 이어 붙은 세션들이 안내문 때문에 같은 이름으로 보이던 문제.

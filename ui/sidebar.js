@@ -410,6 +410,12 @@ function showCtxMenu(e, s, itemEl) {
     ["로그 파일 열기", () => {
       invoke("open_log_file", { file: s.file }).catch((e) => showToast("⚠ 로그 열기 실패", String(e)));
     }],
+    ["세션 ID 복사", () => {
+      const cm = window.__TAURI__ && window.__TAURI__.clipboardManager;
+      Promise.resolve(cm ? cm.writeText(s.session_id) : navigator.clipboard.writeText(s.session_id))
+        .then(() => showToast("세션 ID를 복사했습니다", s.session_id))
+        .catch((e) => showToast("⚠ 복사 실패", String(e)));
+    }],
     ["세션 삭제", async () => {
       try {
         const ok = await window.__TAURI__.dialog.confirm(
@@ -463,7 +469,21 @@ function startRename(s, itemEl) {
     if (save) {
       const v = input.value.trim();
       if (!v) delete aliases[s.session_id];
-      else if (v !== original) aliases[s.session_id] = v; // 그대로 두고 나가면 별칭을 만들지 않는다
+      else if (v !== original) {
+        aliases[s.session_id] = v; // 그대로 두고 나가면 별칭을 만들지 않는다
+        // 클로드 세션은 세션 자체의 이름도 바꾼다(/rename과 같은 기록) — 클로드의 /resume
+        // 목록에도 같은 이름이 보인다. 그러면 앱 별칭은 필요 없다. 못 쓰면 별칭으로 남긴다.
+        if ((s.agent || "claude") === "claude" && s.file) {
+          invoke("rename_session", { file: s.file, title: v })
+            .then(() => {
+              s.title = v;
+              delete aliases[s.session_id];
+              localStorage.setItem("aliases", JSON.stringify(aliases));
+              renderSidebar();
+            })
+            .catch((e) => showToast("⚠ 세션 이름은 바꾸지 못했습니다", `이 앱에서만 바뀐 이름으로 보입니다 — ${e}`));
+        }
+      }
       localStorage.setItem("aliases", JSON.stringify(aliases));
     }
     renderSidebar();

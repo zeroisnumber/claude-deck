@@ -105,7 +105,8 @@ window.__TAURI__ = {
   core: { invoke: (c, a) => {
     window.__calls.push([c, a]);
     if (c === 'write_pty') window.__sent.push(a.data);
-    // 검사가 정한 답이 늘 먼저다 — 아래 기본값이 가로채지 않게
+    // 검사가 정한 답이 늘 먼저다 — 아래 기본값이 가로채지 않게. window.__rejects[c]가 있으면 실패
+    if (window.__rejects && c in window.__rejects) return Promise.reject(window.__rejects[c]);
     if (c in __REPLIES) return Promise.resolve(__REPLIES[c]);
     if (c === 'list_sessions') return Promise.resolve(__SESS);
     if (c === 'trace_enabled') return Promise.resolve(%(trace)s);
@@ -1176,8 +1177,9 @@ def sidebar_status_and_agent_filters(p):
 
 @check
 def rename_survives_rerender_and_saves_on_blur(p):
-    """이름 바꾸기 중 폴링이 입력창을 지우지 않고, 포커스를 잃으면 저장, Esc는 취소"""
-    sess = fake_sessions(2)
+    """이름 바꾸기 중 폴링이 입력창을 지우지 않고, 포커스를 잃으면 저장, Esc는 취소
+    (세션 파일에 이름을 쓰지 않는 codex — 앱 별칭만 쓰는 길)"""
+    sess = fake_sessions(2, {0: {"agent": "codex"}})
     sid = sess[0]["session_id"]
     p.load(sessions=sess)
     start = f"startRename(sessions[0], document.querySelector('.session-item[data-id=\"{sid}\"]'))"
@@ -1205,6 +1207,33 @@ def rename_survives_rerender_and_saves_on_blur(p):
 
 
 @check
+def rename_renames_the_claude_session_itself(p):
+    """클로드 세션은 세션 파일에 이름을 쓴다(/rename과 같게) — 그러면 앱 별칭은 남기지 않는다.
+    못 쓰면 별칭으로 남기고 알린다."""
+    sess = fake_sessions(2)
+    sid = sess[0]["session_id"]
+    p.load(sessions=sess)
+    start = f"startRename(sessions[0], document.querySelector('.session-item[data-id=\"{sid}\"]'))"
+    title = f"document.querySelector('.session-item[data-id=\"{sid}\"] .si-title-text').textContent"
+    p.js(start)
+    p.js("{ const i = document.querySelector('.si-rename'); i.value = '클로드 이름'; "
+         "i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})) }")
+    time.sleep(0.2)
+    assert calls(p, "rename_session") == [{"file": sess[0]["file"], "title": "클로드 이름"}], calls(p, "rename_session")
+    assert p.js(title) == "클로드 이름", p.js(title)
+    assert json.loads(store(p, "aliases")) == {}, store(p, "aliases")
+    # 쓰기에 실패하면 앱 별칭으로 남는다
+    p.js("window.__rejects = { rename_session: '잠김' }")
+    p.js(start)
+    p.js("{ const i = document.querySelector('.si-rename'); i.value = '두 번째'; "
+         "i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})) }")
+    time.sleep(0.2)
+    assert p.js(title) == "두 번째", p.js(title)
+    assert json.loads(store(p, "aliases")) == {sid: "두 번째"}, store(p, "aliases")
+    assert p.js("[...document.querySelectorAll('.toast')].some(t => t.textContent.includes('바꾸지 못했습니다'))")
+
+
+@check
 def pin_moves_to_top_and_unpin_restores(p):
     """핀 고정은 맨 위로 올리고 기억한다. 해제하면 최근 순으로 돌아간다."""
     sess = fake_sessions(3)
@@ -1226,6 +1255,18 @@ def pin_moves_to_top_and_unpin_restores(p):
     toggle_pin()
     assert rows(p) == ids, f"핀 해제 뒤 순서 {rows(p)}"
     assert json.loads(store(p, "pins")) == [], store(p, "pins")
+
+
+@check
+def context_menu_copies_session_id(p):
+    """세션 카드 우클릭 → 세션 ID 복사"""
+    sess = fake_sessions(2)
+    p.load(sessions=sess)
+    p.js("""window.__copied = []; window.__TAURI__.clipboardManager = { writeText: (t) => { window.__copied.push(t); return Promise.resolve(); } };
+      showCtxMenu({clientX: 10, clientY: 10, preventDefault() {}}, sessions[1], document.querySelector('.session-item'));
+      [...document.querySelectorAll('#ctx-menu .ctx-item')].find(d => d.textContent === '세션 ID 복사').click(); 'ok'""")
+    time.sleep(0.2)
+    assert p.js("window.__copied") == [sess[1]["session_id"]], p.js("window.__copied")
 
 
 @check

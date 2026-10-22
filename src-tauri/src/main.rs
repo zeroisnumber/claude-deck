@@ -157,6 +157,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             pty::spawn_pty,
             pty::write_pty,
+            sessions::rename_session,
             pty::resize_pty,
             pty::kill_pty,
             pty::dir_exists,
