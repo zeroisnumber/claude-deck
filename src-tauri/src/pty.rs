@@ -63,7 +63,7 @@ pub(crate) struct PtyOutput {
     pub(crate) sent: Option<f64>,
 }
 
-/// 벽시계 ms(소수점까지). 화면 쪽의 performance.timeOrigin + now()와 같은 시계다.
+/// 벽시계 ms(소수점까지). 화면 쪽의 Date.now()와 같은 시계다.
 pub(crate) fn wall_ms() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -973,6 +973,108 @@ mod tests {
         let after = alive("ping.exe");
         eprintln!("cmd.exe pid {cmd_pid} / ping 프로세스 {before}개 → {after}개");
         assert!(after < before, "손자가 살아남았다 — 다시 열면 세션에 프로세스가 하나 더 붙는다");
+    }
+
+    /// 함께 배포하는 ConPTY는 탭마다 OpenConsole.exe를 띄운다. 탭을 닫으면(자식을 끄고 PTY를
+    /// 놓으면) 그것도 끝나는가 — 안 끝나면 닫은 탭마다 프로세스가 하나씩 남는다.
+    /// conpty.dll·OpenConsole.exe를 시험 실행 파일 옆에 두고 돌린다.
+    /// DECK_LEAVE_PTY=1이면 PTY를 쥔 채 프로세스가 끝난다(업데이트로 앱이 꺼질 때) — 밖에서 센다.
+    /// `cargo test -- --ignored openconsole_exits_with_its_pty --nocapture`
+    #[test]
+    #[ignore]
+    fn openconsole_exits_with_its_pty() {
+        let mine = || -> usize {
+            let dir = std::env::current_exe().unwrap().parent().unwrap().join("OpenConsole.exe");
+            let ps = format!(
+                "@(Get-Process OpenConsole -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{}' }}).Count",
+                dir.display()
+            );
+            let out = std::process::Command::new("powershell.exe").args(["-NoProfile", "-Command", &ps]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+        };
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "ping", "-n", "60", "127.0.0.1"]);
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let running = mine();
+        if std::env::var("DECK_LEAVE_PTY").is_ok() {
+            eprintln!("PTY를 쥔 채 끝낸다 (떠 있는 것 {running}개)");
+            std::process::exit(0);
+        }
+        let _ = child.clone_killer().kill();
+        drop(child);
+        drop(pair.master);
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let after = mine();
+        eprintln!("OpenConsole {running}개 → PTY를 놓고 1초 뒤 {after}개");
+        assert!(running > 0, "OpenConsole이 안 떴다 — 시험 실행 파일 옆에 conpty.dll이 있는가");
+        assert_eq!(after, 0, "PTY를 놓았는데 OpenConsole이 남았다");
+    }
+
+    /// 넓은 글자(한글·이모지)가 ConPTY를 지나며 바뀌는가. 내장 conhost는 화면을 자기 폭 표로 다시
+    /// 그려 보내고, 함께 배포하는 ConPTY는 그대로 넘긴다 — 어느 쪽이든 글자와 그 뒤 위치가
+    /// 살아 와야 한다. 한글을 입력으로 넣어 그대로 돌아오는지도 본다.
+    /// `cargo test -- --ignored conpty_wide_text --nocapture`
+    #[test]
+    #[ignore]
+    fn conpty_wide_text() {
+        let line = "한글 입력 ⚠️ ✔️ 🥲 👍🏻 👨‍💻 🫠 끝";
+        let js = r#"
+const E = '\x1b';
+process.stdin.setRawMode(true); process.stdin.resume();
+process.stdout.write(E + '[2J' + E + '[5;1H' + process.env.DECK_LINE + E + '[5;70HEND' + E + '[7;1H');
+process.stdin.on('data', (d) => { process.stdout.write('IN[' + d.toString('utf8') + ']'); });
+setTimeout(() => process.exit(0), 8000);
+"#;
+        let sideloaded = std::env::current_exe().unwrap().parent().unwrap().join("conpty.dll").exists();
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 100, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("node");
+        cmd.args(["-e", js]);
+        cmd.env("DECK_LINE", line);
+        let _child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
+        let w2 = writer.clone();
+        let got = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let g2 = got.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 { break; }
+                if String::from_utf8_lossy(&buf[..n]).contains("\x1b[c") {
+                    let _ = w2.lock().unwrap().write_all(b"\x1b[?1;2c");
+                }
+                g2.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        writer.lock().unwrap().write_all("한글".as_bytes()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let all = String::from_utf8_lossy(&got.lock().unwrap()).to_string();
+        // 이스케이프를 걷어 보이는 글자만
+        let mut plain = String::new();
+        let mut esc = false;
+        for ch in all.chars() {
+            if esc { if ch.is_ascii_alphabetic() || ch == '~' { esc = false; } continue; }
+            if ch == '\x1b' { esc = true; continue; }
+            plain.push(ch);
+        }
+        let verbatim = all.contains(line);
+        let words_ok = ["한글", "입력", "🥲", "👨\u{200d}💻", "🫠", "끝", "END"].iter().all(|w| plain.contains(w));
+        let echo_ok = plain.contains("IN[한글]");
+        eprintln!(
+            "{}: 줄 그대로 {verbatim}, 글자 모두 {words_ok}, 한글 입력 그대로 {echo_ok}\n보인 것: {:?}",
+            if sideloaded { "conpty.dll" } else { "내장 conhost" },
+            plain.trim()
+        );
+        assert!(words_ok && echo_ok);
     }
 
     #[test]

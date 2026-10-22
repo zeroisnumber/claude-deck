@@ -116,8 +116,9 @@ let frameUntil = 0;
 let frameOutBytes = 0; // pty-output이 더한다
 let ipcOutLag = [];    // pty-output이 더한다 (ms)
 let rendererLogged = false;
-// Rust의 wall_ms()와 같은 벽시계(ms)
-const wallNow = () => performance.timeOrigin + performance.now();
+// Rust의 wall_ms()와 같은 벽시계(ms). performance.timeOrigin + now()는 단조 시계라 며칠 켜 두거나
+// 절전에서 깨면 벽시계와 벌어진다 — 1ms 단위면 16ms 기준을 가르는 데 충분하다.
+const wallNow = () => Date.now();
 function frameTick(now) {
   if (!traceOn || now > frameUntil) { frameLast = 0; return; }
   if (frameLast) frameGaps.push(now - frameLast);

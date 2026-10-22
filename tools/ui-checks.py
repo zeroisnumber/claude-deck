@@ -821,7 +821,7 @@ def delivery_delays_are_traced(p):
     p.term()
     # Rust가 80ms 전에 보낸 출력 (보낸 시각은 기록이 켜져 있을 때만 실려 온다)
     p.js(f"window.__handlers['pty-output']({{payload: {{id: 't', data: '{b64('x')}', generation: 1, "
-         f"sent: performance.timeOrigin + performance.now() - 80}}}})")
+         f"sent: Date.now() - 80}}}})")
     p.key("a", "KeyA", 65, text="a")
     sent = [c[1] for c in p.js("window.__calls") if c[0] == "write_pty"]
     assert sent and isinstance(sent[-1].get("sent"), (int, float)), sent

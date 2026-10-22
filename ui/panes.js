@@ -589,7 +589,10 @@ function makeTabDraggable(el) {
 // ---------- PTY 이벤트 ----------
 listen("pty-output", (ev) => {
   const { id, data, generation, sent } = ev.payload;
-  if (sent && ipcOutLag.length < 5000) ipcOutLag.push(wallNow() - sent);
+  if (sent && ipcOutLag.length < 5000) {
+    const lag = wallNow() - sent;
+    if (lag >= 0) ipcOutLag.push(lag); // 시계가 그 사이 맞춰졌으면 버린다
+  }
   const t = terms.get(id);
   // 다시 열거나 재시작한 탭에는 끈 프로세스가 마저 흘린 출력이 늦게 도착한다.
   // 실행 번호는 계속 커지므로, 끈 실행의 번호 이하는 버린다.
