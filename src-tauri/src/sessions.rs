@@ -448,7 +448,21 @@ pub(crate) fn read_meta(path: &PathBuf) -> Option<SessionMeta> {
             }
         }
     }
+    // 사람이 정한 이름은 옆 파일(<세션 id>/custom-title.json)이 가장 확실하다. 기록 파일은 앞뒤
+    // 512KB만 읽어서, 이름을 바꾼 뒤 대화가 더 쌓이면 custom-title 줄이 안 읽는 가운데로 밀린다.
+    // 클로드도 이 파일을 읽고, 클로드 안에서 /rename한 이름도 여기 있다.
+    if let Some(title) = custom_title_sidecar(path) {
+        meta.title = Some(title);
+    }
     Some(meta)
+}
+
+fn custom_title_sidecar(path: &std::path::Path) -> Option<String> {
+    let id = path.file_stem()?;
+    let text = std::fs::read_to_string(path.parent()?.join(id).join("custom-title.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let t = v["customTitle"].as_str()?.trim();
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 // ---------- Codex 세션 (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl) ----------
@@ -844,6 +858,15 @@ mod tests {
         let side = std::fs::read_to_string(dir.join(id).join("custom-title.json")).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&side).unwrap()["customTitle"], "내 이름");
         assert!(append_custom_title(&file, "  ").is_err());
+        // 이름을 바꾼 뒤 대화가 1MB 넘게 쌓여 custom-title 줄이 앞뒤 512KB 밖으로 밀려도
+        let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        let filler = format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{}\"}},\"sessionId\":\"{id}\"}}\n", "x".repeat(1000));
+        for _ in 0..1200 {
+            f.write_all(filler.as_bytes()).unwrap();
+        }
+        drop(f);
+        assert!(std::fs::metadata(&file).unwrap().len() > 1_100_000);
+        assert_eq!(read_meta(&file).unwrap().title.as_deref(), Some("내 이름"), "긴 세션에서 이름이 사라졌다");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
