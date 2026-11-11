@@ -399,7 +399,7 @@ pub(crate) fn scan_session_status() -> (HashMap<String, (bool, bool)>, HashMap<S
     let mut owner = HashMap::new();
     let mut latest: HashMap<String, f64> = HashMap::new();
     let mut owner_latest: HashMap<String, f64> = HashMap::new();
-    let Some(home) = dirs::home_dir() else { return (out, owner) };
+    let Some(home) = crate::paths::home_dir() else { return (out, owner) };
     let Ok(entries) = fs::read_dir(home.join(".claude").join("sessions")) else {
         return (out, owner);
     };

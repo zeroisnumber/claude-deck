@@ -12,8 +12,7 @@ pub(crate) fn install_panic_hook() {
         let msg = info.to_string();
         // WebView2도 같은 폴더(%LOCALAPPDATA%\<identifier>)에 프로필을 두므로
         // 별도 폴더를 새로 만들지 않고 거기에 합쳐서 — 삭제/관리 지점을 하나로 유지한다.
-        if let Some(dir) = dirs::data_local_dir() {
-            let log_dir = dir.join("com.user.cli-deck");
+        if let Some(log_dir) = crate::paths::data_dir() {
             if fs::create_dir_all(&log_dir).is_ok() {
                 use std::io::Write as _;
                 if let Ok(mut f) = fs::OpenOptions::new()
@@ -57,7 +56,9 @@ pub(crate) fn install_panic_hook() {
 //   in     = 사용자 입력 바이트수 (타이핑 에코를 출력과 구분하기 위해 필요)
 //            화면 쪽이 시각을 실어 보내면 "<바이트수>,<화면→여기 ms>,<종류 w휠|m움직임|c누름|k그 밖>"
 //   spawn  = 실행 명령, exit = 없음
-//   conpty = 이 탭에 붙은 ConPTY — 함께 배포한 conpty.dll의 경로, 아니면 "inbox"(윈도우 내장)
+//   resize = PTY에 알린 크기 "<칸>x<줄>" (프로세스가 없어 버려진 알림은 뒤에 "(no pty)")
+//   conpty = 붙은 ConPTY — 함께 배포한 conpty.dll의 경로, 아니면 "inbox"(윈도우 내장).
+//            시작할 때 한 번(id "app", 내장이면 이유가 붙는다: off·missing·damaged·load-failed)과 탭을 열 때마다
 //   start  = <epoch ms> (id "#") — 파일을 열 때마다 첫 줄. 벽시계 환산용 (open_trace)
 // 앱을 켤 때마다 지난 기록은 pty-trace.prev.log로 밀린다 (rotate_trace).
 /// 런타임 토글 — 설정 창의 체크박스로 켜고 끈다. 릴리스에서 컴파일로 빼버렸더니
@@ -67,7 +68,7 @@ pub(crate) static PTY_TRACE: AtomicBool = AtomicBool::new(false);
 /// 마커 파일이 있으면 재시작 후에도 켜진 상태가 유지된다 (환경변수는 그걸 설정한
 /// 셸에서 띄웠을 때만 붙어서 놓치기 쉬움)
 pub(crate) fn trace_marker_path() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("TRACE"))
+    Some(crate::paths::data_dir()?.join("TRACE"))
 }
 
 pub(crate) fn init_trace() {
@@ -87,9 +88,7 @@ pub(crate) fn init_trace() {
 #[tauri::command(async)]
 pub(crate) fn clear_diagnostics() -> Result<String, String> {
     // 기록 스레드는 파일이 사라지면 다음 배치에서 스스로 다시 연다.
-    let dir = dirs::data_local_dir()
-        .map(|d| d.join("com.user.cli-deck"))
-        .ok_or("데이터 폴더를 찾을 수 없습니다")?;
+    let dir = crate::paths::data_dir().ok_or("데이터 폴더를 찾을 수 없습니다")?;
     let mut freed = 0u64;
     let mut names: Vec<String> = Vec::new();
     for name in ["pty-trace.log", "pty-trace.prev.log", "crash.log"] {
@@ -215,12 +214,12 @@ pub(crate) static TRACE_TX: LazyLock<std::sync::mpsc::Sender<String>> = LazyLock
 });
 
 pub(crate) fn trace_log_path() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("pty-trace.log"))
+    Some(crate::paths::data_dir()?.join("pty-trace.log"))
 }
 
 /// 지난 실행(또는 이번 실행이 상한을 넘기기 전)의 기록. 그 이전 것은 지운다.
 pub(crate) fn trace_prev_path() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("pty-trace.prev.log"))
+    Some(crate::paths::data_dir()?.join("pty-trace.prev.log"))
 }
 
 /// 지금 파일을 prev로 민다. 비어 있거나 없으면 아무것도 안 한다 — 기록 없이 켰다
@@ -275,8 +274,7 @@ pub(crate) fn trace_inner(id: &str, agent: &str, kind: &str, value: &str, force:
         return;
     }
     let _ = TRACE_TX.send(format!(
-        "{}	{}	{}	{}	{}
-",
+        "{}\t{}\t{}\t{}\t{}\n",
         TRACE_START.elapsed().as_millis(),
         id,
         agent,

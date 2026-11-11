@@ -175,6 +175,11 @@ html, body {
 .set-head { display: block; margin-bottom: 9px; }
 .set-title { font-size: var(--fs-md); font-weight: 600; color: var(--text); }
 .set-hint { font-size: var(--fs-xs); color: var(--text-faint); margin-top: 3px; line-height: 1.55; }
+/* 설정 아래에 붙는 "지금 실제로는" 한 줄 (지금 붙은 ConPTY). 문제가 있을 때만 색이 든다 */
+.set-state { font-size: var(--fs-xs); color: var(--text-dim); margin-top: 8px; }
+.set-state:empty { display: none; }
+.set-state.bad { color: var(--red); }
+.set-state button { display: block; margin-top: 8px; }
 
 /* 제목 줄 오른쪽에 스위치를 두는 항목 (기능 on/off) */
 .switch-head {

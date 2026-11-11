@@ -661,6 +661,83 @@ def manual_update_check_reports_failure(p):
 
 
 @check
+def wait_toast_goes_away_when_answered(p):
+    """'입력 필요' 알림은 저절로 안 사라진다 — 알림을 누르지 않고 답해도 남아서 쌓이던 것"""
+    p.load()
+    p.term("a")
+    p.term("b")   # b를 보고 있다 (a는 뒤)
+    def state(waiting):
+        p.js(f"window.__handlers['pty-state']({{payload: {{id: 'a', working: {str(not waiting).lower()}, "
+             f"waiting: {str(waiting).lower()}, notify: false}}}})")
+        time.sleep(0.1)
+    titles = "[...document.querySelectorAll('#toasts .toast-title')].map(t => t.textContent)"
+    state(True)
+    assert p.js(titles) == ["입력 필요"], p.js(titles)
+    state(False)                      # 다른 데서 답했다 (기다림이 풀렸다)
+    assert p.js(titles) == [], f"기다림이 풀렸는데 알림이 남았다 {p.js(titles)}"
+    state(True)
+    p.js("activate('a')")             # 그 탭을 직접 봤다
+    time.sleep(0.1)
+    assert p.js(titles) == [], f"탭을 봤는데 알림이 남았다 {p.js(titles)}"
+    p.js("activate('b')")
+    state(False)
+    state(True)
+    assert p.js(titles) == ["입력 필요"], p.js(titles)
+    p.js("closeTab('a')")             # 탭을 닫았다
+    time.sleep(0.2)
+    assert p.js(titles) == [], f"닫은 탭의 알림이 남았다 {p.js(titles)}"
+
+
+@check
+def conpty_state_is_shown_and_damage_offers_reinstall(p):
+    """설정은 켜져 있는데 파일이 망가져 내장 ConPTY로 도는 것을 화면이 말해 준다
+    (0.5.28에서 아무 표시 없이 2주 넘게 그렇게 돌았다)"""
+    ok = {"version": "0.0.0", "sandbox": False, "conpty_wanted": True, "damaged": [],
+          "conpty": {"bundled": True, "reason": "", "detail": "", "path": "C:\\app\\conpty\\conpty.dll"}}
+    titles = "[...document.querySelectorAll('#toasts .toast-title')].map(t => t.textContent)"
+    state = "document.querySelector('#conpty-state')"
+    p.load(replies={"app_status": ok})
+    assert p.js(titles) == [], p.js(titles)
+    p.js("document.querySelector('#btn-settings').click()")
+    time.sleep(0.3)
+    assert "앱에 든 ConPTY 사용 중" in p.js(f"{state}.textContent"), p.js(f"{state}.textContent")
+    assert p.js("document.querySelector('#opt-conpty').checked") is True
+    assert not p.js(f"{state}.classList.contains('bad') || !!{state}.querySelector('button')")
+    # 끄고 저장하면 Rust에 남기고, 다음 실행부터라고 알린다
+    p.js("document.querySelector('#opt-conpty').checked = false; document.querySelector('#lmodal-save').click()")
+    time.sleep(0.2)
+    assert calls(p, "set_bundled_conpty") == [{"enabled": False}], calls(p, "set_bundled_conpty")
+    assert "ConPTY 설정을 바꿨습니다" in p.js(titles), p.js(titles)
+
+    bad = dict(ok, damaged=["ConPTY (conpty.dll: 체크섬 불일치)"],
+               conpty={"bundled": False, "reason": "damaged", "detail": "conpty.dll: 체크섬 불일치", "path": ""})
+    p.load(replies={"app_status": bad, "check_update": "0.0.0", "install_update": None})
+    assert p.js(titles) == ["설치 파일이 손상되었습니다"], p.js(titles)
+    time.sleep(6.5)   # 보통 알림은 6초 뒤 사라진다 — 이건 누를 때까지 남는다
+    assert p.js(titles) == ["설치 파일이 손상되었습니다"], "손상 알림이 저절로 사라졌다"
+    p.js("document.querySelector('#btn-settings').click()")
+    time.sleep(0.3)
+    assert "쓸 수 없음" in p.js(f"{state}.textContent") and p.js(f"{state}.classList.contains('bad')"), p.js(f"{state}.textContent")
+    assert p.js("document.querySelector('#opt-conpty').checked") is True, "설정은 켜져 있다 — 실제와 다를 뿐"
+    # 다시 설치: 묻고, 같은 판이어도 받게(repair) 확인한 뒤 설치한다
+    p.js(f"window.__TAURI__.dialog = {{ confirm: () => Promise.resolve(true) }}; window.__calls = []; {state}.querySelector('button').click()")
+    time.sleep(0.3)
+    names = [c[0] for c in p.js("window.__calls") if c[0] in ("check_update", "install_update")]
+    assert names == ["check_update", "install_update"], names
+    assert calls(p, "check_update")[0] == {"beta": False, "repair": True}, calls(p, "check_update")
+
+    # 꺼 뒀는데 PATH에 있는 다른 프로그램의 conpty.dll이 걸려 온 경우 — "윈도우 내장"이라고 하면 틀린다
+    stray = dict(ok, conpty_wanted=False, conpty_stray="C:\\Program Files\\WezTerm\\conpty.dll",
+                 conpty={"bundled": False, "reason": "off", "detail": "", "path": ""})
+    p.load(replies={"app_status": stray})
+    p.js("document.querySelector('#btn-settings').click()")
+    time.sleep(0.3)
+    txt = p.js(f"{state}.textContent")
+    assert "다른 프로그램의 ConPTY" in txt and "WezTerm" in txt and "다시 시작하면" not in txt, txt
+    assert p.js("document.querySelector('#opt-conpty').checked") is False
+
+
+@check
 def line_height_follows_renderer(p):
     """GPU를 끄면 블록 문자(QR 코드)가 줄마다 떨어지지 않게 줄 간격을 1로"""
     p.load()
@@ -1000,6 +1077,31 @@ def split_gutter_resizes_once_on_release(p):
     want = area["width"] * p.js("split.x")
     assert abs(a[2] - want) < 6 and p.js("split.x") < 0.45, f"폭 {a} 비율 {p.js('split.x')}"
     assert json.loads(p.js("localStorage.getItem('split')"))["x"] == p.js("split.x")
+
+
+@check
+def lost_gutter_drag_does_not_freeze_resizing(p):
+    """경계를 끌다 포인터를 놓치면(다른 창으로 넘어감) 떼는 신호가 안 온다. 그대로 굳으면 그 뒤로는
+    창·사이드바 크기를 바꿔도 PTY에 알리지 않아, 에이전트가 옛 폭으로 그린다(줄이 밀려 깨진다)"""
+    p.load()
+    for t in "ab":
+        p.term(t)
+    p.js("activate('a'); setLayout('h2')")
+    time.sleep(0.4)
+    g = p.rect("#gutter-x")
+    p.cdp("Input.dispatchMouseEvent", type="mousePressed", x=g["x"] + 2, y=g["y"] + 50, button="left", clickCount=1, buttons=1)
+    assert p.js("splitDragging") is True
+    # 떼는 신호 없이 포인터만 놓쳤다
+    p.js("document.querySelector('#gutter-x').dispatchEvent(new PointerEvent('lostpointercapture', {pointerId: 1}))")
+    assert p.js("splitDragging") is False, "포인터를 놓쳤는데 끄는 중으로 굳었다"
+    # 그 뒤의 크기 변화가 PTY에 닿는다
+    p.js("window.__calls = []; setSidebarCollapsed(true)")
+    time.sleep(0.4)
+    assert {c["id"] for c in calls(p, "resize_pty")} == {"a", "b"}, calls(p, "resize_pty")
+    # 글자 크기를 바꾸면 입력 칸만이 아니라 떠 있는 칸 모두 다시 맞춘다
+    p.js("window.__calls = []; onZoomWheel({ctrlKey: true, deltaY: -100, preventDefault() {}})")
+    time.sleep(0.2)
+    assert {c["id"] for c in calls(p, "resize_pty")} == {"a", "b"}, calls(p, "resize_pty")
 
 
 @check

@@ -120,7 +120,9 @@ const onZoomWheel = (e) => {
   localStorage.setItem("fontSize", String(fontSize));
   for (const [id, t] of terms) {
     t.term.options.fontSize = fontSize;
-    if (id === activeId) {
+    // 화면에 떠 있는 칸은 모두 다시 맞춘다 — 입력 칸만 맞추면 나눈 화면의 다른 칸은 글자만 커지고
+    // 칸 수는 그대로라 오른쪽·아래가 잘린다. 안 보이는 탭은 띄울 때 맞춘다.
+    if (isShown(id)) {
       t.fit.fit();
       invoke("resize_pty", { id, cols: t.term.cols, rows: t.term.rows });
     }
@@ -228,10 +230,42 @@ setInterval(checkUpdate, 6 * 3600 * 1000); // 6시간마다
 // 그 사이에 확인하고 싶으면 설정의 "지금 확인"을 누른다 — 폴링에 얹어 자동으로 두드리지
 // 않는다. 확인은 GitHub 릴리스의 latest.json을 받아오는 네트워크 호출이다.
 
+// ---------- 설치가 망가졌을 때 ----------
+// 설치 직후 PC가 꺼지면 앱에 든 파일이 0으로 채워진 채 남을 수 있다(실제로 겪었다 — conpty.rs).
+// 앱은 내장 ConPTY로 물러나 계속 돌지만, 아무 표시가 없으면 몇 주씩 모른 채 쓴다. 시작할 때
+// 알리고, 누르면 지금 판을 다시 설치한다(설치 프로그램이 모든 파일을 새로 쓴다).
+async function repairInstall() {
+  let ok = false;
+  try {
+    ok = await window.__TAURI__.dialog.confirm(
+      "지금 판을 다시 받아 설치합니다.\n\n열려 있는 탭의 에이전트가 종료되고 앱이 다시 시작됩니다. 대화는 다시 열면 이어집니다.",
+      { title: "다시 설치", kind: "warning" });
+  } catch { /* 창을 못 띄우면 하지 않는다 */ }
+  if (!ok) return;
+  const note = showToast("다시 설치하는 중…", "설치 파일을 받고 있습니다. 끝나면 앱이 다시 시작됩니다", null, null, true);
+  try {
+    const version = await invoke("check_update", { beta: betaUpdates, repair: true });
+    if (!version) throw new Error("받을 수 있는 설치 파일이 없습니다");
+    await invoke("install_update");
+  } catch (e) {
+    note.remove();
+    showToast("⚠ 다시 설치하지 못했습니다", `${e} — 릴리스 페이지에서 설치 파일을 받아 실행해도 됩니다`);
+  }
+}
+function warnIfInstallDamaged(st) {
+  if (!st || !Array.isArray(st.damaged) || !st.damaged.length) return;
+  // 알림 본문은 한 줄에서 잘린다 — 할 일을 앞에, 무엇이 망가졌는지는 뒤에(설정 창에 전부 나온다)
+  showToast("⚠ 설치 파일이 손상되었습니다", `누르면 다시 설치합니다 — ${st.damaged.join(", ")}`, repairInstall, "warn", true);
+}
+detach("appStatus", loadAppStatus().then(warnIfInstallDamaged));
+
 // 창 표시: WebView 로드 완료 후에 보여주고 포커스 (첫 실행 한글 IME 미연결 버그 회피)
 // 여기서 조용히 실패하면 앱이 트레이에서만 열린다. 실패는 반드시 남긴다 —
 // 못 띄웠을 때 Rust 쪽 안전망이 2.5초 뒤에 대신 띄운다.
+// 격리 실행(paths.rs — 쓰던 앱 옆에서 도는 시험)은 Rust가 뒤에서 조용히 띄운다. 여기서 앞으로
+// 가져오면 쓰던 앱에서 치고 있던 글자를 빼앗는다.
 (async () => {
+  if (window.__DECK_SANDBOX__) return;
   try {
     const w = window.__TAURI__.window.getCurrentWindow();
     await w.show();

@@ -70,7 +70,7 @@ fn tidy(p: &Path) -> String {
 /// 이 폴더가 속한 저장소의 맨 위(.git이 있는 곳). 그 폴더 자신이면 볼 필요가 없어 None.
 /// 홈 폴더에 닿으면 멈춘다(홈 전체가 저장소인 설정은 기준으로 쓰지 않는다).
 fn project_root(dir: &Path) -> Option<PathBuf> {
-    let home = dirs::home_dir();
+    let home = crate::paths::home_dir();
     for d in dir.ancestors().take(10) {
         if Some(d) == home.as_deref() {
             return None;

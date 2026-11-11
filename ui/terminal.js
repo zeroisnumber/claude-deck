@@ -479,7 +479,9 @@ function makeTerm(id, title, cwd) {
       lines.push(`${y === b.cursorY ? ">" : " "}${line ? line.translateToString(true) : ""}`);
     }
     const comp = term.element.querySelector(".composition-view");
-    uiTrace("mark", `${Math.round(performance.now())}|${id}|cursor=${b.cursorX},${b.cursorY} ` +
+    // 터미널의 지금 크기 — 기록의 마지막 resize 줄(PTY에 알린 크기)과 다르면 에이전트가 화면을
+    // 다른 폭으로 그리고 있는 것이다(줄이 밀리고 옛 줄이 사이사이 남는 깨짐)
+    uiTrace("mark", `${Math.round(performance.now())}|${id}|size=${term.cols}x${term.rows} cursor=${b.cursorX},${b.cursorY} ` +
       `ta=${JSON.stringify(term.textarea.value)} comp=${JSON.stringify(comp ? comp.textContent : "")}` +
       `${comp && comp.classList.contains("active") ? "(active)" : ""} ${imeGap()} ` +
       `lines=${JSON.stringify(lines)}`);
@@ -690,9 +692,7 @@ async function spawnInto(id, t, failLabel) {
   } catch (err) {
     hideLoading(t);
     t.exited = true;
-    t.term.write(`
-[31m${failLabel}: ${err}[0m
-`);
+    t.term.write(`\r\n\x1b[31m${failLabel}: ${err}\x1b[0m\r\n`);
     showToast(`⚠ 세션 ${failLabel}`, String(err));
     renderTabs();
     return false;

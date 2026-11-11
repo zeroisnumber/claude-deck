@@ -672,7 +672,8 @@ function statusLabel(t) {
 
 // ---------- 완료 알림 (앱 내 토스트 + OS 알림) ----------
 // kind: "wait"(사람이 답해야 함 — 호박색, 저절로 사라지지 않음) · "done"(완료 — 초록) · 없음
-function showToast(title, body, onClick, kind) {
+// sticky=true면 종류와 상관없이 누를 때까지 남는다. 띄운 요소를 돌려준다(먼저 거둘 때 쓴다).
+function showToast(title, body, onClick, kind, sticky) {
   // 제목 앞의 이모지(✋ ✻ ⚠)는 떼고, 종류는 사이드바 램프와 같은 색 점으로 보인다
   // (호박 = 입력 필요, 초록 = 끝남, 빨강 = 실패). 이모지는 글꼴마다 모양·색이 제각각이었다.
   const raw = String(title);
@@ -684,11 +685,18 @@ function showToast(title, body, onClick, kind) {
   el.querySelector(".toast-body").textContent = body;
   el.onclick = () => { el.remove(); if (onClick) onClick(); };
   $("#toasts").appendChild(el);
-  if (kind === "wait") return; // 답을 기다리는 알림은 볼 때까지 남긴다
+  if (kind === "wait" || sticky) return el; // 답을 기다리는 알림은 볼 때까지 남긴다
   setTimeout(() => {
     el.classList.add("fade");
     setTimeout(() => el.remove(), 400);
   }, 6000);
+  return el;
+}
+
+// "입력 필요" 알림은 저절로 사라지지 않는다. 알림을 누르지 않고 탭에서 바로 답하면 답한 뒤에도
+// 남아 쌓였다 — 그 탭을 보거나, 기다림이 풀리거나, 탭이 닫히면 거둔다.
+function dropWaitToast(t) {
+  if (t && t.waitToast) { t.waitToast.remove(); t.waitToast = null; }
 }
 
 function notifyDone(id, t) {
@@ -722,10 +730,12 @@ listen("pty-state", (ev) => {
   t.waiting = !!waiting;
   if (working) noteTurnStart(id);
   if (!working && !t.exited && notify !== false) notifyDone(id, t);
+  if (!t.waiting) dropWaitToast(t);
   // 권한 확인·질문으로 멈춘 세션: 보고 있지 않으면 완료 알림과 같은 방식으로 알린다
   if (t.waiting && !wasWaiting && !(isShown(id) && document.hasFocus())) {
     t.attention = true;
-    showToast("✋ 입력 필요", t.title, () => activate(id), "wait");
+    dropWaitToast(t);
+    t.waitToast = showToast("✋ 입력 필요", t.title, () => { t.waitToast = null; activate(id); }, "wait");
   }
   renderTabs();
   renderSidebar();

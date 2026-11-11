@@ -12,14 +12,14 @@ use super::*;
 // 우리 설정은 별도 파일로 두고 spawn 시 --settings 로 넘긴다.
 
 pub(crate) fn status_dir() -> Option<PathBuf> {
-    Some(dirs::data_local_dir()?.join("com.user.cli-deck").join("status"))
+    Some(crate::paths::data_dir()?.join("status"))
 }
 
 /// 사용자가 원래 쓰던 상태줄 명령 (없으면 None). 우리 자신은 걸러 재귀를 막는다.
 pub(crate) fn user_statusline_command() -> Option<String> {
     let base = std::env::var("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"));
+        .unwrap_or_else(|_| crate::paths::home_dir().unwrap_or_default().join(".claude"));
     let v: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(base.join("settings.json")).ok()?).ok()?;
     let cmd = v["statusLine"]["command"].as_str()?.trim().to_string();
@@ -139,8 +139,7 @@ pub(crate) fn statusline_rate_limits() -> Option<serde_json::Value> {
 /// --settings 로 넘기면 사용자 settings.json을 건드리지 않고 상태줄만 얹는다.
 #[tauri::command(async)]
 pub(crate) fn statusline_settings_path() -> Result<String, String> {
-    let dir = dirs::data_local_dir()
-        .map(|d| d.join("com.user.cli-deck"))
+    let dir = crate::paths::data_dir()
         .ok_or("데이터 폴더를 찾을 수 없습니다")?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;

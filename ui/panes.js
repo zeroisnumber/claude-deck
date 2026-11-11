@@ -359,10 +359,17 @@ function dragGutter(el, axis) {
       split[axis] = Math.min(0.8, Math.max(0.2, v));
       applyPanes();
     };
+    // 포인터를 놓친 채 끝나는 경우(끄는 중에 다른 창으로 넘어감 등)에는 pointerup도 pointercancel도
+    // 안 온다. 그때 splitDragging이 켜진 채 굳으면 아래 ResizeObserver가 영영 아무것도 맞추지 않아,
+    // 창이나 사이드바 크기를 바꿔도 에이전트는 옛 폭으로 그린다 — lostpointercapture로도 끝낸다.
+    let ended = false; // 이 끌기 하나의 것 — 공용 표시로 가르면 겹친 두 끌기 중 하나가 정리를 건너뛴다
     const up = () => {
+      if (ended) return; // 세 신호 가운데 둘이 겹쳐 와도 한 번만
+      ended = true;
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
       el.removeEventListener("pointercancel", up);
+      el.removeEventListener("lostpointercapture", up);
       splitDragging = false;
       localStorage.setItem("split", JSON.stringify(split));
       refitShown();
@@ -370,6 +377,7 @@ function dragGutter(el, axis) {
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
     el.addEventListener("pointercancel", up);
+    el.addEventListener("lostpointercapture", up);
   });
 }
 
@@ -410,7 +418,7 @@ function showTab(id) {
 function focusTab(id) {
   activeId = id;
   const t = terms.get(id);
-  if (t) t.attention = false;
+  if (t) { t.attention = false; dropWaitToast(t); }
   const at = panes.indexOf(id);
   if (at >= 0) focusPane = at;
   markPaneFocus();
@@ -429,6 +437,8 @@ async function closeTab(id) {
   // terms에 죽은 항목이 남아 그 세션은 사이드바에서 눌러도 "이미 열려 있음"으로
   // 처리돼 아무 일도 안 일어난다. 정리는 무조건 끝까지 간다.
   t.disposed = true;
+  dropWaitToast(t);
+  hideLoading(t);
   try { t.term.dispose(); } catch (err) { reportFatal(`term.dispose: ${err && err.stack || err}`); }
   ro.unobserve(t.container);
   t.container.remove();
@@ -711,6 +721,8 @@ listen("pty-exit", (ev) => {
   const t = terms.get(id);
   if (t) {
     t.exited = true;
+    t.waiting = false; // 끝난 프로세스는 답을 기다리지 않는다
+    dropWaitToast(t);
     hideLoading(t);
     t.term.write("\r\n\x1b[38;5;244m── 프로세스가 종료되었습니다 ──\x1b[0m\r\n");
     renderTabs();

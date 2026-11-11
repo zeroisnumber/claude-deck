@@ -33,6 +33,13 @@ window.addEventListener("unhandledrejection", (e) => {
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+// 앱 상태: 어느 판인지, 어느 ConPTY가 실제로 붙었는지, 설치 폴더가 온전한지(main.rs의 AppStatus).
+// 시작할 때 한 번 묻고(app.js) 설정 창을 열 때 다시 묻는다. 못 받으면 null.
+let appStatus = null;
+function loadAppStatus() {
+  return invoke("app_status").then((s) => (appStatus = s || null)).catch(() => (appStatus = null));
+}
+
 // 스타일시트가 <head>에서 이 스크립트보다 먼저 로드돼야 한다.
 // 배경·전경·커서·선택색은 style.css의 팔레트에서 읽는다. 값을 여기에 베껴 두면
 // 팔레트를 바꿀 때 한쪽만 바뀌어 터미널만 옛 색으로 남는다 (실제로 그렇게 됐었다).

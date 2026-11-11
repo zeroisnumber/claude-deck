@@ -34,6 +34,8 @@ UI(`ui/`)는 빌드 시 바이너리에 임베드되므로, 프런트 수정 후
 | `src-tauri/src/main.rs` | 앱 진입점, 트레이 메뉴, 명령 등록, 파일 열기·삭제 명령 |
 | `src-tauri/src/sessions.rs` | `~/.claude/projects`·`~/.codex/sessions`·`~/.gemini/tmp` 스캔, 세션 메타 캐시, 백그라운드 잡(`~/.claude/jobs`, 데몬 로스터) 연결 |
 | `src-tauri/src/pty.rs` | ConPTY 생성·입출력·종료, 출력 스트리밍 이벤트 |
+| `src-tauri/src/conpty.rs` | 함께 배포하는 ConPTY(`src-tauri/conpty/`)를 확인하고 불러온다. 무엇이 붙었는지·설치가 온전한지를 화면에 알린다 |
+| `src-tauri/src/paths.rs` | 사용자 홈과 앱 데이터 폴더. `CLI_DECK_SANDBOX`로 둘 다 임시 폴더로 옮겨 격리 실행한다 |
 | `src-tauri/src/activity.rs` | 작업 중/대기 판정(`~/.claude/sessions/<pid>.json` 우선, 출력 밀도 추정 폴백), 완료 알림, 프롬프트 캐시 유지 핑 |
 | `src-tauri/src/usage.rs` | 세션 파일 기반 사용량 통계, 요금제 한도(상태줄 → 사용량 API 순) |
 | `src-tauri/src/statusline.rs` | Claude Code 상태줄 명령으로 실행돼 세션별 상태 페이로드를 저장하는 탭 모드 |
@@ -41,8 +43,11 @@ UI(`ui/`)는 빌드 시 바이너리에 임베드되므로, 프런트 수정 후
 | `ui/*.js` | 프런트. 번들러 없는 일반 스크립트로 `index.html` 순서대로 로드되고 최상위 선언을 전역으로 함께 쓴다: `core.js`(상태·계측·도구) → `sidebar.js`(세션 목록·알림) → `terminal.js`(터미널·링크·세션 열기) → `panes.js`(탭·화면 나누기·PTY 이벤트) → `settings.js`(설정·새 세션 창) → `app.js`(단축키·업데이트) → `usage.js`(사용량). 각 파일 머리말에 맡은 일이 있다 |
 | `ui/vendor/` | xterm.js와 애드온. 수동 패치는 `ui/vendor/PATCHES.md` 참고 |
 | `tools/startup-check.js` | `index.html`의 스크립트를 그 순서대로 최상위까지 실행해 시작 시 던지는지 검사 (`node tools/startup-check.js`) |
+| `tools/app-smoke.py` | 빌드한 실제 앱을 격리해서 띄우고(쓰던 앱·탭을 건드리지 않는다) 탭 열기·ConPTY·키 입력 지연·정리를 본다 |
 
 러스트 모듈은 `use super::*`로 크레이트 루트를 공유하므로, 모듈 간에 쓰는 항목은 `pub(crate)`로 둔다. 검증은 `cd src-tauri && cargo test`, `node tools/startup-check.js`, `python tools/ui-checks.py`(크롬 + `pip install websocket-client`; 크롬이 흔한 자리에 없으면 `CHROME` 환경 변수로 경로를 준다).
+
+위 셋은 조각을 본다 — 화면은 가짜 Tauri 위에서, Rust는 단위로. 진짜 실행 파일·WebView2·ConPTY가 이어진 상태는 `npx tauri build --no-bundle` 뒤 `python tools/app-smoke.py`로 본다(`--inbox`는 윈도우 내장 ConPTY로). 릴리스 전에 한 번 돌린다. 앱을 그냥 한 번 더 띄우면 안 된다: 같은 프로필을 읽어 지난 탭을 되살리고 열려 있는 세션에 프로세스가 하나씩 더 붙는다.
 
 ## 릴리스
 

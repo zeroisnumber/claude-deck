@@ -21,13 +21,32 @@ pub const BETA_ENDPOINT: &str =
 pub struct PendingUpdate(Mutex<Option<Update>>);
 
 /// 새 판이 있으면 그 버전 문자열, 없으면 None.
+/// repair=true면 같은 판이어도 받는다 — 설치 폴더의 파일이 망가졌을 때(conpty.rs) 지금 판을
+/// 다시 설치해 고치는 길이다. 설치 프로그램이 모든 파일을 새로 쓴다.
 #[tauri::command]
 pub async fn check_update(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
     beta: bool,
+    repair: Option<bool>,
 ) -> Result<Option<String>, String> {
-    let mut builder = app.updater_builder();
+    // 격리 실행(시험)은 업데이트를 보지도 받지도 않는다
+    if crate::paths::sandbox().is_some() {
+        return Ok(None);
+    }
+    let exit_app = app.clone();
+    // 설치 프로그램을 띄운 플러그인은 곧바로 프로세스를 끝낸다(창 닫기를 거치지 않는다).
+    // 그 직전에 열린 탭의 프로세스를 창을 닫을 때와 똑같이 정리한다. 이 고리는 플러그인이 기본으로
+    // 걸어 둔 것(cleanup_before_exit — 트레이 아이콘을 거두고 창을 숨긴다)을 갈아 끼우므로 그것도
+    // 여기서 부른다. 빼먹으면 죽은 트레이 아이콘이 남고 다시 뜬 앱이 하나를 더 올린다.
+    let mut builder = app.updater_builder().on_before_exit(move || {
+        crate::kill_all_ptys(&exit_app);
+        exit_app.cleanup_before_exit();
+    });
+    if repair.unwrap_or(false) {
+        // 더 낮은 판으로 내려가지는 않는다 (베타를 쓰다 채널을 바꾼 경우)
+        builder = builder.version_comparator(|current, remote| remote.version >= current);
+    }
     if beta {
         let url = BETA_ENDPOINT.parse().map_err(|e| format!("{e}"))?;
         builder = builder.endpoints(vec![url]).map_err(|e| e.to_string())?;

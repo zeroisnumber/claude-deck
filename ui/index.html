@@ -185,6 +185,20 @@
           <div id="agent-versions" class="agent-versions"><span class="lmodal-hint">확인 중…</span></div>
         </section>
 
+        <section class="set-card">
+          <label class="set-head switch-head">
+            <div>
+              <div class="set-title">새 ConPTY 사용</div>
+              <div class="set-hint">터미널과 에이전트 사이 통로를 앱에 든 최신 ConPTY로 씁니다 — 키 입력이 덜 밀리고 화면이 반쯤 그려진 채 보이지 않습니다. 바꾸면 앱을 다시 시작할 때 적용됩니다</div>
+            </div>
+            <input type="checkbox" id="opt-conpty" class="switch" />
+          </label>
+          <div id="conpty-state" class="set-state"></div>
+          <details class="set-note"><summary>자세히</summary>
+            <div class="lmodal-note">끄면 윈도우에 내장된 것(conhost)을 씁니다. 실측으로 내장 쪽은 화면을 계속 다시 그리는 에이전트에 키 하나가 닿는 데 7~15ms가 걸리고(새 쪽 0.3ms), 화면 한 장을 묶어 보내는 신호의 순서를 지키지 않습니다. 새 쪽에서 화면이나 입력이 이상하면 꺼서 비교해 보세요. 앱에 든 파일이 망가져 있으면 켜 두어도 내장으로 돌고, 아래에 그렇게 표시됩니다.</div>
+          </details>
+        </section>
+
         <div class="set-group">세션에는 영향 없음</div>
 
         <section class="set-card">

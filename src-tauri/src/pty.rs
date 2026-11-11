@@ -192,22 +192,6 @@ impl OutPipe {
     }
 }
 
-/// 어느 ConPTY가 붙었나. portable-pty는 첫 PTY를 열 때 exe 옆의 conpty.dll(conpty/README.md)을
-/// 먼저 찾고, 없으면 윈도우 내장(kernel32)을 쓴다. 불러온 conpty.dll이 있으면 그 경로를 준다.
-fn conpty_in_use() -> String {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
-    let name: Vec<u16> = "conpty.dll\0".encode_utf16().collect();
-    unsafe {
-        let module = GetModuleHandleW(name.as_ptr());
-        if module.is_null() {
-            return "inbox".to_string();
-        }
-        let mut buf = [0u16; 1024];
-        let n = GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) as usize;
-        String::from_utf16_lossy(&buf[..n])
-    }
-}
-
 fn emit_output(app: &AppHandle, id: &str, generation: u64, data: &[u8]) {
     let encoded = base64::engine::general_purpose::STANDARD.encode(data);
     let sent = PTY_TRACE.load(Ordering::Relaxed).then(wall_ms);
@@ -335,7 +319,7 @@ pub(crate) fn kill_session_owner(id: String, pid: u32) -> Result<(), String> {
         .get(&id)
         .and_then(|a| a.session_id.clone())
         .unwrap_or(id);
-    let home = dirs::home_dir().ok_or("홈 폴더를 찾을 수 없습니다")?;
+    let home = crate::paths::home_dir().ok_or("홈 폴더를 찾을 수 없습니다")?;
     let path = home.join(".claude").join("sessions").join(format!("{pid}.json"));
     let text = fs::read_to_string(&path).map_err(|_| "그 프로세스는 이미 없습니다".to_string())?;
     let v: serde_json::Value =
@@ -366,6 +350,81 @@ pub(crate) fn kill_session_owner(id: String, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// 명령 한 줄을 cmd.exe로 돌린다.
+///
+/// 따옴표가 든 명령은 그대로 넘기면 깨진다. portable-pty는 인자 속 따옴표를 `\"`로 바꿔 적는데
+/// (C 런타임의 규칙), cmd.exe는 그 규칙을 모른다 — `claude --settings "C:\a b\s.json"`이
+/// 에이전트에는 따옴표가 붙은 채로, 경로에 공백이 있으면 두 토막으로 간다(실측: node가
+/// `"C:\...\x.js"`라는 이름의 파일을 찾았다). 그래서 따옴표가 있으면 명령을 환경 변수에 담고
+/// `cmd /c %CLI_DECK_COMMAND%`로 띄운다. cmd는 변수를 펼친 뒤에 줄을 해석하므로 프롬프트에 그대로
+/// 친 것과 같아진다(/c 뒤 문자열의 바깥 따옴표를 떼는 규칙도 펼치기 전에 적용돼 걸리지 않는다).
+/// 펼친 글자는 다시 훑지 않으므로 명령 안의 %이름%은 여기서 먼저 풀어 둔다 — cmd가 볼 것과 같은
+/// 값으로: 자식에게 넘어갈 환경(portable-pty가 레지스트리의 최신 값을 덧씌운 것)에서 찾고, %CD%는
+/// 시작 폴더다. cmd만 아는 나머지(%DATE% %TIME% %RANDOM%, %이름:~1,2% 같은 잘라 쓰기)는 따옴표가
+/// 든 명령에서는 풀리지 않고 글자 그대로 간다.
+/// 맨 앞의 `set CLI_DECK_COMMAND=&`는 그 변수를 지우고 시작하게 한다 — 에이전트와 그 자식들의
+/// 환경에 명령 전체(전역 환경변수의 값 포함)가 한 벌 더 남지 않게.
+/// 따옴표가 없는 명령은 예전 그대로 간다.
+pub(crate) fn shell_command(command: &str, cwd: &std::path::Path) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new("cmd.exe");
+    cmd.cwd(cwd);
+    if let Some(dir) = crate::paths::sandbox() {
+        // 격리 실행: 탭에서 도는 에이전트도 진짜 홈(~/.claude 등)이 아니라 격리 폴더를 홈으로 본다.
+        // 아래에서 %USERPROFILE%을 펼치기 전에 바꿔야 따옴표가 든 명령도 같은 홈을 본다. 뒤의 둘은
+        // 홈보다 앞서는 설정이다 — 레지스트리에 박혀 있으면 portable-pty가 다시 실어 주므로 여기서 뺀다.
+        cmd.env("USERPROFILE", dir.join("home"));
+        cmd.env_remove("CLAUDE_CONFIG_DIR");
+        cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
+    }
+    if command.contains('"') {
+        let expanded = expand_percent_vars(command, |name| {
+            if name.eq_ignore_ascii_case("CD") {
+                // cmd의 %CD%는 끝에 \가 없다(드라이브 뿌리만 예외). 붙은 채로 "%CD%"에 들어가면
+                // 끝의 \"가 닫는 따옴표를 삼킨다.
+                let cd = cwd.to_string_lossy();
+                let trimmed = cd.trim_end_matches(['\\', '/']);
+                return Some(match trimmed {
+                    "" => cd.into_owned(), // "\" 하나뿐인 경로 — 그대로
+                    t if t.ends_with(':') => format!("{t}\\"),
+                    t => t.to_string(),
+                });
+            }
+            cmd.get_env(name).map(|v| v.to_string_lossy().into_owned())
+        });
+        cmd.args(["/c", "%CLI_DECK_COMMAND%"]);
+        cmd.env("CLI_DECK_COMMAND", format!("set CLI_DECK_COMMAND=&{expanded}"));
+    } else {
+        cmd.args(["/c", command]);
+    }
+    cmd
+}
+
+/// `%이름%`을 lookup이 주는 값으로 바꾼다. 없는 이름은 cmd처럼 글자 그대로 둔다.
+pub(crate) fn expand_percent_vars(s: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(a) = rest.find('%') {
+        out.push_str(&rest[..a]);
+        let tail = &rest[a + 1..];
+        let value = tail
+            .find('%')
+            .filter(|&b| b > 0)
+            .and_then(|b| lookup(&tail[..b]).map(|v| (b, v)));
+        match value {
+            Some((b, v)) => {
+                out.push_str(&v);
+                rest = &tail[b + 1..];
+            }
+            None => {
+                out.push('%');
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 #[tauri::command]
 pub(crate) fn spawn_pty(
     app: AppHandle,
@@ -391,13 +450,15 @@ pub(crate) fn spawn_pty(
     // 아는데 에이전트는 홈에서 돌고, 세션 기록도 홈 프로젝트로 쌓여 탭과 짝이 안 맞는다.
     // cwd를 모르는 세션(빈 문자열)만 예전처럼 홈에서 띄운다.
     let workdir = if cwd.trim().is_empty() {
-        dirs::home_dir().unwrap_or_default().to_string_lossy().to_string()
+        crate::paths::home_dir().unwrap_or_default().to_string_lossy().to_string()
     } else if PathBuf::from(&cwd).is_dir() {
         cwd.clone()
     } else {
         return Err(format!("폴더가 없습니다: {cwd}"));
     };
 
+    // 함께 배포한 ConPTY는 첫 PTY를 열기 전에 떠 있어야 한다 (시작할 때 이미 불렀으면 바로 돌아온다)
+    crate::conpty::ensure();
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -405,9 +466,7 @@ pub(crate) fn spawn_pty(
 
     // 최종 명령은 프런트에서 합성됨: [래퍼 접두사] + 에이전트 명령 + [--resume <세션ID>]
     let claude_cmd = if command.trim().is_empty() { "claude".to_string() } else { command };
-    let mut cmd = CommandBuilder::new("cmd.exe");
-    cmd.args(["/c", &claude_cmd]);
-    cmd.cwd(&workdir);
+    let cmd = shell_command(&claude_cmd, std::path::Path::new(&workdir));
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let root_pid = child.process_id().unwrap_or(0);
@@ -435,7 +494,8 @@ pub(crate) fn spawn_pty(
     let agent = trace_agent_label(&claude_cmd);
     trace(&id, &agent, "spawn", &redact_env(&claude_cmd));
     if PTY_TRACE.load(Ordering::Relaxed) {
-        trace(&id, &agent, "conpty", &conpty_in_use());
+        // 불러오려던 것(conpty::ensure)이 아니라 이 프로세스에 실제로 떠 있는 것을 적는다
+        trace(&id, &agent, "conpty", &crate::conpty::loaded_module().unwrap_or_else(|| "inbox".into()));
     }
 
     ACTIVITY.lock().unwrap_or_else(|e| e.into_inner()).insert(
@@ -574,10 +634,17 @@ pub(crate) fn write_pty(state: State<PtyState>, id: String, data: String, sent: 
 #[tauri::command]
 pub(crate) fn resize_pty(state: State<PtyState>, id: String, cols: u16, rows: u16) -> Result<(), String> {
     let map = state.0.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(p) = map.get(&id) {
-        p.master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(|e| e.to_string())?;
+    match map.get(&id) {
+        Some(p) => {
+            // 에이전트가 화면을 실제보다 넓게(좁게) 그리는 깨짐이 있었다 — 터미널의 크기와 여기서
+            // 알린 크기를 나란히 볼 수 있게 남긴다(화면 쪽은 Ctrl+Shift+M 표시에 자기 크기를 적는다).
+            trace(&id, &p.agent, "resize", &format!("{cols}x{rows}"));
+            p.master
+                .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+                .map_err(|e| e.to_string())?;
+        }
+        // 프로세스가 아직 없거나 이미 끝났다. 띄울 때 그때의 크기를 넘기므로 잃는 것은 없다
+        None => trace(&id, "", "resize", &format!("{cols}x{rows} (no pty)")),
     }
     Ok(())
 }
@@ -599,6 +666,14 @@ pub(crate) fn kill_pty(state: State<PtyState>, id: String) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    /// 시험은 이걸로 PTY를 연다. `CLI_DECK_CONPTY_DIR=<저장소>\src-tauri\conpty`를 주고 돌리면 함께
+    /// 배포하는 ConPTY로, 안 주면 윈도우 내장으로 돈다(시험 실행 파일 옆에는 conpty 폴더가 없다).
+    /// 어느 쪽이 붙었는지는 `crate::conpty::ensure().bundled`.
+    fn test_pty() -> Box<dyn portable_pty::PtySystem + Send> {
+        crate::conpty::ensure();
+        native_pty_system()
+    }
+
     /// 탭(cmd.exe 10) 아래의 클로드(12)만 그 탭 것이다. 다른 탭(20)의 것, 고리가 생긴
     /// 번호(재사용), 모르는 번호는 아니다.
     #[test]
@@ -632,7 +707,7 @@ mod tests {
         let img = std::env::temp_dir().join("cli-deck-paste-test.png");
         let px: Vec<u8> = (0..16 * 16).flat_map(|i| [(i % 255) as u8, 80, 160, 255]).collect();
         crate::paste::write_png_for_test(&img, &px, 16, 16);
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("cmd.exe");
@@ -692,7 +767,7 @@ mod tests {
     fn new_tab_session_by_pid() {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("deck-typeahead");
         std::fs::create_dir_all(&dir).unwrap();
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("cmd.exe");
@@ -765,7 +840,7 @@ mod tests {
         // 이미 믿는 폴더(이 저장소) 안이어야 "이 폴더를 믿겠냐" 창이 안 뜬다. target은 git이 무시한다.
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("deck-typeahead");
         std::fs::create_dir_all(&dir).unwrap();
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("cmd.exe");
@@ -789,8 +864,8 @@ mod tests {
         while t0.elapsed() < std::time::Duration::from_secs(25) {
             if let Ok(c) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
                 // 터미널 질의에 답한다 (xterm처럼) — 안 하면 뜨는 게 늦어진다
-                if c.windows(3).any(|w| w == b"[c ") || String::from_utf8_lossy(&c).contains("[c") {
-                    let _ = writer.write_all(b"[?1;2c");
+                if String::from_utf8_lossy(&c).contains("\x1b[c") {
+                    let _ = writer.write_all(b"\x1b[?1;2c");
                 }
                 if c.len() > 1500 && first_big.is_none() {
                     first_big = Some(t0.elapsed().as_millis());
@@ -840,7 +915,7 @@ mod tests {
     #[test]
     #[ignore]
     fn conpty_frame_throughput() {
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 42, cols: 176, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         // 176x42 화면을 줄마다 위치를 찍고 색을 바꿔 가며 다시 그린다 — 클로드의 프레임과 비슷한 모양
@@ -896,7 +971,7 @@ mod tests {
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
         for round in 0..3 {
             let t = std::time::Instant::now();
-            let pair = native_pty_system()
+            let pair = test_pty()
                 .openpty(PtySize { rows: 42, cols: 176, pixel_width: 0, pixel_height: 0 })
                 .unwrap();
             let open_ms = ms(t);
@@ -944,7 +1019,7 @@ mod tests {
     #[test]
     #[ignore]
     fn grandchild_dies_when_the_pty_closes() {
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("cmd.exe");
@@ -977,14 +1052,17 @@ mod tests {
 
     /// 함께 배포하는 ConPTY는 탭마다 OpenConsole.exe를 띄운다. 탭을 닫으면(자식을 끄고 PTY를
     /// 놓으면) 그것도 끝나는가 — 안 끝나면 닫은 탭마다 프로세스가 하나씩 남는다.
-    /// conpty.dll·OpenConsole.exe를 시험 실행 파일 옆에 두고 돌린다.
+    /// CLI_DECK_CONPTY_DIR로 함께 배포하는 것을 가리키고 돌린다(test_pty 참고).
     /// DECK_LEAVE_PTY=1이면 PTY를 쥔 채 프로세스가 끝난다(업데이트로 앱이 꺼질 때) — 밖에서 센다.
     /// `cargo test -- --ignored openconsole_exits_with_its_pty --nocapture`
     #[test]
     #[ignore]
     fn openconsole_exits_with_its_pty() {
+        let status = crate::conpty::ensure();
+        assert!(status.bundled, "함께 배포하는 ConPTY로 돌려야 한다 (CLI_DECK_CONPTY_DIR): {status:?}");
+        let host = std::path::Path::new(&status.path).with_file_name("OpenConsole.exe");
         let mine = || -> usize {
-            let dir = std::env::current_exe().unwrap().parent().unwrap().join("OpenConsole.exe");
+            let dir = &host;
             let ps = format!(
                 "@(Get-Process OpenConsole -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{}' }}).Count",
                 dir.display()
@@ -992,7 +1070,7 @@ mod tests {
             let out = std::process::Command::new("powershell.exe").args(["-NoProfile", "-Command", &ps]).output().unwrap();
             String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
         };
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("cmd.exe");
@@ -1011,7 +1089,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1000));
         let after = mine();
         eprintln!("OpenConsole {running}개 → PTY를 놓고 1초 뒤 {after}개");
-        assert!(running > 0, "OpenConsole이 안 떴다 — 시험 실행 파일 옆에 conpty.dll이 있는가");
+        assert!(running > 0, "OpenConsole이 안 떴다");
         assert_eq!(after, 0, "PTY를 놓았는데 OpenConsole이 남았다");
     }
 
@@ -1030,8 +1108,8 @@ process.stdout.write(E + '[2J' + E + '[5;1H' + process.env.DECK_LINE + E + '[5;7
 process.stdin.on('data', (d) => { process.stdout.write('IN[' + d.toString('utf8') + ']'); });
 setTimeout(() => process.exit(0), 8000);
 "#;
-        let sideloaded = std::env::current_exe().unwrap().parent().unwrap().join("conpty.dll").exists();
-        let pair = native_pty_system()
+        let sideloaded = crate::conpty::ensure().bundled;
+        let pair = test_pty()
             .openpty(PtySize { rows: 24, cols: 100, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("node");
@@ -1100,8 +1178,8 @@ setTimeout(() => process.exit(0), 12000);
             ("paste", b"\x1b[200~hi\x1b[201~"),
             ("Enter", b"\r"),
         ];
-        let sideloaded = std::env::current_exe().unwrap().parent().unwrap().join("conpty.dll").exists();
-        let pair = native_pty_system()
+        let sideloaded = crate::conpty::ensure().bundled;
+        let pair = test_pty()
             .openpty(PtySize { rows: 24, cols: 100, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("node");
@@ -1134,6 +1212,140 @@ setTimeout(() => process.exit(0), 12000);
             let recv: Vec<&str> = s.split("GOT").skip(1).map(|x| x.split('\r').next().unwrap_or("")).collect();
             eprintln!("  {name:<10} 보냄 {:<24} 받음 {}", format!("{:?}", String::from_utf8_lossy(bytes)), recv.join(" "));
         }
+    }
+
+    /// 명령을 띄운 그대로 돌려 본다(탭이 띄우는 길과 같다): 화면에 찍힌 것을 `마지막 표시`까지 모은다.
+    fn run_in_pty(command: &str, cwd: &std::path::Path, until: &str) -> String {
+        let pair = test_pty()
+            .openpty(PtySize { rows: 24, cols: 200, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut child = pair.slave.spawn_command(shell_command(command, cwd)).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() { break; }
+            }
+        });
+        let mut seen = String::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline && !seen.contains(until) {
+            if let Ok(c) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                let s = String::from_utf8_lossy(&c).to_string();
+                // 함께 배포하는 ConPTY는 터미널의 답을 기다린다 — xterm처럼 답한다
+                if s.contains("\x1b[c") {
+                    let _ = writer.write_all(b"\x1b[?1;2c");
+                }
+                seen.push_str(&s);
+            }
+        }
+        let _ = child.kill();
+        seen
+    }
+
+    /// 따옴표가 든 명령이 프롬프트에 친 것과 똑같이 풀리는가. 가장 까다로운 모양으로 본다:
+    /// 공백이 든 경로의 실행 파일을 따옴표로 감싸 맨 앞에 두고, 인자에도 따옴표·공백·%변수%가 있다.
+    /// 예전에는 에이전트가 따옴표 붙은 인자를 받거나(`"C:\a\b.json"`) 인자가 공백에서 쪼개졌다.
+    #[test]
+    fn quoted_commands_reach_the_program_intact() {
+        let dir = std::env::temp_dir().join(format!("deck cmd test {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("argv.cmd");
+        // 여섯째 칸: 명령을 담아 온 변수가 프로그램의 환경에는 남아 있지 않다
+        std::fs::write(&script, "@echo off\r\necho [%~1][%~2][%~3][%~4][%~5][%CLI_DECK_COMMAND%]END\r\n").unwrap();
+        std::env::set_var("DECK_TEST_VAR", "from env");
+        let command = format!("\"{}\" \"a b\" c \"%DECK_TEST_VAR%\" 100%done \"%CD%\"", script.display());
+        let seen = run_in_pty(&command, &dir, "END");
+        let _ = std::fs::remove_dir_all(&dir);
+        let want = format!("[a b][c][from env][100%done][{}][]END", dir.display());
+        assert!(seen.contains(&want), "{want:?} 가 없다: {seen:?}");
+    }
+
+    /// 상태줄 연동은 클로드를 `--settings "<경로>"`로 띄운다. 공백이 든 경로를 따옴표로 감싸 넘겼을 때
+    /// 클로드가 그 설정을 읽어 상태줄 명령을 실제로 부르는가(부르면 표시 파일이 생긴다).
+    /// 제출하지 않으므로 요청은 나가지 않는다.
+    /// `cargo test -- --ignored claude_accepts_quoted_settings_path --nocapture`
+    #[test]
+    #[ignore]
+    fn claude_accepts_quoted_settings_path() {
+        let cwd = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("deck-typeahead");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let dir = std::env::temp_dir().join(format!("deck settings test {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("marker.txt");
+        let tap = dir.join("tap.cmd");
+        std::fs::write(&tap, "@echo off\r\necho tapped> \"%~dp0marker.txt\"\r\necho deck-status\r\n").unwrap();
+        let settings = dir.join("s.json");
+        let cfg = serde_json::json!({ "statusLine": { "type": "command", "command": format!("\"{}\"", tap.display()) } });
+        std::fs::write(&settings, cfg.to_string()).unwrap();
+
+        let pair = test_pty()
+            .openpty(PtySize { rows: 30, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = shell_command(&format!("claude --settings \"{}\"", settings.display()), &cwd);
+        for (k, _) in std::env::vars() {
+            if k.starts_with("CLAUDE") || k == "AI_AGENT" {
+                cmd.env_remove(k);
+            }
+        }
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() { break; }
+            }
+        });
+        let t0 = std::time::Instant::now();
+        let mut screen = Vec::new();
+        while t0.elapsed() < std::time::Duration::from_secs(25) && !marker.exists() {
+            if let Ok(c) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                if String::from_utf8_lossy(&c).contains("\x1b[c") {
+                    let _ = writer.write_all(b"\x1b[?1;2c");
+                }
+                screen.extend_from_slice(&c);
+            }
+        }
+        let tapped = marker.exists();
+        let _ = child.kill();
+        let text = String::from_utf8_lossy(&screen);
+        let plain: String = text.chars().filter(|c| c.is_alphanumeric() || " #[]._-\\:\"".contains(*c)).collect();
+        let tail: String = plain.chars().rev().take(500).collect::<Vec<_>>().into_iter().rev().collect();
+        eprintln!("상태줄 명령이 불림: {tapped} ({}ms)\n화면 끝: {tail}", t0.elapsed().as_millis());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(tapped, "따옴표로 감싼 설정 경로를 클로드가 읽지 못했다");
+    }
+
+    /// 따옴표가 없는 명령은 예전 길 그대로 — 환경 변수에 담지 않는다.
+    #[test]
+    fn plain_commands_are_passed_as_before() {
+        let here = std::path::Path::new("C:\\work");
+        let cmd = shell_command("set A=1&&claude --resume abc", here);
+        assert_eq!(cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                   ["cmd.exe", "/c", "set A=1&&claude --resume abc"]);
+        assert!(cmd.get_env("CLI_DECK_COMMAND").is_none());
+        let quoted = shell_command("claude --settings \"C:\\a b\\s.json\" --add-dir %cd%", here);
+        assert_eq!(quoted.get_argv()[2].to_string_lossy(), "%CLI_DECK_COMMAND%");
+        assert_eq!(quoted.get_env("CLI_DECK_COMMAND").unwrap().to_string_lossy(),
+                   "set CLI_DECK_COMMAND=&claude --settings \"C:\\a b\\s.json\" --add-dir C:\\work");
+        // %CD%는 cmd처럼 끝의 \ 없이 (새 세션 창은 "C:\work\"도 받는다). 드라이브 뿌리는 \가 남는다
+        let cd = |dir: &str| {
+            let c = shell_command("x \"%CD%\"", std::path::Path::new(dir));
+            c.get_env("CLI_DECK_COMMAND").unwrap().to_string_lossy().into_owned()
+        };
+        assert_eq!(cd("C:\\work\\"), "set CLI_DECK_COMMAND=&x \"C:\\work\"");
+        assert_eq!(cd("C:\\"), "set CLI_DECK_COMMAND=&x \"C:\\\"");
+        // 없는 변수와 짝이 안 맞는 %는 글자 그대로
+        assert_eq!(expand_percent_vars("a %NO_SUCH_DECK_VAR% 50% b%", |_| None), "a %NO_SUCH_DECK_VAR% 50% b%");
+        // 값은 넘겨받은 환경에서 온다(앱이 뜬 뒤 바뀐 값도 자식이 보는 그대로). 펼친 값은 다시 훑지 않는다
+        let env = |name: &str| (name == "X").then(|| "%Y% 100%".to_string());
+        assert_eq!(expand_percent_vars("%X% %Y% %X%", env), "%Y% 100% %Y% %Y% 100%");
     }
 
     #[test]
@@ -1213,7 +1425,7 @@ setTimeout(() => process.exit(0), 12000);
     /// 실제로 곧바로 돌아오는지 검증한다.
     #[test]
     fn child_wait_returns_when_process_exits() {
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("cmd.exe");
@@ -1241,14 +1453,14 @@ setTimeout(() => process.exit(0), 12000);
         );
     }
 
-    /// 실측용: 실행 직후 첫 출력까지 걸리는 시간. 사이드로드한 conpty.dll이 탭 여는
+    /// 실측용: 실행 직후 첫 출력까지 걸리는 시간. 함께 배포하는 ConPTY가 탭 여는
     /// 속도를 늦추는지 본다. `cargo test -- --ignored conpty_first_output --nocapture`
     #[test]
     #[ignore]
     fn conpty_first_output() {
         for round in 0..3 {
             let t0 = std::time::Instant::now();
-            let pair = native_pty_system()
+            let pair = test_pty()
                 .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
                 .unwrap();
             let opened = t0.elapsed().as_millis();
@@ -1296,7 +1508,7 @@ setTimeout(() => process.exit(0), 12000);
     #[test]
     #[ignore]
     fn conpty_sync_output() {
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let ps = "$e=[char]27; $l=('#'*110); \
@@ -1350,15 +1562,14 @@ setTimeout(() => process.exit(0), 12000);
     /// 앱은 즉시 답하므로 이 시간은 전부 ConPTY 몫이다. 제목을 쓰는 건 ConPTY가 화면은
     /// 바뀐 칸만 다시 그려 보내지만 제목은 통째로 넘겨서다.
     /// DECK_FRAME_MS(다시 그리는 간격, 0이면 안 그림)·DECK_FRAME_ROWS(한 번에 그리는 줄 수).
-    /// exe 옆에 conpty.dll·OpenConsole.exe가 있으면 portable-pty가 그쪽을 쓴다 — 둘을 비교한다.
+    /// CLI_DECK_CONPTY_DIR를 주면 함께 배포하는 ConPTY로 돈다(test_pty) — 둘을 비교한다.
     /// `cargo test -- --ignored conpty_input_latency --nocapture`
     #[test]
     #[ignore]
     fn conpty_input_latency() {
         let frame_ms: u64 = std::env::var("DECK_FRAME_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(33);
         let frame_rows: u32 = std::env::var("DECK_FRAME_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(42);
-        let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
-        let sideloaded = exe_dir.join("conpty.dll").exists();
+        let sideloaded = crate::conpty::ensure().bundled;
         let js = r#"
 const E = '\x1b', cols = 176, rows = +process.env.DECK_FRAME_ROWS, fms = +process.env.DECK_FRAME_MS;
 process.stdin.setRawMode(true); process.stdin.resume();
@@ -1377,7 +1588,7 @@ function frame() {
 if (fms > 0) setInterval(frame, fms);
 setTimeout(() => process.exit(0), 60000);
 "#;
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 42, cols: 176, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("node");
@@ -1457,12 +1668,11 @@ setTimeout(() => process.exit(0), 60000);
     #[test]
     #[ignore]
     fn claude_echo_while_working() {
-        let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
-        let sideloaded = exe_dir.join("conpty.dll").exists();
+        let sideloaded = crate::conpty::ensure().bundled;
         let xtversion = std::env::var("DECK_XTVERSION").map(|v| v == "1").unwrap_or(false);
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("deck-typeahead");
         std::fs::create_dir_all(&dir).unwrap();
-        let pair = native_pty_system()
+        let pair = test_pty()
             .openpty(PtySize { rows: 42, cols: 160, pixel_width: 0, pixel_height: 0 })
             .unwrap();
         let mut cmd = CommandBuilder::new("cmd.exe");

@@ -194,7 +194,47 @@ function saveOpenRules() {
   localStorage.setItem("openRules", JSON.stringify(openRules.map(({ exts, how }) => ({ exts, how }))));
 }
 
+// "새 ConPTY 사용" 아래의 한 줄: 설정값이 아니라 지금 실제로 붙어 있는 것. 설정은 켜져 있는데
+// 파일이 망가져 내장으로 도는 경우를 여기서 알 수 있다(그때는 다시 설치 단추가 붙는다).
+function renderConptyState() {
+  const el = $("#conpty-state");
+  el.textContent = "";
+  el.classList.remove("bad");
+  const st = appStatus;
+  if (!st || !st.conpty) return;
+  const c = st.conpty;
+  let text;
+  if (c.bundled) text = "지금: 앱에 든 ConPTY 사용 중";
+  else if (c.reason === "off") text = "지금: 윈도우 내장 사용 중 (꺼 둠)";
+  else {
+    text = `지금: 윈도우 내장으로 돌고 있습니다 — 앱에 든 파일을 쓸 수 없음 (${c.detail || c.reason})`;
+    el.classList.add("bad");
+  }
+  // 앱에 든 것을 안 쓸 때 PATH에 있는 다른 프로그램의 conpty.dll이 걸려 올 수 있다(첫 탭을 열 때)
+  if (st.conpty_stray) {
+    text = `지금: 다른 프로그램의 ConPTY가 붙어 있습니다 (${st.conpty_stray})` +
+      (c.reason === "off" ? " — 꺼 두면 윈도우가 이름으로 찾은 것을 씁니다" : ` — 앱에 든 파일을 쓸 수 없음 (${c.detail || c.reason})`);
+    el.classList.add("bad");
+  }
+  if (st.conpty_wanted !== (c.bundled || c.reason !== "off")) text += " · 다시 시작하면 바뀝니다";
+  el.textContent = text;
+  if (Array.isArray(st.damaged) && st.damaged.length) {
+    const b = document.createElement("button");
+    b.className = "btn-ghost btn-sm";
+    b.textContent = "다시 설치";
+    b.onclick = repairInstall;
+    el.append(" ", b);
+  }
+}
+
 $("#btn-settings").onclick = () => {
+  // 지금 값으로 먼저 그리고, 새로 물은 답이 오면 고친다
+  $("#opt-conpty").checked = !appStatus || appStatus.conpty_wanted !== false;
+  renderConptyState();
+  loadAppStatus().then(() => {
+    $("#opt-conpty").checked = !appStatus || appStatus.conpty_wanted !== false;
+    renderConptyState();
+  });
   $("#profile-list").innerHTML = "";
   profiles.forEach((p, i) => addProfileRow(p.name, p.cmd, p.resume !== false, i === activeProfile));
   $("#global-env").value = globalEnv;
@@ -409,6 +449,14 @@ $("#lmodal-save").onclick = () => {
   webglOn = $("#opt-webgl").checked;
   localStorage.setItem("webgl", webglOn ? "1" : "0");
   if (webglOn !== webglWas) applyRenderer();
+  // ConPTY는 프로세스가 뜰 때 한 번 불러오므로 바꾼 값은 다음 실행부터다
+  const conptyWant = $("#opt-conpty").checked;
+  if (appStatus && conptyWant !== (appStatus.conpty_wanted !== false)) {
+    appStatus.conpty_wanted = conptyWant;
+    invoke("set_bundled_conpty", { enabled: conptyWant })
+      .then(() => showToast("ConPTY 설정을 바꿨습니다", "앱을 다시 시작하면 적용됩니다"))
+      .catch((e) => showToast("⚠ ConPTY 설정을 바꾸지 못했습니다", String(e)));
+  }
   saveOpenRules();
   const betaWas = betaUpdates;
   betaUpdates = $("#opt-beta").checked;

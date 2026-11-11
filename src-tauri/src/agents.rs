@@ -149,7 +149,7 @@ fn latest_version(package: &str, channel: &str) -> Option<String> {
 
 /// 클로드가 따르는 채널. 설정에 없으면 latest다.
 fn claude_channel() -> String {
-    dirs::home_dir()
+    crate::paths::home_dir()
         .and_then(|h| fs::read_to_string(h.join(".claude").join("settings.json")).ok())
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|v| v["autoUpdatesChannel"].as_str().map(|s| s.to_string()))
@@ -306,7 +306,7 @@ pub(crate) fn agent_changelog(name: String, from: String, to: String) -> Result<
 /// 긴 판(수만 자)은 1분 넘게 걸릴 수 있어 3분까지 기다린다.
 #[tauri::command(async)]
 pub(crate) fn translate_changelog(name: String, version: String, text: String) -> Result<String, String> {
-    let base = dirs::data_local_dir().ok_or("앱 폴더를 찾을 수 없습니다")?.join("com.user.cli-deck").join("translate");
+    let base = crate::paths::data_dir().ok_or("앱 폴더를 찾을 수 없습니다")?.join("translate");
     let cache = base.join("cache");
     fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
     let safe: String = format!("{name}-{version}")

@@ -75,7 +75,7 @@ pub(crate) fn project_root(cwd: &str) -> String {
     if let Some(r) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(cwd) {
         return r.clone();
     }
-    let home = dirs::home_dir();
+    let home = crate::paths::home_dir();
     let mut found = cwd.to_string();
     let mut dir = Some(std::path::Path::new(cwd));
     while let Some(d) = dir {
@@ -131,7 +131,7 @@ pub(crate) fn parser_for(path: &std::path::Path) -> fn(&PathBuf) -> Option<Sessi
 #[tauri::command(async)]
 pub(crate) fn rename_session(file: String, title: String) -> Result<(), String> {
     let path = crate::session_file_in_store(&file)?;
-    let projects = dirs::home_dir().ok_or("no home dir")?.join(".claude").join("projects");
+    let projects = crate::paths::home_dir().ok_or("no home dir")?.join(".claude").join("projects");
     let projects = std::fs::canonicalize(projects).map_err(|e| e.to_string())?;
     if !path.starts_with(&projects) || path.extension().map(|e| e != "jsonl").unwrap_or(true) {
         return Err("클로드 세션만 이름을 바꿀 수 있습니다".into());
@@ -165,6 +165,15 @@ pub(crate) fn append_custom_title(path: &std::path::Path, title: &str) -> Result
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("custom-title.json"), serde_json::json!({ "customTitle": title }).to_string())
         .map_err(|e| e.to_string())
+}
+
+/// 세션을 지울 때 이름 파일(`<세션 id>\custom-title.json`)도 치운다. 그 폴더에는 클로드가 둔 다른
+/// 것(도구 결과 등)이 있을 수 있어 이름 파일만 지우고, 폴더는 비었을 때만 지운다.
+pub(crate) fn remove_title_sidecar(session_file: &std::path::Path) {
+    let (Some(dir), Some(id)) = (session_file.parent(), session_file.file_stem()) else { return };
+    let side = dir.join(id);
+    let _ = std::fs::remove_file(side.join("custom-title.json"));
+    let _ = std::fs::remove_dir(&side); // 비어 있지 않으면 실패한다 — 그대로 둔다
 }
 
 /// 호버 시점에만 호출 — 대개 목록 스캔이 이미 채워둔 캐시에서 바로 나온다.
@@ -548,7 +557,7 @@ pub(crate) fn read_codex_meta(path: &PathBuf) -> Option<SessionMeta> {
 }
 
 pub(crate) fn scan_codex(out: &mut Vec<SessionMeta>) {
-    let Some(home) = dirs::home_dir() else { return };
+    let Some(home) = crate::paths::home_dir() else { return };
     let root = home.join(".codex").join("sessions");
     let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
@@ -618,7 +627,7 @@ pub(crate) fn read_gemini_meta(path: &PathBuf) -> Option<SessionMeta> {
 }
 
 pub(crate) fn scan_gemini(out: &mut Vec<SessionMeta>) {
-    let Some(home) = dirs::home_dir() else { return };
+    let Some(home) = crate::paths::home_dir() else { return };
     let proj_map = gemini_project_paths(&home);
     let root = home.join(".gemini").join("tmp");
     let Ok(projects) = fs::read_dir(&root) else { return };
@@ -652,7 +661,7 @@ pub(crate) struct BgInfo {
 
 pub(crate) fn scan_bg_jobs() -> HashMap<String, BgInfo> {
     let mut out: HashMap<String, BgInfo> = HashMap::new();
-    let Some(home) = dirs::home_dir() else { return out };
+    let Some(home) = crate::paths::home_dir() else { return out };
 
     // 살아 있는 워커만 로스터에 남는다. 포크 출처(원본 세션)도 여기서만 알 수 있다.
     // launch.sessionId는 fork=true일 때만 원본이다. 데몬이 자기 세션을 다시 띄운
@@ -713,7 +722,7 @@ pub(crate) fn list_sessions() -> Vec<SessionMeta> {
     let mut out = Vec::new();
     scan_codex(&mut out);
     scan_gemini(&mut out);
-    let Some(home) = dirs::home_dir() else { return out };
+    let Some(home) = crate::paths::home_dir() else { return out };
     let projects = home.join(".claude").join("projects");
     let Ok(dirs_iter) = fs::read_dir(&projects) else { return out };
 
@@ -867,6 +876,15 @@ mod tests {
         drop(f);
         assert!(std::fs::metadata(&file).unwrap().len() > 1_100_000);
         assert_eq!(read_meta(&file).unwrap().title.as_deref(), Some("내 이름"), "긴 세션에서 이름이 사라졌다");
+        // 세션을 지우면 이름 파일도 치운다. 폴더에 클로드의 다른 것이 있으면 그건 남긴다.
+        let side = dir.join(id);
+        std::fs::write(side.join("other.txt"), "x").unwrap();
+        remove_title_sidecar(&file);
+        assert!(!side.join("custom-title.json").exists() && side.join("other.txt").exists());
+        std::fs::remove_file(side.join("other.txt")).unwrap();
+        append_custom_title(&file, "다시").unwrap();
+        remove_title_sidecar(&file);
+        assert!(!side.exists(), "이름 파일만 있던 폴더가 남았다");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -893,7 +911,7 @@ mod codex_dump {
     #[test]
     #[ignore]
     fn codex_model() {
-        let home = dirs::home_dir().unwrap();
+        let home = crate::paths::home_dir().unwrap();
         let root = home.join(".codex").join("sessions");
         let mut files = Vec::new();
         let mut stack = vec![root];

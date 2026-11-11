@@ -609,7 +609,7 @@ pub(crate) fn strip_verbatim(p: &str) -> String {
 
 /// ~/.codex/sessions 아래의 rollout 파일 전부
 pub(crate) fn codex_rollout_files() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else { return vec![] };
+    let Some(home) = crate::paths::home_dir() else { return vec![] };
     let mut out = Vec::new();
     let mut stack = vec![home.join(".codex").join("sessions")];
     while let Some(d) = stack.pop() {
@@ -637,7 +637,7 @@ pub(crate) fn usage_stats(days: u32) -> Vec<UsageRow> {
     let mut all_entries: Vec<UsageEntry> = Vec::new();
     // 파일 사이 중복 제거용 — 포크가 복사해 온 응답을 두 번 세지 않기 위해
     let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let Some(home) = dirs::home_dir() else { return vec![] };
+    let Some(home) = crate::paths::home_dir() else { return vec![] };
     let projects = home.join(".claude").join("projects");
     // days=0은 전체 기간 — 파일을 mtime으로 거르지 않는다
     let cutoff = if days == 0 {
@@ -745,7 +745,7 @@ pub(crate) fn oauth_token() -> Option<String> {
     }
     let base = std::env::var("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs::home_dir().unwrap_or_default().join(".claude"));
+        .unwrap_or_else(|_| crate::paths::home_dir().unwrap_or_default().join(".claude"));
     let creds: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(base.join(".credentials.json")).ok()?).ok()?;
     let oauth = &creds["claudeAiOauth"];
@@ -831,7 +831,7 @@ pub(crate) fn chrono_now_iso() -> String {
 // ---------- Codex 상태 (rollout 파일의 token_count 이벤트에서 로컬로 추출) ----------
 
 pub(crate) fn codex_rollouts_by_mtime() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else { return vec![] };
+    let Some(home) = crate::paths::home_dir() else { return vec![] };
     let mut files: Vec<(f64, PathBuf)> = Vec::new();
     let mut stack = vec![home.join(".codex").join("sessions")];
     while let Some(dir) = stack.pop() {
@@ -911,7 +911,7 @@ mod tests {
     #[test]
     #[ignore]
     fn real_turns_prefilter() {
-        let home = dirs::home_dir().unwrap();
+        let home = crate::paths::home_dir().unwrap();
         let mut files: Vec<_> = std::fs::read_dir(home.join(".claude").join("projects"))
             .unwrap()
             .flatten()

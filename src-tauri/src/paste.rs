@@ -9,9 +9,8 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 /// 기록과 같은 앱 폴더). 하루 지난 것은 앱을 켤 때와 저장할 때마다 치운다 — 클로드는
 /// 붙여넣는 순간 이미지를 대화 기록에 담으므로 파일이 지워져도 세션은 멀쩡하다.
 fn paste_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("com.user.cli-deck")
+    crate::paths::data_dir()
+        .unwrap_or_else(|| std::env::temp_dir().join(crate::paths::APP_ID))
         .join("paste")
 }
 

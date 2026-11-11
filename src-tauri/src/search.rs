@@ -180,7 +180,7 @@ mod tests {
     #[test]
     #[ignore]
     fn real_search() {
-        let home = dirs::home_dir().unwrap();
+        let home = crate::paths::home_dir().unwrap();
         let mut files = Vec::new();
         for proj in std::fs::read_dir(home.join(".claude").join("projects")).unwrap().flatten() {
             for f in std::fs::read_dir(proj.path()).into_iter().flatten().flatten() {

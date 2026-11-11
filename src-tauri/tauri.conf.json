@@ -30,9 +30,9 @@
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "createUpdaterArtifacts": true,
     "resources": {
-      "conpty/conpty.dll": "conpty.dll",
-      "conpty/OpenConsole.exe": "OpenConsole.exe",
-      "conpty/LICENSE": "conpty-LICENSE.txt"
+      "conpty/conpty.dll": "conpty/conpty.dll",
+      "conpty/OpenConsole.exe": "conpty/OpenConsole.exe",
+      "conpty/LICENSE": "conpty/LICENSE.txt"
     },
     "windows": {
       "nsis": {
